@@ -5,7 +5,6 @@ install_user/
 package/
 package_user/
 host-tools/
-third_party/cv184x/
 *.tar.gz
 *.log
 validation_out/
