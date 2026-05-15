@@ -1,0 +1,8 @@
+build/
+install/
+package/
+host-tools/
+third_party/cv184x/
+*.tar.gz
+*.log
+validation_out/
