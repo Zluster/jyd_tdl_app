@@ -21,12 +21,25 @@ void setError(std::string *error, const std::string &message) {
 class VisionPipeline::Impl {
  public:
   void setSource(std::unique_ptr<FrameSource> source) {
+    if (opened_) {
+      close();
+    }
     source_ = std::move(source);
   }
 
-  void setModel(std::shared_ptr<NnBase> model) { model_ = std::move(model); }
+  void setModel(std::shared_ptr<NnBase> model) {
+    if (opened_) {
+      close();
+    }
+    model_ = std::move(model);
+  }
 
-  void setSink(std::unique_ptr<FrameSink> sink) { sink_ = std::move(sink); }
+  void setSink(std::unique_ptr<FrameSink> sink) {
+    if (opened_) {
+      close();
+    }
+    sink_ = std::move(sink);
+  }
 
   bool open(std::string *error) {
     if (!source_) {
@@ -45,6 +58,7 @@ class VisionPipeline::Impl {
       return false;
     }
     if (sink_ && !sink_->open(error)) {
+      sink_->close();
       source_->close();
       return false;
     }

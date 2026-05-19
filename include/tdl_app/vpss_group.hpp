@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 #include "tdl_app/media_types.hpp"
 
@@ -11,6 +12,7 @@ class VpssGroup {
   struct Config {
     VpssGroupConfig group;
     VpssChannelConfig channel;
+    std::vector<VpssChannelConfig> channels;
   };
 
   VpssGroup();
@@ -29,6 +31,7 @@ class VpssGroup {
   bool created_ = false;
   bool channel_enabled_ = false;
   bool started_ = false;
+  std::vector<int> enabled_channels_;
 };
 
 }  // namespace tdl_app

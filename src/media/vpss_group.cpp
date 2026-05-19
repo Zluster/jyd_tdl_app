@@ -1,6 +1,8 @@
 #include "tdl_app/vpss_group.hpp"
 
+#include <algorithm>
 #include <cstring>
+#include <vector>
 
 #include "cvi_comm_video.h"
 #include "cvi_comm_vpss.h"
@@ -44,34 +46,42 @@ bool VpssGroup::open(std::string *error) {
   }
   created_ = true;
 
-  VPSS_CHN_ATTR_S chn_attr;
-  std::memset(&chn_attr, 0, sizeof(chn_attr));
-  chn_attr.u32Width = static_cast<CVI_U32>(config_.channel.output_size.width);
-  chn_attr.u32Height = static_cast<CVI_U32>(config_.channel.output_size.height);
-  chn_attr.enVideoFormat = VIDEO_FORMAT_LINEAR;
-  chn_attr.enPixelFormat = static_cast<PIXEL_FORMAT_E>(config_.channel.pixel_format);
-  chn_attr.stFrameRate.s32SrcFrameRate = config_.channel.frame_rate.src_fps;
-  chn_attr.stFrameRate.s32DstFrameRate = config_.channel.frame_rate.dst_fps;
-  chn_attr.u32Depth = static_cast<CVI_U32>(config_.channel.depth);
-  chn_attr.bMirror = config_.channel.mirror ? CVI_TRUE : CVI_FALSE;
-  chn_attr.bFlip = config_.channel.flip ? CVI_TRUE : CVI_FALSE;
-  chn_attr.stAspectRatio.enMode = ASPECT_RATIO_NONE;
-  chn_attr.stNormalize.bEnable = config_.channel.normalize ? CVI_TRUE : CVI_FALSE;
-
-  ret = CVI_VPSS_SetChnAttr(config_.group.group, config_.channel.channel, &chn_attr);
-  if (ret != CVI_SUCCESS) {
-    setError(error, "CVI_VPSS_SetChnAttr failed, ret=" + std::to_string(ret));
-    close();
-    return false;
+  std::vector<VpssChannelConfig> channels = config_.channels;
+  if (channels.empty()) {
+    channels.push_back(config_.channel);
   }
+  for (std::size_t i = 0; i < channels.size(); ++i) {
+    const VpssChannelConfig &channel = channels[i];
+    VPSS_CHN_ATTR_S chn_attr;
+    std::memset(&chn_attr, 0, sizeof(chn_attr));
+    chn_attr.u32Width = static_cast<CVI_U32>(channel.output_size.width);
+    chn_attr.u32Height = static_cast<CVI_U32>(channel.output_size.height);
+    chn_attr.enVideoFormat = VIDEO_FORMAT_LINEAR;
+    chn_attr.enPixelFormat = static_cast<PIXEL_FORMAT_E>(channel.pixel_format);
+    chn_attr.stFrameRate.s32SrcFrameRate = channel.frame_rate.src_fps;
+    chn_attr.stFrameRate.s32DstFrameRate = channel.frame_rate.dst_fps;
+    chn_attr.u32Depth = static_cast<CVI_U32>(channel.depth);
+    chn_attr.bMirror = channel.mirror ? CVI_TRUE : CVI_FALSE;
+    chn_attr.bFlip = channel.flip ? CVI_TRUE : CVI_FALSE;
+    chn_attr.stAspectRatio.enMode = ASPECT_RATIO_NONE;
+    chn_attr.stNormalize.bEnable = channel.normalize ? CVI_TRUE : CVI_FALSE;
 
-  ret = CVI_VPSS_EnableChn(config_.group.group, config_.channel.channel);
-  if (ret != CVI_SUCCESS) {
-    setError(error, "CVI_VPSS_EnableChn failed, ret=" + std::to_string(ret));
-    close();
-    return false;
+    ret = CVI_VPSS_SetChnAttr(config_.group.group, channel.channel, &chn_attr);
+    if (ret != CVI_SUCCESS) {
+      setError(error, "CVI_VPSS_SetChnAttr failed, ret=" + std::to_string(ret));
+      close();
+      return false;
+    }
+
+    ret = CVI_VPSS_EnableChn(config_.group.group, channel.channel);
+    if (ret != CVI_SUCCESS) {
+      setError(error, "CVI_VPSS_EnableChn failed, ret=" + std::to_string(ret));
+      close();
+      return false;
+    }
+    enabled_channels_.push_back(channel.channel);
   }
-  channel_enabled_ = true;
+  channel_enabled_ = !enabled_channels_.empty();
 
   ret = CVI_VPSS_StartGrp(config_.group.group);
   if (ret != CVI_SUCCESS) {
@@ -89,7 +99,10 @@ void VpssGroup::close() {
     started_ = false;
   }
   if (channel_enabled_) {
-    CVI_VPSS_DisableChn(config_.group.group, config_.channel.channel);
+    for (auto it = enabled_channels_.rbegin(); it != enabled_channels_.rend(); ++it) {
+      CVI_VPSS_DisableChn(config_.group.group, *it);
+    }
+    enabled_channels_.clear();
     channel_enabled_ = false;
   }
   if (created_) {

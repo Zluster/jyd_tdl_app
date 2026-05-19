@@ -10,7 +10,10 @@
 #include "tdl_app/model_descriptor.hpp"
 #include "tdl_app/nn_base.hpp"
 #include "tdl_app/nn_classifier.hpp"
+#include "tdl_app/nn_face_attribute.hpp"
 #include "tdl_app/nn_feature.hpp"
+#include "tdl_app/nn_plate_recognizer.hpp"
+#include "tdl_app/nn_scrfd.hpp"
 #include "tdl_app/nn_yolov5.hpp"
 #include "tdl_app/nn_yolov8.hpp"
 
@@ -40,15 +43,18 @@ std::string defaultModelForTask(TaskType task) {
     case TaskType::Classification:
       return "CLASSIFIER";
     case TaskType::Detection:
-    case TaskType::FaceDetection:
       return "YOLOV8";
+    case TaskType::FaceDetection:
+      return "SCRFD";
     case TaskType::Feature:
       return "FEATURE";
     case TaskType::FaceAttribute:
+      return "FACE_ATTRIBUTE";
     case TaskType::Landmark:
     case TaskType::Keypoint:
-    case TaskType::Ocr:
       return "";
+    case TaskType::Ocr:
+      return "PLATE_RECOGNIZER";
   }
   return "";
 }
@@ -63,14 +69,32 @@ std::string inferRuntime(TaskType task, const std::string &model_name,
     if (task_name == "DETECT" || task_name == "DETECTION") {
       return startsWith(normalizeToken(model_name), "YOLOV5") ? "YOLOV5" : "YOLOV8";
     }
+    if (task_name == "FACE_DETECT" || task_name == "FACE_DETECTION") {
+      return "SCRFD";
+    }
+    if (task_name == "FACE_ATTR" || task_name == "FACE_ATTRIBUTE") {
+      return "FACE_ATTRIBUTE";
+    }
     if (task_name == "CLASSIFY" || task_name == "CLASSIFICATION") {
       return "CLASSIFIER";
     }
     if (task_name == "FEATURE") {
       return "FEATURE";
     }
+    if (task_name == "OCR") {
+      return "PLATE_RECOGNIZER";
+    }
   }
   const std::string normalized = normalizeToken(model_name);
+  if (startsWith(normalized, "SCRFD")) {
+    return "SCRFD";
+  }
+  if (startsWith(normalized, "FACE_ATTRIBUTE")) {
+    return "FACE_ATTRIBUTE";
+  }
+  if (startsWith(normalized, "PLATE_") || startsWith(normalized, "LPR")) {
+    return "PLATE_RECOGNIZER";
+  }
   if (startsWith(normalized, "YOLOV8")) {
     return "YOLOV8";
   }
@@ -86,17 +110,20 @@ std::string inferRuntime(TaskType task, const std::string &model_name,
 
   switch (task) {
     case TaskType::Classification:
-    case TaskType::FaceAttribute:
       return "CLASSIFIER";
     case TaskType::Detection:
-    case TaskType::FaceDetection:
       return "YOLOV8";
+    case TaskType::FaceDetection:
+      return "SCRFD";
+    case TaskType::FaceAttribute:
+      return "FACE_ATTRIBUTE";
     case TaskType::Feature:
       return "FEATURE";
     case TaskType::Landmark:
     case TaskType::Keypoint:
-    case TaskType::Ocr:
       return "";
+    case TaskType::Ocr:
+      return "PLATE_RECOGNIZER";
   }
   return "";
 }
@@ -211,8 +238,14 @@ class AlgorithmEngine::Impl {
       next_runtime.reset(new NnYolov8(model_type));
     } else if (runtime_name == "YOLOV5") {
       next_runtime.reset(new NnYolov5(model_type));
+    } else if (runtime_name == "SCRFD") {
+      next_runtime.reset(new NnScrfd(model_type));
     } else if (runtime_name == "CLASSIFIER") {
       next_runtime.reset(new NnClassifier(model_type));
+    } else if (runtime_name == "FACE_ATTRIBUTE") {
+      next_runtime.reset(new NnFaceAttribute(model_type));
+    } else if (runtime_name == "PLATE_RECOGNIZER") {
+      next_runtime.reset(new NnPlateRecognizer(model_type));
     } else if (runtime_name == "FEATURE") {
       next_runtime.reset(new NnFeature(model_type));
     } else {

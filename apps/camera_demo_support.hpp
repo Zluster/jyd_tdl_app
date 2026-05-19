@@ -14,7 +14,7 @@ struct CommonOptions {
   bool use_sensor_media = false;
   bool use_ipcamera_helper = false;
   bool attach_existing = false;
-  std::string sensor_ini = "./configs/sensor_cfg_cv2003_switch_high_addr54_mclk1.ini";
+  std::string sensor_ini = "./configs/sensor_cfg_cv1842hp_wevb_cv2003_ipcamera.ini";
   std::string ipcamera_binary = "/mnt/sd/install/ipcamera";
   std::string ipcamera_ini = "/mnt/sd/install/cv1842hp_wevb_cv2003.ini";
   int frames = 1;

@@ -93,6 +93,13 @@ bool saveAnnotatedImage(const std::string &image_path,
     cv::putText(image, text,
                 cv::Point(p1.x + 3, text_top + text_size.height + 1),
                 cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 1);
+
+    for (const auto &landmark : box.landmarks) {
+      cv::circle(image,
+                 cv::Point(static_cast<int>(landmark.x),
+                           static_cast<int>(landmark.y)),
+                 2, cv::Scalar(255, 0, 0), cv::FILLED);
+    }
   }
 
   for (const auto &point : result.points) {

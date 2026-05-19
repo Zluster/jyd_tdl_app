@@ -60,8 +60,9 @@ int main(int argc, char **argv) {
   }
 
   std::string error;
-  tdl_app::Detector detector;
-  if (!detector.load(image_demo_support::detectorConfig(opt.common), &error)) {
+  tdl_app::Detector detector(image_demo_support::detectorConfig(opt.common),
+                             &error);
+  if (!detector.initialized()) {
     std::cerr << "initialize failed: " << error << "\n";
     return 2;
   }
@@ -69,8 +70,8 @@ int main(int argc, char **argv) {
   tdl_app::InferOptions infer_options;
   infer_options.threshold = opt.common.threshold;
 
-  tdl_app::AlgorithmResult result;
-  if (!detector.run(opt.common.image, infer_options, &result, &error)) {
+  tdl_app::AlgorithmResult result = detector(opt.common.image, infer_options, &error);
+  if (!error.empty()) {
     std::cerr << "run failed: " << error << "\n";
     return 3;
   }

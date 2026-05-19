@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cctype>
 #include <cstdint>
@@ -36,6 +37,21 @@ void setError(std::string *error, const std::string &message) {
   }
 }
 
+bool debugEnabled() {
+  const char *value = std::getenv("TDL_APP_YOLOV5_DEBUG");
+  return value && value[0] != '\0' && std::strcmp(value, "0") != 0;
+}
+
+template <typename... Args>
+void debugLog(const char *fmt, Args... args) {
+  if (!debugEnabled()) {
+    return;
+  }
+  std::fprintf(stderr, "[yolov5-debug] ");
+  std::fprintf(stderr, fmt, args...);
+  std::fprintf(stderr, "\n");
+}
+
 std::string toUpper(std::string value) {
   std::transform(value.begin(), value.end(), value.begin(),
                  [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
@@ -47,29 +63,63 @@ bool startsWith(const std::string &value, const std::string &prefix) {
          value.compare(0, prefix.size(), prefix) == 0;
 }
 
-bool frameToBgrMat(const Frame &frame, cv::Mat *image, std::string *error) {
+bool copyPackedRgbToBgr(const VIDEO_FRAME_S &vf, unsigned char *mapped,
+                        int width, int height, bool input_is_bgr,
+                        cv::Mat *image) {
+  cv::Mat output(height, width, CV_8UC3);
+  for (int y = 0; y < height; ++y) {
+    const unsigned char *src = mapped + y * vf.u32Stride[0];
+    unsigned char *dst = output.ptr<unsigned char>(y);
+    if (input_is_bgr) {
+      std::memcpy(dst, src, static_cast<size_t>(width) * 3);
+    } else {
+      for (int x = 0; x < width; ++x) {
+        dst[x * 3 + 0] = src[x * 3 + 2];
+        dst[x * 3 + 1] = src[x * 3 + 1];
+        dst[x * 3 + 2] = src[x * 3 + 0];
+      }
+    }
+  }
+  *image = std::move(output);
+  return true;
+}
+
+bool copyPlanarRgbToBgr(const VIDEO_FRAME_S &vf, unsigned char *mapped,
+                        int width, int height, bool input_is_bgr,
+                        cv::Mat *image) {
+  const unsigned char *plane0 = mapped;
+  const unsigned char *plane1 = mapped + vf.u32Length[0];
+  const unsigned char *plane2 = plane1 + vf.u32Length[1];
+  cv::Mat output(height, width, CV_8UC3);
+  for (int y = 0; y < height; ++y) {
+    const unsigned char *src0 = plane0 + y * vf.u32Stride[0];
+    const unsigned char *src1 = plane1 + y * vf.u32Stride[1];
+    const unsigned char *src2 = plane2 + y * vf.u32Stride[2];
+    cv::Vec3b *dst = output.ptr<cv::Vec3b>(y);
+    for (int x = 0; x < width; ++x) {
+      if (input_is_bgr) {
+        dst[x] = cv::Vec3b(src0[x], src1[x], src2[x]);
+      } else {
+        dst[x] = cv::Vec3b(src2[x], src1[x], src0[x]);
+      }
+    }
+  }
+  *image = std::move(output);
+  return true;
+}
+
+bool videoFrameToBgrMat(const VIDEO_FRAME_INFO_S &video_frame, cv::Mat *image,
+                        std::string *error) {
   if (!image) {
     setError(error, "output image pointer is null");
     return false;
   }
-  if (!frame.native) {
-    setError(error, "frame has no native VIDEO_FRAME_INFO_S buffer");
-    return false;
-  }
-
-  auto *video = static_cast<VIDEO_FRAME_INFO_S *>(frame.native);
-  const auto &vf = video->stVFrame;
+  const auto &vf = video_frame.stVFrame;
   const int width = static_cast<int>(vf.u32Width);
   const int height = static_cast<int>(vf.u32Height);
   const int format = static_cast<int>(vf.enPixelFormat);
   if (width <= 0 || height <= 0) {
     setError(error, "invalid frame size");
-    return false;
-  }
-  if (format != PIXEL_FORMAT_NV12 &&
-      format != PIXEL_FORMAT_NV21 &&
-      format != PIXEL_FORMAT_YUV_400) {
-    setError(error, "custom YOLOv5 runtime only supports NV12/NV21/YUV400 frame input");
     return false;
   }
 
@@ -91,13 +141,21 @@ bool frameToBgrMat(const Frame &frame, cv::Mat *image, std::string *error) {
   CVI_SYS_IonInvalidateCache(vf.u64PhyAddr[0], mapped, map_size);
 
   bool ok = true;
-  if (format == PIXEL_FORMAT_YUV_400) {
+  if (format == PIXEL_FORMAT_BGR_888) {
+    ok = copyPackedRgbToBgr(vf, mapped, width, height, true, image);
+  } else if (format == PIXEL_FORMAT_RGB_888) {
+    ok = copyPackedRgbToBgr(vf, mapped, width, height, false, image);
+  } else if (format == PIXEL_FORMAT_BGR_888_PLANAR) {
+    ok = copyPlanarRgbToBgr(vf, mapped, width, height, true, image);
+  } else if (format == PIXEL_FORMAT_RGB_888_PLANAR) {
+    ok = copyPlanarRgbToBgr(vf, mapped, width, height, false, image);
+  } else if (format == PIXEL_FORMAT_YUV_400) {
     cv::Mat gray(height, width, CV_8UC1);
     for (int y = 0; y < height; ++y) {
       std::memcpy(gray.ptr(y), mapped + y * vf.u32Stride[0], width);
     }
     cv::cvtColor(gray, *image, cv::COLOR_GRAY2BGR);
-  } else {
+  } else if (format == PIXEL_FORMAT_NV12 || format == PIXEL_FORMAT_NV21) {
     cv::Mat yuv(height + height / 2, width, CV_8UC1);
     unsigned char *y_base = mapped;
     unsigned char *uv_base = mapped + vf.u32Length[0];
@@ -111,6 +169,10 @@ bool frameToBgrMat(const Frame &frame, cv::Mat *image, std::string *error) {
                          ? cv::COLOR_YUV2BGR_NV21
                          : cv::COLOR_YUV2BGR_NV12;
     cv::cvtColor(yuv, *image, code);
+  } else {
+    ok = false;
+    setError(error,
+             "custom YOLOv5 runtime only supports RGB/BGR/NV12/NV21/YUV400 frame input");
   }
 
   CVI_SYS_Munmap(mapped, map_size);
@@ -119,6 +181,15 @@ bool frameToBgrMat(const Frame &frame, cv::Mat *image, std::string *error) {
     return false;
   }
   return true;
+}
+
+bool frameToBgrMat(const Frame &frame, cv::Mat *image, std::string *error) {
+  if (!frame.native) {
+    setError(error, "frame has no native VIDEO_FRAME_INFO_S buffer");
+    return false;
+  }
+  auto *video = static_cast<VIDEO_FRAME_INFO_S *>(frame.native);
+  return videoFrameToBgrMat(*video, image, error);
 }
 
 float sigmoid(float value) {
@@ -173,8 +244,8 @@ std::vector<Box> nonMaxSuppression(const std::vector<Box> &boxes, float iou_thre
 }
 
 bool parseInputShape(const bm_shape_t &shape, int *height, int *width,
-                     std::string *error) {
-  if (!height || !width) {
+                     bool *is_nchw, std::string *error) {
+  if (!height || !width || !is_nchw) {
     setError(error, "input shape output pointer is null");
     return false;
   }
@@ -186,11 +257,13 @@ bool parseInputShape(const bm_shape_t &shape, int *height, int *width,
   if (shape.dims[1] == kInputChannels) {
     *height = shape.dims[2];
     *width = shape.dims[3];
+    *is_nchw = true;
     return true;
   }
   if (shape.dims[3] == kInputChannels) {
     *height = shape.dims[1];
     *width = shape.dims[2];
+    *is_nchw = false;
     return true;
   }
 
@@ -242,6 +315,8 @@ class NnYolov5::CustomRuntime {
     }
 
     const std::string model_path = resolveModelPath(descriptor);
+    debugLog("open model_path=%s firmware=%s", model_path.c_str(),
+             config.bmrt_firmware.c_str());
     if (!bmrt_load_bmodel(runtime_, model_path.c_str())) {
       setError(error, "bmrt_load_bmodel failed: " + model_path);
       return false;
@@ -275,7 +350,7 @@ class NnYolov5::CustomRuntime {
     }
 
     if (!parseInputShape(net_info_->stages[0].input_shapes[0], &input_height_,
-                         &input_width_, error)) {
+                         &input_width_, &input_is_nchw_, error)) {
       return false;
     }
     input_dtype_ = net_info_->input_dtypes[0];
@@ -291,6 +366,10 @@ class NnYolov5::CustomRuntime {
       return false;
     }
     labels_ = descriptor.labels;
+    debugLog("open input=%dx%d layout=%s input_dtype=%d outputs=%d labels=%d",
+             input_width_, input_height_, input_is_nchw_ ? "NCHW" : "NHWC",
+             static_cast<int>(input_dtype_), output_count_,
+             static_cast<int>(labels_.size()));
     opened_ = true;
     return true;
   }
@@ -311,6 +390,8 @@ class NnYolov5::CustomRuntime {
       setError(error, "failed to read image: " + image_path);
       return false;
     }
+    debugLog("inferImage path=%s size=%dx%d", image_path.c_str(), image.cols,
+             image.rows);
 
     return inferMat(image, options, result, error);
   }
@@ -335,16 +416,20 @@ class NnYolov5::CustomRuntime {
     int top = 0;
     int left = 0;
     preprocess(image, &input_data, &ratio, &top, &left);
+    debugLog("inferMat image=%dx%d threshold=%.4f iou=%.4f ratio=%.6f top=%d left=%d",
+             image.cols, image.rows, options.threshold, options.iou_threshold,
+             ratio, top, left);
 
     std::vector<std::vector<float>> outputs;
-    if (!launch(input_data, &outputs, error)) {
+    std::vector<bm_shape_t> output_shapes;
+    if (!launch(input_data, &outputs, &output_shapes, error)) {
       return false;
     }
 
     *result = AlgorithmResult{};
     result->labels = labels_;
-    result->boxes = decode(outputs, image.cols, image.rows, ratio, top, left,
-                           options.threshold, options.iou_threshold);
+    result->boxes = decode(outputs, output_shapes, image.cols, image.rows, ratio,
+                           top, left, options.threshold, options.iou_threshold);
     return true;
   }
 
@@ -383,10 +468,21 @@ class NnYolov5::CustomRuntime {
 
     data->assign(static_cast<size_t>(input_height_ * input_width_ * kInputChannels), 0.0f);
     size_t index = 0;
-    for (int c = 0; c < kInputChannels; ++c) {
+    if (input_is_nchw_) {
+      for (int c = 0; c < kInputChannels; ++c) {
+        for (int y = 0; y < input_height_; ++y) {
+          for (int x = 0; x < input_width_; ++x) {
+            (*data)[index++] = static_cast<float>(rgb.at<cv::Vec3b>(y, x)[c]);
+          }
+        }
+      }
+    } else {
       for (int y = 0; y < input_height_; ++y) {
         for (int x = 0; x < input_width_; ++x) {
-          (*data)[index++] = rgb.at<cv::Vec3b>(y, x)[c] / 255.0f;
+          const cv::Vec3b pixel = rgb.at<cv::Vec3b>(y, x);
+          for (int c = 0; c < kInputChannels; ++c) {
+            (*data)[index++] = static_cast<float>(pixel[c]);
+          }
         }
       }
     }
@@ -394,6 +490,7 @@ class NnYolov5::CustomRuntime {
 
   bool launch(const std::vector<float> &input_data,
               std::vector<std::vector<float>> *outputs,
+              std::vector<bm_shape_t> *output_shapes,
               std::string *error) {
     const bm_shape_t input_shape = net_info_->stages[0].input_shapes[0];
     std::vector<uint8_t> input_bytes;
@@ -407,7 +504,12 @@ class NnYolov5::CustomRuntime {
         net_info_->input_zero_point ? net_info_->input_zero_point[0] : 0;
 
     if (input_dtype_ == BM_FLOAT32) {
-      input_ptrs[0] = const_cast<float *>(input_data.data());
+      input_bytes.resize(input_data.size() * sizeof(float));
+      auto *dst = reinterpret_cast<float *>(input_bytes.data());
+      for (size_t i = 0; i < input_data.size(); ++i) {
+        dst[i] = input_data[i] / 255.0f;
+      }
+      input_ptrs[0] = input_bytes.data();
     } else if (input_dtype_ == BM_INT8) {
       input_bytes.resize(input_data.size());
       auto *dst = reinterpret_cast<int8_t *>(input_bytes.data());
@@ -422,10 +524,7 @@ class NnYolov5::CustomRuntime {
       input_bytes.resize(input_data.size());
       auto *dst = reinterpret_cast<uint8_t *>(input_bytes.data());
       for (size_t i = 0; i < input_data.size(); ++i) {
-        const float q = input_scale == 0.0f
-                            ? input_data[i]
-                            : input_data[i] / input_scale + input_zero_point;
-        dst[i] = clampCast<uint8_t>(q);
+        dst[i] = clampCast<uint8_t>(input_data[i]);
       }
       input_ptrs[0] = input_bytes.data();
     } else {
@@ -436,17 +535,17 @@ class NnYolov5::CustomRuntime {
     std::vector<std::vector<uint8_t>> output_bytes(
         output_count_, std::vector<uint8_t>());
     std::vector<void *> output_ptrs(output_count_, nullptr);
-    std::vector<bm_shape_t> output_shapes(output_count_);
+    output_shapes->assign(static_cast<size_t>(output_count_), bm_shape_t{});
 
     for (int i = 0; i < output_count_; ++i) {
       output_bytes[i].resize(net_info_->max_output_bytes[i]);
       output_ptrs[i] = output_bytes[i].data();
-      std::memset(&output_shapes[i], 0, sizeof(output_shapes[i]));
+      std::memset(&(*output_shapes)[i], 0, sizeof((*output_shapes)[i]));
     }
 
     const bool launched =
         bmrt_launch_data(runtime_, net_name_.c_str(), input_ptrs, input_shapes,
-                         1, output_ptrs.data(), output_shapes.data(),
+                         1, output_ptrs.data(), output_shapes->data(),
                          output_count_, true);
     if (!launched) {
       setError(error, "bmrt_launch_data failed");
@@ -457,8 +556,8 @@ class NnYolov5::CustomRuntime {
     outputs->reserve(output_count_);
     for (int i = 0; i < output_count_; ++i) {
       size_t element_count = 1;
-      for (int d = 0; d < output_shapes[i].num_dims; ++d) {
-        element_count *= static_cast<size_t>(output_shapes[i].dims[d]);
+      for (int d = 0; d < (*output_shapes)[i].num_dims; ++d) {
+        element_count *= static_cast<size_t>((*output_shapes)[i].dims[d]);
       }
       std::vector<float> decoded(element_count, 0.0f);
       const float output_scale =
@@ -488,23 +587,169 @@ class NnYolov5::CustomRuntime {
         setError(error, "custom YOLOv5 runtime does not support this output dtype yet");
         return false;
       }
+      if (!decoded.empty()) {
+        float min_value = decoded[0];
+        float max_value = decoded[0];
+        for (size_t j = 1; j < decoded.size(); ++j) {
+          min_value = std::min(min_value, decoded[j]);
+          max_value = std::max(max_value, decoded[j]);
+        }
+        debugLog("output[%d] dims=%d,%d,%d,%d dtype=%d scale=%.8f zp=%d min=%.6f max=%.6f v0=%.6f v1=%.6f v2=%.6f",
+                 i,
+                 (*output_shapes)[i].num_dims > 0 ? (*output_shapes)[i].dims[0] : 0,
+                 (*output_shapes)[i].num_dims > 1 ? (*output_shapes)[i].dims[1] : 0,
+                 (*output_shapes)[i].num_dims > 2 ? (*output_shapes)[i].dims[2] : 0,
+                 (*output_shapes)[i].num_dims > 3 ? (*output_shapes)[i].dims[3] : 0,
+                 static_cast<int>(net_info_->output_dtypes[i]), output_scale,
+                 output_zero_point, min_value, max_value, decoded[0],
+                 decoded.size() > 1 ? decoded[1] : 0.0f,
+                 decoded.size() > 2 ? decoded[2] : 0.0f);
+      }
       outputs->push_back(std::move(decoded));
     }
     return true;
   }
 
   std::vector<Box> decode(const std::vector<std::vector<float>> &outputs,
+                          const std::vector<bm_shape_t> &output_shapes,
                           int image_width, int image_height, float ratio, int top,
                           int left, float threshold, float iou_threshold) const {
     std::vector<Box> boxes;
+    int candidates_above_threshold = 0;
+    float max_score = 0.0f;
     const int classes =
         !labels_.empty() ? static_cast<int>(labels_.size()) : 80;
     const int per_anchor = kBoxElementCount + classes;
 
-    for (const auto &output : outputs) {
-      if (output.empty()) {
+    struct SplitBranch {
+      int ny = 0;
+      int nx = 0;
+      int bbox_index = -1;
+      int obj_index = -1;
+      int cls_index = -1;
+    };
+
+    std::vector<SplitBranch> split_branches;
+    if (outputs.size() == output_shapes.size()) {
+      for (size_t i = 0; i < output_shapes.size(); ++i) {
+        const bm_shape_t &shape = output_shapes[i];
+        if (shape.num_dims != 4 || shape.dims[0] != 3) {
+          continue;
+        }
+        const int ny = shape.dims[1];
+        const int nx = shape.dims[2];
+        const int channels = shape.dims[3];
+        if (ny <= 0 || nx <= 0) {
+          continue;
+        }
+        int branch_index = -1;
+        for (size_t j = 0; j < split_branches.size(); ++j) {
+          if (split_branches[j].ny == ny && split_branches[j].nx == nx) {
+            branch_index = static_cast<int>(j);
+            break;
+          }
+        }
+        if (branch_index < 0) {
+          split_branches.push_back(SplitBranch{ny, nx, -1, -1, -1});
+          branch_index = static_cast<int>(split_branches.size() - 1);
+        }
+        if (channels == 4) {
+          split_branches[branch_index].bbox_index = static_cast<int>(i);
+        } else if (channels == 1) {
+          split_branches[branch_index].obj_index = static_cast<int>(i);
+        } else if (channels == classes) {
+          split_branches[branch_index].cls_index = static_cast<int>(i);
+        }
+      }
+    }
+
+    bool used_split_decode = false;
+    for (const auto &branch : split_branches) {
+      if (branch.bbox_index < 0 || branch.obj_index < 0 || branch.cls_index < 0) {
         continue;
       }
+      used_split_decode = true;
+      const int ny = branch.ny;
+      const int nx = branch.nx;
+      const int stride = input_height_ / ny;
+      int anchor_group = 0;
+      if (stride <= 8) {
+        anchor_group = 0;
+      } else if (stride <= 16) {
+        anchor_group = 1;
+      } else {
+        anchor_group = 2;
+      }
+
+      const std::vector<float> &bbox = outputs[branch.bbox_index];
+      const std::vector<float> &obj = outputs[branch.obj_index];
+      const std::vector<float> &cls = outputs[branch.cls_index];
+      debugLog("decode split branch ny=%d nx=%d stride=%d bbox=%d obj=%d cls=%d",
+               ny, nx, stride, branch.bbox_index, branch.obj_index,
+               branch.cls_index);
+
+      for (int anchor_idx = 0; anchor_idx < 3; ++anchor_idx) {
+        const auto &anchor = anchors_[anchor_group * 3 + anchor_idx];
+        for (int y = 0; y < ny; ++y) {
+          for (int x = 0; x < nx; ++x) {
+            const size_t cell_index = static_cast<size_t>((anchor_idx * ny + y) * nx + x);
+            const size_t bbox_offset = cell_index * 4;
+            const float obj_score = sigmoid(obj[cell_index]);
+            if (obj_score <= 0.0f) {
+              continue;
+            }
+
+            int best_class = 0;
+            float best_class_score = 0.0f;
+            const size_t cls_offset = cell_index * static_cast<size_t>(classes);
+            for (int cls_index = 0; cls_index < classes; ++cls_index) {
+              const float cls_score = sigmoid(cls[cls_offset + cls_index]);
+              if (cls_score > best_class_score) {
+                best_class_score = cls_score;
+                best_class = cls_index;
+              }
+            }
+
+            const float score = obj_score * best_class_score;
+            if (score > max_score) {
+              max_score = score;
+            }
+            if (score < threshold) {
+              continue;
+            }
+            ++candidates_above_threshold;
+
+            const float cx =
+                (sigmoid(bbox[bbox_offset + 0]) * 2.0f - 0.5f + x) * stride;
+            const float cy =
+                (sigmoid(bbox[bbox_offset + 1]) * 2.0f - 0.5f + y) * stride;
+            const float w =
+                std::pow(sigmoid(bbox[bbox_offset + 2]) * 2.0f, 2.0f) * anchor[0];
+            const float h =
+                std::pow(sigmoid(bbox[bbox_offset + 3]) * 2.0f, 2.0f) * anchor[1];
+
+            Box box;
+            box.class_id = best_class;
+            box.score = score;
+            box.x1 = ((cx - w * 0.5f) - left) / ratio;
+            box.y1 = ((cy - h * 0.5f) - top) / ratio;
+            box.x2 = ((cx + w * 0.5f) - left) / ratio;
+            box.y2 = ((cy + h * 0.5f) - top) / ratio;
+            box.x1 = std::max(0.0f, std::min(box.x1, static_cast<float>(image_width)));
+            box.y1 = std::max(0.0f, std::min(box.y1, static_cast<float>(image_height)));
+            box.x2 = std::max(0.0f, std::min(box.x2, static_cast<float>(image_width)));
+            box.y2 = std::max(0.0f, std::min(box.y2, static_cast<float>(image_height)));
+            boxes.push_back(box);
+          }
+        }
+      }
+    }
+
+    if (!used_split_decode) {
+      for (const auto &output : outputs) {
+        if (output.empty()) {
+          continue;
+        }
 
       int ny = 0;
       int nx = 0;
@@ -561,9 +806,13 @@ class NnYolov5::CustomRuntime {
             }
 
             const float score = obj * best_score;
+            if (score > max_score) {
+              max_score = score;
+            }
             if (score < threshold) {
               continue;
             }
+            ++candidates_above_threshold;
 
             const float cx = (sigmoid(output[offset + 0]) * 2.0f - 0.5f + x) * stride;
             const float cy = (sigmoid(output[offset + 1]) * 2.0f - 0.5f + y) * stride;
@@ -587,9 +836,14 @@ class NnYolov5::CustomRuntime {
           }
         }
       }
+      }
     }
 
-    return nonMaxSuppression(boxes, iou_threshold);
+    std::vector<Box> kept = nonMaxSuppression(boxes, iou_threshold);
+    debugLog("decode raw_boxes=%d kept_boxes=%d max_score=%.6f threshold=%.4f",
+             candidates_above_threshold, static_cast<int>(kept.size()),
+             max_score, threshold);
+    return kept;
   }
 
   bm_handle_t handle_ = nullptr;
@@ -598,6 +852,7 @@ class NnYolov5::CustomRuntime {
   std::string net_name_;
   int input_height_ = 0;
   int input_width_ = 0;
+  bool input_is_nchw_ = true;
   int output_count_ = 0;
   bm_data_type_t input_dtype_ = BM_FLOAT32;
   std::vector<std::array<float, 2>> anchors_;

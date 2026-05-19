@@ -2,6 +2,8 @@
 
 #include <string>
 
+#include "tdl_app/media_types.hpp"
+
 namespace tdl_app {
 
 class VoOutput {
@@ -12,16 +14,22 @@ class VoOutput {
     int channel = 0;
     int width = 640;
     int height = 640;
-    int pixel_format = 18;
-    int interface_type = 1;
-    int interface_sync = 39;
+    int pixel_format = PixelFormat::NV12;
+    int interface_type = VoInterfaceType::Mipi;
+    int interface_sync = VoInterfaceSync::P720_1280_60;
     int display_buf_len = 3;
+    int frame_rate = 25;
+    int channel_x = 0;
+    int channel_y = 0;
+    int priority = 0;
   };
 
   static Config display(int device = 0, int layer = 0, int channel = 0,
                         int width = 640, int height = 640,
-                        int pixel_format = 18, int interface_type = 1,
-                        int interface_sync = 39, int display_buf_len = 3) {
+                        int pixel_format = PixelFormat::NV12,
+                        int interface_type = VoInterfaceType::Mipi,
+                        int interface_sync = VoInterfaceSync::P720_1280_60,
+                        int display_buf_len = 3) {
     Config config;
     config.device = device;
     config.layer = layer;
@@ -32,6 +40,17 @@ class VoOutput {
     config.interface_type = interface_type;
     config.interface_sync = interface_sync;
     config.display_buf_len = display_buf_len;
+    return config;
+  }
+
+  static Config argb8888Display(int device = 0, int layer = 0, int channel = 0,
+                                int width = 720, int height = 1280,
+                                int interface_type = VoInterfaceType::Mipi,
+                                int interface_sync = VoInterfaceSync::P720_1280_60,
+                                int display_buf_len = 2) {
+    Config config = display(device, layer, channel, width, height,
+                            PixelFormat::ARGB8888, interface_type,
+                            interface_sync, display_buf_len);
     return config;
   }
 

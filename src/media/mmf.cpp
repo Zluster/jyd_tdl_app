@@ -1,6 +1,7 @@
 #include "tdl_app/mmf.hpp"
 
 #include <algorithm>
+#include <map>
 #include <memory>
 #include <string>
 #include <vector>
@@ -141,15 +142,27 @@ class Mmf::Impl {
 
  private:
   bool openSystem(std::string *error) {
-    MediaSystem::Config system_config;
+    MediaSystem::Config system_config =
+        MediaSystem::Config::attachExisting();
     system_config.reuse_existing = config_.reuse_existing_system;
     system_config.configure_vb = config_.configure_vb;
-    system_config.pool.size.width = config_.pool.width;
-    system_config.pool.size.height = config_.pool.height;
-    system_config.pool.pixel_format = config_.pool.pixel_format;
-    system_config.pool.block_count = config_.pool.block_count;
-    system_config.pool.align = config_.pool.align;
-    system_config.pool.cached = config_.pool.cached;
+    std::vector<PoolConfig> pools = config_.pools;
+    if (pools.empty()) {
+      pools.push_back(config_.pool);
+    }
+    for (std::size_t i = 0; i < pools.size(); ++i) {
+      VideoBufferPoolConfig pool;
+      pool.size.width = pools[i].width;
+      pool.size.height = pools[i].height;
+      pool.pixel_format = pools[i].pixel_format;
+      pool.block_count = pools[i].block_count;
+      pool.align = pools[i].align;
+      pool.cached = pools[i].cached;
+      system_config.pools.push_back(pool);
+    }
+    if (!system_config.pools.empty()) {
+      system_config.pool = system_config.pools.front();
+    }
 
     media_system_.reset(new MediaSystem(system_config));
     return media_system_->open(error);
@@ -177,8 +190,34 @@ class Mmf::Impl {
 
   bool openAllVpss(std::string *error) {
     const auto configs = effectiveVpssConfigs();
+    std::vector<VpssGroup::Config> grouped_configs;
     for (const auto &config : configs) {
-      std::unique_ptr<VpssGroup> group(new VpssGroup(toVpssGroupConfig(config)));
+      const auto it = std::find_if(
+          grouped_configs.begin(), grouped_configs.end(),
+          [&](const VpssGroup::Config &item) {
+            return item.group.group == config.group;
+          });
+      if (it == grouped_configs.end()) {
+        VpssGroup::Config merged = toVpssGroupConfig(config);
+        merged.channels.clear();
+        merged.channels.push_back(merged.channel);
+        grouped_configs.push_back(merged);
+      } else {
+        if (it->group.max_size.width != config.input_width ||
+            it->group.max_size.height != config.input_height ||
+            it->group.pixel_format != config.pixel_format) {
+          if (error) {
+            *error = "mmf vpss group " + std::to_string(config.group) +
+                     " has inconsistent group attributes across channels";
+          }
+          return false;
+        }
+        it->channels.push_back(toVpssGroupConfig(config).channel);
+      }
+    }
+
+    for (const auto &config : grouped_configs) {
+      std::unique_ptr<VpssGroup> group(new VpssGroup(config));
       if (!group->open(error)) {
         return false;
       }

@@ -37,6 +37,18 @@ set(TDL_CV184X_LIBS
   bmlib
   model_combine
   cvi_rtsp
+  cvi_audio
+  cvi_RES1
+  cvi_vqe
+  cvi_dnvqe
+  cvi_VoiceEngine
+  cvi_ssp
+  cvi_ssp2
+  aaccomm2
+  aacenc2
+  aacdec2
+  aacsbrenc2
+  aacsbrdec2
   sys
   mipi
   vi
@@ -56,6 +68,7 @@ set(TDL_CV184X_LIBS
   sns_full
   sns_cv2003
   teaisp
+  tinyalsa
   z
   dl
   rt

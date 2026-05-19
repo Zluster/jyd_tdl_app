@@ -28,11 +28,10 @@ class SensorMediaImpl {
  private:
   struct ActiveVpssOutput {
     SensorMedia::VpssOutputConfig config;
-    VB_POOL vb_pool = VB_INVALID_POOLID;
+    int common_pool_index = -1;
     bool created = false;
     bool channel_enabled = false;
     bool started = false;
-    bool pool_attached = false;
     bool vi_bound = false;
   };
 

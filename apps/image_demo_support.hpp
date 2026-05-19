@@ -101,6 +101,30 @@ inline tdl_app::Classifier::Config classifierConfig(const CommonOptions &opt) {
   return config;
 }
 
+inline tdl_app::FaceDetector::Config faceDetectorConfig(
+    const CommonOptions &opt) {
+  tdl_app::FaceDetector::Config config;
+  config.model_spec = opt.model_spec;
+  config.firmware = opt.firmware;
+  return config;
+}
+
+inline tdl_app::FaceAttributeClassifier::Config faceAttributeConfig(
+    const CommonOptions &opt) {
+  tdl_app::FaceAttributeClassifier::Config config;
+  config.model_spec = opt.model_spec;
+  config.firmware = opt.firmware;
+  return config;
+}
+
+inline tdl_app::PlateRecognizer::Config plateRecognizerConfig(
+    const CommonOptions &opt) {
+  tdl_app::PlateRecognizer::Config config;
+  config.model_spec = opt.model_spec;
+  config.firmware = opt.firmware;
+  return config;
+}
+
 inline tdl_app::FeatureExtractor::Config featureConfig(
     const CommonOptions &opt) {
   tdl_app::FeatureExtractor::Config config;

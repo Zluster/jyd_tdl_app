@@ -65,6 +65,7 @@ class Mmf {
 
   struct Config {
     PoolConfig pool;
+    std::vector<PoolConfig> pools;
     VpssConfig vpss;
     BindConfig bind;
     GraphConfig graph;
@@ -86,10 +87,129 @@ class Mmf {
   Mmf(const Mmf &) = delete;
   Mmf &operator=(const Mmf &) = delete;
 
+  class Builder {
+   public:
+    Builder &setPool(const PoolConfig &pool) {
+      config_.pool = pool;
+      config_.pools.clear();
+      config_.pools.push_back(pool);
+      return *this;
+    }
+
+    Builder &setPools(const std::vector<PoolConfig> &pools) {
+      config_.pools = pools;
+      if (!config_.pools.empty()) {
+        config_.pool = config_.pools.front();
+      }
+      return *this;
+    }
+
+    Builder &addPool(const PoolConfig &pool) {
+      if (config_.pools.empty()) {
+        config_.pool = pool;
+      }
+      config_.pools.push_back(pool);
+      return *this;
+    }
+
+    Builder &addVpss(const VpssConfig &config) {
+      config_.graph.vpss.push_back(config);
+      return *this;
+    }
+
+    Builder &addBind(const BindConfig &config) {
+      config_.graph.binds.push_back(config);
+      return *this;
+    }
+
+    Builder &addViToVpss(const VpssConfig &config, int vi_pipe = 0,
+                         int vi_channel = 0) {
+      config_.graph.vpss.push_back(config);
+      config_.graph.binds.push_back(
+          Mmf::viToVpss(vi_pipe, vi_channel, config.group, config.channel));
+      return *this;
+    }
+
+    Builder &addViToVpss(const std::vector<VpssConfig> &configs,
+                         int vi_pipe = 0, int vi_channel = 0) {
+      for (std::vector<VpssConfig>::const_iterator it = configs.begin();
+           it != configs.end(); ++it) {
+        addViToVpss(*it, vi_pipe, vi_channel);
+      }
+      return *this;
+    }
+
+    Builder &addVpssToVenc(int vpss_group, int vpss_channel,
+                           int venc_channel) {
+      config_.graph.binds.push_back(Mmf::bind(
+          MediaChannel::vpss(vpss_group, vpss_channel),
+          MediaChannel::venc(venc_channel)));
+      return *this;
+    }
+
+    Builder &addVdecToVpss(int vdec_channel, int vpss_group,
+                           int vpss_channel) {
+      config_.graph.binds.push_back(Mmf::bind(
+          MediaChannel::vdec(vdec_channel),
+          MediaChannel::vpss(vpss_group, vpss_channel)));
+      return *this;
+    }
+
+    Builder &addVpssToVo(int vpss_group, int vpss_channel, int vo_device = 0,
+                         int vo_channel = 0) {
+      config_.graph.binds.push_back(Mmf::bind(
+          MediaChannel::vpss(vpss_group, vpss_channel),
+          MediaChannel::vo(vo_device, vo_channel)));
+      return *this;
+    }
+
+    Builder &addVenc(const VencChannel::Config &config) {
+      config_.graph.venc.push_back(config);
+      return *this;
+    }
+
+    Builder &addVdec(const VdecChannel::Config &config) {
+      config_.graph.vdec.push_back(config);
+      return *this;
+    }
+
+    Builder &addVo(const VoOutput::Config &config) {
+      config_.graph.vo.push_back(config);
+      return *this;
+    }
+
+    Builder &addOsd(const OsdRegion::Config &config) {
+      config_.graph.osd.push_back(config);
+      return *this;
+    }
+
+    Builder &addOsdAttach(const OsdAttachConfig &config) {
+      config_.graph.osd_attaches.push_back(config);
+      return *this;
+    }
+
+    Builder &setReuseExistingSystem(bool reuse) {
+      config_.reuse_existing_system = reuse;
+      return *this;
+    }
+
+    Builder &setConfigureVb(bool configure) {
+      config_.configure_vb = configure;
+      return *this;
+    }
+
+    Config build() const { return config_; }
+
+   private:
+    Config config_;
+  };
+
   bool open(std::string *error = nullptr);
   void close();
 
   bool isOpen() const;
+
+  static Builder builder() { return Builder(); }
 
   static VpssConfig vpssOutput(int group = 0, int channel = 0,
                                int input_width = 1920, int input_height = 1080,
@@ -149,6 +269,7 @@ class Mmf {
     config.pool.width = output_width;
     config.pool.height = output_height;
     config.pool.pixel_format = pixel_format;
+    config.pools.push_back(config.pool);
     config.vpss = vpssOutput(group, channel, input_width, input_height,
                              output_width, output_height, pixel_format);
     if (bind_vi) {
@@ -162,7 +283,22 @@ class Mmf {
       int vi_channel = 0, bool configure_vb = true) {
     Config config;
     config.configure_vb = configure_vb;
+    if (!outputs.empty()) {
+      PoolConfig pool;
+      pool.width = outputs.front().output_width;
+      pool.height = outputs.front().output_height;
+      pool.pixel_format = outputs.front().pixel_format;
+      config.pool = pool;
+    }
     config.graph.vpss = outputs;
+    for (std::vector<VpssConfig>::const_iterator it = outputs.begin();
+         it != outputs.end(); ++it) {
+      PoolConfig pool;
+      pool.width = it->output_width;
+      pool.height = it->output_height;
+      pool.pixel_format = it->pixel_format;
+      config.pools.push_back(pool);
+    }
     for (std::vector<VpssConfig>::const_iterator it = outputs.begin();
          it != outputs.end(); ++it) {
       config.graph.binds.push_back(

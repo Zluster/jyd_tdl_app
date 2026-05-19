@@ -1,161 +1,171 @@
-# Algorithms
+# 算法说明
 
-This document describes the current algorithm-facing runtime layout,
-postprocess behavior, and the intended extension points.
+本文说明当前算法运行时布局、后处理职责以及扩展方式。
 
-## Runtime Layers
+## 运行时分层
 
-Current algorithm implementation lives under:
+算法实现主要在：
 
 - `src/algorithm/algorithm_engine.cpp`
-- `src/algorithm/nn_base.cpp`
 - `src/algorithm/nn_yolov5.cpp`
 - `src/algorithm/nn_yolov8.cpp`
 - `src/algorithm/nn_classifier.cpp`
 - `src/algorithm/nn_feature.cpp`
+- `src/algorithm/nn_scrfd.cpp`
+- `src/algorithm/nn_face_attribute.cpp`
+- `src/algorithm/nn_plate_recognizer.cpp`
 
-Public wrappers are intentionally thinner than the runtime layer:
+对外公开包装主要是：
 
 - `Detector`
 - `Classifier`
+- `FaceDetector`
+- `FaceAttributeClassifier`
+- `PlateRecognizer`
 - `FeatureExtractor`
-- `Pipeline`
+- `KeypointDetector`
+- `SemanticSegmenter`
+- `InstanceSegmenter`
+- `LaneDetector`
+- `VoiceActivityDetector`
 
-The wrapper layer decides which runtime to instantiate.
-The runtime layer owns preprocessing, tensor decode, and postprocess.
+包装层负责选择运行时，运行时负责真正的预处理、推理和后处理。
 
-## Current Algorithm Families
+## 当前算法家族
 
-- `NnYolov5`
-  Used for YOLOv5-style object detection models.
-- `NnYolov8`
-  Used for YOLOv8-style object detection models.
-- `NnClassifier`
-  Used for classification models that return ranked class scores.
-- `NnFeature`
-  Used for embedding / feature extraction models.
+- `NnYolov5`：YOLOv5 风格目标检测
+- `NnYolov8`：YOLOv8 风格目标检测
+- `NnClassifier`：分类
+- `NnFeature`：特征提取
+- `NnScrfd`：SCRFD 人脸检测
+- `NnFaceAttribute`：人脸属性
+- `NnPlateRecognizer`：车牌识别
+- `KeypointDetector`：关键点
+- `SemanticSegmenter`：语义分割
+- `InstanceSegmenter`：实例分割
+- `LaneDetector`：车道线
+- `VoiceActivityDetector`：语音活动检测
 
-## Model Selection
+## YOLOv5 当前实现
 
-The project does not depend on vendor `model_factory.json` at runtime.
-Instead it resolves runtime selection from:
+`YOLOv5` 当前负责：
 
-1. explicit `model_type` in `ModelSessionConfig`
-2. `model_type` / `runtime` / `task_name` in `ModelDescriptor`
-3. task defaults in `AlgorithmEngine`
+- 模型打开
+- 图片或原生帧输入统一
+- letterbox 预处理
+- `BGR -> RGB`
+- 输入量化适配
+- BMRuntime 推理
+- 输出反量化
+- anchor 解码
+- 阈值过滤
+- NMS
+- 标签映射
 
-Recommended user-facing construction:
+### 当前输入支持
 
-```cpp
-tdl_app::Detector det = tdl_app::Detector::yolov8();
-tdl_app::Classifier cls = tdl_app::Classifier::generic();
-tdl_app::FeatureExtractor feat = tdl_app::FeatureExtractor::generic();
+- 图片路径
+- `Frame`
+- `VIDEO_FRAME_INFO_S`
 
-auto cfg = tdl_app::ModelSessionConfig::fromSpec(
-    "./configs/model_specs/yolov8n_det_coco80.ini",
-    "./firmware/libbm1688_kernel_module.so",
-    "./models");
-```
+### 当前原生帧支持格式
 
-## Postprocess Behavior
+- `RGB888`
+- `BGR888`
+- `RGB888_PLANAR`
+- `BGR888_PLANAR`
+- `NV12`
+- `NV21`
+- `YUV400`
 
-### YOLOv5
+### 输出
 
-`NnYolov5` owns:
+- `AlgorithmResult.boxes`
+- `AlgorithmResult.labels`
 
-- model open
-- image / native frame preprocess
-- tensor decode
-- confidence threshold filtering
-- IoU-based NMS
-- label mapping from descriptor
+## YOLOv8 当前实现
 
-Expected output fields:
+`YOLOv8` 负责：
 
-- `AlgorithmResult::boxes`
-- `AlgorithmResult::labels`
+- 图片 / 帧输入
+- letterbox
+- DFL 解码
+- 阈值过滤
+- NMS
+- 标签映射
 
-### YOLOv8
+输出仍然是：
 
-`NnYolov8` owns:
+- `AlgorithmResult.boxes`
+- `AlgorithmResult.labels`
 
-- model open
-- image / native frame preprocess
-- branch/output interpretation for supported YOLOv8 layouts
-- confidence threshold filtering
-- IoU-based NMS
-- label mapping from descriptor
+## 分类与特征
 
-Expected output fields:
+`Classifier` 负责：
 
-- `AlgorithmResult::boxes`
-- `AlgorithmResult::labels`
+- resize / 通道转换 / 归一化
+- score 向量解析
+- softmax 可选
+- top-k 输出
 
-### Classifier
+输出：
 
-`NnClassifier` owns:
+- `AlgorithmResult.classes`
+- `AlgorithmResult.labels`
 
-- input preprocess
-- score vector decode
-- top-k selection
-- class label mapping
+`FeatureExtractor` 负责：
 
-Expected output fields:
+- 图像预处理
+- embedding 导出
+- 可选 L2 归一化
 
-- `AlgorithmResult::classes`
-- `AlgorithmResult::labels`
+输出：
 
-### Feature
+- `AlgorithmResult.feature`
 
-`NnFeature` owns:
+## 人脸和 OCR
 
-- input preprocess
-- embedding tensor decode
-- flat feature vector export
+`SCRFD` 负责：
 
-Expected output fields:
+- box 解码
+- 5 点 landmark 解码
+- NMS
 
-- `AlgorithmResult::feature`
+输出：
 
-## Threshold / IoU / Top-K
+- `AlgorithmResult.boxes`
+- `AlgorithmResult.boxes[i].landmarks`
 
-`InferOptions` currently means:
+`FaceAttributeClassifier` 负责：
 
-- `threshold`
-  Detection confidence threshold, and a generic confidence floor for other runtimes.
-- `iou_threshold`
-  Used by detector runtimes during NMS.
-- `top_k`
-  Used by classifier-style postprocess.
+- 人脸 crop
+- 多头输出映射
+- 属性结果导出
 
-The compatibility overload `runOnce(float threshold, ...)` is still supported,
-but the preferred path is:
+输出：
 
-```cpp
-tdl_app::InferOptions opt;
-opt.threshold = 0.25f;
-opt.iou_threshold = 0.45f;
-opt.top_k = 5;
-pipeline.runOnce(opt, &result, &error);
-```
+- `AlgorithmResult.attributes`
 
-## Extension Rules
+`PlateRecognizer` 负责：
 
-When adding a new algorithm family:
+- ROI 裁剪
+- CTC greedy decode
+- 文本输出
 
-1. put runtime implementation under `src/algorithm/`
-2. keep vendor/tensor/postprocess details inside the runtime class
-3. expose a small public wrapper only if the family is meant to be stable
-4. keep `AlgorithmResult` stable when possible
-5. add a focused demo instead of extending a catch-all binary
+输出：
 
-## Recommended Next Families
+- `AlgorithmResult.text`
 
-Current codebase is structurally ready for:
+## 扩展规则
 
-- face detector wrapper
-- pose / keypoint wrapper
-- OCR detector/recognizer wrapper
-- face feature + compare helper
+新增算法 wrapper 时，建议遵守：
 
-Those should be added as distinct runtime classes instead of growing YOLO-specific code.
+1. `load/open` 里只做一次性初始化。
+2. `predict/predictFrame` 只做单次推理路径。
+3. 预处理写在运行时类内部。
+4. 后处理也写在运行时类内部，不要散落到 demo。
+5. 最终统一写回稳定结果结构。
+
+开发模板见：
+
+- [开发指南](DEV_GUIDE.md)

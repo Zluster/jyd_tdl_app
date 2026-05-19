@@ -387,6 +387,8 @@ bool SensorMediaImpl::open(std::string *error) {
   applySensorIniOverrides(config_.sensor_ini, &sensor_cfg_);
   std::fprintf(stderr, "sensor_media: sensor cfg loaded, dev_num=%d\n",
                sensor_cfg_.sns_ini_cfg.devNum);
+  std::fprintf(stderr,
+               "sensor_media: build marker 2026-05-19-1438 ipcamera-align-v2\n");
   ret = CVI_SNS_SetSnsDrvCfg(&sensor_cfg_);
   if (ret != CVI_SUCCESS) {
     setError(error, "CVI_SNS_SetSnsDrvCfg failed, ret=" + std::to_string(ret));
@@ -576,21 +578,6 @@ bool SensorMediaImpl::initSys(std::string *error) {
     return false;
   }
 
-  ret = CVI_SYS_Init();
-  if (ret != CVI_SUCCESS) {
-    if (config_.reuse_existing_sys) {
-      std::fprintf(stderr,
-                   "sensor_media: CVI_SYS_Init failed(ret=%d), reuse existing system state\n",
-                   ret);
-    } else {
-      setError(error, "CVI_SYS_Init failed, ret=" + std::to_string(ret));
-      return false;
-    }
-  } else {
-    sys_inited_ = true;
-    own_sys_ = !config_.reuse_existing_sys;
-  }
-
   VB_CONFIG_S vb_config;
   std::memset(&vb_config, 0, sizeof(vb_config));
   for (int i = 0; i < sensor_cfg_.sns_ini_cfg.devNum; ++i) {
@@ -622,13 +609,14 @@ bool SensorMediaImpl::initSys(std::string *error) {
   }
 
   if (config_.enable_vpss) {
-    for (const auto &output : vpss_outputs_) {
+    for (auto &output : vpss_outputs_) {
       const CVI_U32 vpss_blk_size =
           COMMON_GetPicBufferSize(
               static_cast<CVI_U32>(output.config.output_width),
               static_cast<CVI_U32>(output.config.output_height),
               static_cast<PIXEL_FORMAT_E>(output.config.output_pixel_format),
               DATA_BITWIDTH_8, COMPRESS_MODE_NONE, DEFAULT_ALIGN);
+      output.common_pool_index = static_cast<int>(vb_config.u32MaxPoolCnt);
       if (!addPool(&vb_config, vpss_blk_size,
                    static_cast<CVI_U32>(output.config.vb_block_count))) {
         setError(error, "VB pool configuration overflow");
@@ -666,6 +654,21 @@ bool SensorMediaImpl::initSys(std::string *error) {
       vb_inited_ = true;
       own_vb_ = !config_.reuse_existing_vb;
     }
+  }
+
+  ret = CVI_SYS_Init();
+  if (ret != CVI_SUCCESS) {
+    if (config_.reuse_existing_sys) {
+      std::fprintf(stderr,
+                   "sensor_media: CVI_SYS_Init failed(ret=%d), reuse existing system state\n",
+                   ret);
+    } else {
+      setError(error, "CVI_SYS_Init failed, ret=" + std::to_string(ret));
+      return false;
+    }
+  } else {
+    sys_inited_ = true;
+    own_sys_ = !config_.reuse_existing_sys;
   }
 
   if (!configureViVpssMode(error)) {

@@ -19,22 +19,44 @@ add_library(tdl_app_sdk STATIC
   src/algorithm/algorithm_engine.cpp
   src/algorithm/classifier.cpp
   src/algorithm/detector.cpp
+  src/algorithm/face_attribute_classifier.cpp
+  src/algorithm/face_detector.cpp
   src/algorithm/feature_extractor.cpp
+  src/algorithm/instance_segmenter.cpp
+  src/algorithm/keypoint_detector.cpp
+  src/algorithm/lane_detector.cpp
   src/algorithm/model_descriptor.cpp
   src/algorithm/nn_base.cpp
   src/algorithm/nn_classifier.cpp
+  src/algorithm/nn_face_attribute.cpp
   src/algorithm/nn_feature.cpp
+  src/algorithm/nn_plate_recognizer.cpp
+  src/algorithm/nn_scrfd.cpp
   src/algorithm/nn_yolov5.cpp
   src/algorithm/nn_yolov8.cpp
+  src/algorithm/plate_recognizer.cpp
+  src/algorithm/semantic_segmenter.cpp
+  src/algorithm/voice_activity_detector.cpp
+  src/media/audio_decoder.cpp
+  src/media/audio_encoder.cpp
+  src/media/audio_input.cpp
+  src/media/audio_output.cpp
+  src/media/audio_system.cpp
   src/media/camera.cpp
   src/media/frame_reader.cpp
   src/media/frame_source.cpp
   src/media/frame_sink.cpp
+  src/media/graphic_vo_layer.cpp
+  src/media/media_ipc_client.cpp
+  src/media/media_ipc_server.cpp
   src/media/media_link.cpp
   src/media/media_system.cpp
+  src/media/mipi_device.cpp
   src/media/osd_region.cpp
   src/media/mmf.cpp
+  src/multi_stage_pipeline.cpp
   src/pipeline.cpp
+  src/media/private/audio_runtime.cpp
   src/media/private/sensor_media_impl.cpp
   src/media/private/sensor_media_vi_isp.cpp
   src/media/private/sensor_media_vpss.cpp
@@ -89,6 +111,59 @@ if(TDL_APP_BUILD_DEMOS)
   target_sources(tdl_feature_demo PRIVATE third_party/vendor/ini/ini.c)
   target_include_directories(tdl_feature_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
   target_link_libraries(tdl_feature_demo PRIVATE tdl_app_sdk)
+
+  add_executable(tdl_keypoint_demo apps/tdl_keypoint_demo.cpp)
+  target_sources(tdl_keypoint_demo PRIVATE third_party/vendor/ini/ini.c)
+  target_include_directories(tdl_keypoint_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
+  target_link_libraries(tdl_keypoint_demo PRIVATE tdl_app_sdk)
+
+  add_executable(tdl_semantic_seg_demo apps/tdl_semantic_seg_demo.cpp)
+  target_sources(tdl_semantic_seg_demo PRIVATE third_party/vendor/ini/ini.c)
+  target_include_directories(tdl_semantic_seg_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
+  target_link_libraries(tdl_semantic_seg_demo PRIVATE tdl_app_sdk)
+
+  add_executable(tdl_instance_seg_demo apps/tdl_instance_seg_demo.cpp)
+  target_sources(tdl_instance_seg_demo PRIVATE third_party/vendor/ini/ini.c)
+  target_include_directories(tdl_instance_seg_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
+  target_link_libraries(tdl_instance_seg_demo PRIVATE tdl_app_sdk)
+
+  add_executable(tdl_lane_demo apps/tdl_lane_demo.cpp)
+  target_sources(tdl_lane_demo PRIVATE third_party/vendor/ini/ini.c)
+  target_include_directories(tdl_lane_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
+  target_link_libraries(tdl_lane_demo PRIVATE tdl_app_sdk)
+
+  add_executable(tdl_vad_demo apps/tdl_vad_demo.cpp)
+  target_sources(tdl_vad_demo PRIVATE third_party/vendor/ini/ini.c)
+  target_include_directories(tdl_vad_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
+  target_link_libraries(tdl_vad_demo PRIVATE tdl_app_sdk)
+
+  add_executable(tdl_audio_aio_demo apps/tdl_audio_aio_demo.cpp)
+  target_sources(tdl_audio_aio_demo PRIVATE third_party/vendor/ini/ini.c)
+  target_include_directories(tdl_audio_aio_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
+  target_link_libraries(tdl_audio_aio_demo PRIVATE tdl_app_sdk)
+
+  add_executable(tdl_face_detect_demo apps/tdl_face_detect_demo.cpp apps/demo_support.cpp)
+  target_sources(tdl_face_detect_demo PRIVATE third_party/vendor/ini/ini.c)
+  target_include_directories(tdl_face_detect_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
+  target_link_libraries(tdl_face_detect_demo PRIVATE tdl_app_sdk)
+
+  add_executable(tdl_face_attribute_demo apps/tdl_face_attribute_demo.cpp apps/demo_support.cpp)
+  target_sources(tdl_face_attribute_demo PRIVATE third_party/vendor/ini/ini.c)
+  target_include_directories(tdl_face_attribute_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
+  target_link_libraries(tdl_face_attribute_demo PRIVATE tdl_app_sdk)
+
+  add_executable(tdl_face_attr_pipeline_demo
+    apps/tdl_face_attr_pipeline_demo.cpp
+    apps/demo_support.cpp
+  )
+  target_sources(tdl_face_attr_pipeline_demo PRIVATE third_party/vendor/ini/ini.c)
+  target_include_directories(tdl_face_attr_pipeline_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
+  target_link_libraries(tdl_face_attr_pipeline_demo PRIVATE tdl_app_sdk)
+
+  add_executable(tdl_plate_recognize_demo apps/tdl_plate_recognize_demo.cpp apps/demo_support.cpp)
+  target_sources(tdl_plate_recognize_demo PRIVATE third_party/vendor/ini/ini.c)
+  target_include_directories(tdl_plate_recognize_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
+  target_link_libraries(tdl_plate_recognize_demo PRIVATE tdl_app_sdk)
 
   add_executable(tdl_camera_capture_demo
     apps/tdl_camera_capture_demo.cpp
@@ -151,6 +226,11 @@ if(TDL_APP_BUILD_DEMOS)
   target_include_directories(tdl_osd_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
   target_link_libraries(tdl_osd_demo PRIVATE tdl_app_sdk)
 
+  add_executable(tdl_graphic_vo_demo apps/tdl_graphic_vo_demo.cpp)
+  target_sources(tdl_graphic_vo_demo PRIVATE third_party/vendor/ini/ini.c)
+  target_include_directories(tdl_graphic_vo_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
+  target_link_libraries(tdl_graphic_vo_demo PRIVATE tdl_app_sdk)
+
   add_executable(tdl_vdec_demo apps/tdl_vdec_demo.cpp)
   target_sources(tdl_vdec_demo PRIVATE third_party/vendor/ini/ini.c)
   target_include_directories(tdl_vdec_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
@@ -167,6 +247,16 @@ if(TDL_APP_BUILD_DEMOS)
     tdl_yolov8_demo
     tdl_classify_demo
     tdl_feature_demo
+    tdl_keypoint_demo
+    tdl_semantic_seg_demo
+    tdl_instance_seg_demo
+    tdl_lane_demo
+    tdl_vad_demo
+    tdl_audio_aio_demo
+    tdl_face_detect_demo
+    tdl_face_attribute_demo
+    tdl_face_attr_pipeline_demo
+    tdl_plate_recognize_demo
     tdl_camera_capture_demo
     tdl_camera_detect_demo
     tdl_camera_classify_demo
@@ -175,6 +265,7 @@ if(TDL_APP_BUILD_DEMOS)
     tdl_multi_vpss_demo
     tdl_media_smoke_demo
     tdl_osd_demo
+    tdl_graphic_vo_demo
     tdl_vdec_demo
     RUNTIME DESTINATION bin
   )

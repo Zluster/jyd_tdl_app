@@ -135,6 +135,8 @@ bool SensorMediaImpl::startViDev(std::string *error) {
   const int dev_num = sensor_cfg_.sns_ini_cfg.devNum;
   for (int i = 0; i < dev_num; ++i) {
     VI_DEV_ATTR_S dev_attr = makeViDevAttr(sensor_cfg_.sns_cfg, i);
+    VI_DEV_ATTR_EX_S dev_attr_ex;
+    std::memset(&dev_attr_ex, 0, sizeof(dev_attr_ex));
     VI_DEV_BIND_PIPE_S bind_attr;
     std::memset(&bind_attr, 0, sizeof(bind_attr));
     bind_attr.MipiDev = sensor_cfg_.sns_ini_cfg.MipiDev[i];
@@ -150,6 +152,25 @@ bool SensorMediaImpl::startViDev(std::string *error) {
     if (ret != CVI_SUCCESS) {
       setError(error, "CVI_VI_SetDevAttr failed, ret=" + std::to_string(ret));
       return false;
+    }
+    if (sensor_cfg_.sns_ini_cfg.u8MuxDev[i]) {
+      dev_attr_ex.bMuxDev = CVI_TRUE;
+      dev_attr_ex.u8SnsrNum = static_cast<CVI_U8>(dev_num);
+      dev_attr_ex.phyDev = sensor_cfg_.sns_ini_cfg.u8AttachDev[i];
+      for (int j = 0; j < VI_MAX_DEV_SWITCH_DEPTH; ++j) {
+        const int port = sensor_cfg_.sns_ini_cfg.s32SwitchPort[i][j];
+        dev_attr_ex.stGpioCfg[j].bEnable = port != -1 ? CVI_TRUE : CVI_FALSE;
+        dev_attr_ex.stGpioCfg[j].s32GpioPort = port;
+        dev_attr_ex.stGpioCfg[j].s32GpioPin =
+            sensor_cfg_.sns_ini_cfg.s32SwitchPin[i][j];
+        dev_attr_ex.stGpioCfg[j].s32GpioPol =
+            sensor_cfg_.sns_ini_cfg.s32SwitchPol[i][j];
+      }
+      ret = CVI_VI_SetDevAttrEx(i, &dev_attr_ex);
+      if (ret != CVI_SUCCESS) {
+        setError(error, "CVI_VI_SetDevAttrEx failed, ret=" + std::to_string(ret));
+        return false;
+      }
     }
     ret = CVI_VI_EnableDev(i);
     if (ret != CVI_SUCCESS) {

@@ -34,6 +34,7 @@ Camera &Camera::operator=(Camera &&other) noexcept = default;
 Camera::~Camera() = default;
 
 bool Camera::open(std::string *error) {
+  close();
   source_ = createSource();
   return source_->open(error);
 }
@@ -51,6 +52,7 @@ bool Camera::read(Frame *frame, std::string *error) {
 void Camera::close() {
   if (source_) {
     source_->close();
+    source_.reset();
   }
 }
 

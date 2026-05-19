@@ -116,10 +116,10 @@ int main(int argc, char **argv) {
   tdl_app::Detector::Config det_config;
   det_config.model_spec = opt.model_spec;
   det_config.firmware = opt.firmware;
-  tdl_app::Detector detector;
   std::cerr << "detector: load begin model_spec=" << det_config.model_spec
             << " firmware=" << det_config.firmware << "\n";
-  if (!detector.load(det_config, &error)) {
+  tdl_app::Detector detector(det_config, &error);
+  if (!detector.initialized()) {
     std::cerr << "detector load failed: " << error << "\n";
     camera_demo_support::closeCameraRuntime(&runtime);
     return 4;
@@ -144,9 +144,16 @@ int main(int argc, char **argv) {
               << " format=" << frame.format
               << " native=" << frame.native << "\n";
 
-    tdl_app::AlgorithmResult result;
     std::cerr << "detector: run frame begin index=" << index << "\n";
-    if (!detector.runFrame(frame, infer_options, &result, &error)) {
+    auto *video = static_cast<VIDEO_FRAME_INFO_S *>(frame.native);
+    if (!video) {
+      std::cerr << "detector run failed: frame has no native VIDEO_FRAME_INFO_S\n";
+      camera_demo_support::closeCameraRuntime(&runtime);
+      return 6;
+    }
+    error.clear();
+    tdl_app::AlgorithmResult result = detector(*video, infer_options, &error);
+    if (!error.empty()) {
       std::cerr << "detector run failed: " << error << "\n";
       camera_demo_support::closeCameraRuntime(&runtime);
       return 6;

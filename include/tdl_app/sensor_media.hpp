@@ -90,14 +90,21 @@ class SensorMedia {
     config.output_width = output_width;
     config.output_height = output_height;
     config.output_pixel_format = output_pixel_format;
-    config.enable_vpss = use_vpss_backend;
-    config.bind_vi_to_vpss = use_vpss_backend;
-    config.online_vpss = use_vpss_backend;
-    if (use_vpss_backend) {
-      config.vpss_outputs.push_back(
-          vpssOutput(vpss_group, vpss_channel, output_width, output_height,
-                     output_pixel_format, true));
-    }
+    // Keep a live VPSS group even when the application reads VI directly.
+    // The working ipcamera graph uses an online VI->VPSS path (grp0/ch0),
+    // and bringing up the same path helps align the media topology.
+    config.enable_vpss = true;
+    config.bind_vi_to_vpss = true;
+    // Match the working ipcamera graph: VI runs in OFFLINE->ONLINE mode and
+    // VPSS dev1 consumes ISP output even when the application later reads VI.
+    config.online_vpss = true;
+    // Full-stack startup should rebuild SYS/VB from a clean state instead of
+    // inheriting a previous ipcamera graph.
+    config.reuse_existing_sys = false;
+    config.reuse_existing_vb = false;
+    config.vpss_outputs.push_back(
+        vpssOutput(vpss_group, vpss_channel, output_width, output_height,
+                   output_pixel_format, true));
     config.startup_mode = StartupMode::FullStack;
     return config;
   }

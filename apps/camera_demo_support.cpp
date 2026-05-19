@@ -174,6 +174,21 @@ bool openCameraRuntime(const CommonOptions &opt, CameraRuntime *runtime,
     if (!runtime->sensor_media->open(error)) {
       return false;
     }
+
+    tdl_app::Camera::Config camera_config = makeCameraConfig(opt);
+    if (!opt.use_ipcamera_helper && !opt.attach_existing &&
+        opt.backend == "vi") {
+      std::cerr
+          << "camera runtime: sensor-media full-stack uses online VPSS; "
+             "reading frames from VPSS grp="
+          << opt.group << " ch=" << opt.channel << "\n";
+      camera_config =
+          tdl_app::Camera::vpss(opt.group, opt.channel, opt.width, opt.height,
+                                opt.pixel_format, opt.timeout_ms);
+      camera_config.device = opt.device;
+    }
+    runtime->camera = tdl_app::Camera(camera_config);
+    return runtime->camera.open(error);
   } else if (opt.use_mmf) {
     tdl_app::Mmf::Config mmf_config;
     mmf_config.pool.width = opt.width;

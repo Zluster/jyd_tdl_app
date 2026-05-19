@@ -52,7 +52,9 @@ bool VoOutput::open(std::string *error) {
   layer_attr.stDispRect.u32Height = static_cast<CVI_U32>(config_.height);
   layer_attr.stImageSize.u32Width = static_cast<CVI_U32>(config_.width);
   layer_attr.stImageSize.u32Height = static_cast<CVI_U32>(config_.height);
-  layer_attr.u32DispFrmRt = 25;
+  layer_attr.u32DispFrmRt = static_cast<CVI_U32>(config_.frame_rate);
+  layer_attr.enPixFormat =
+      static_cast<PIXEL_FORMAT_E>(config_.pixel_format);
 
   ret = CVI_VO_SetVideoLayerAttr(config_.layer, &layer_attr);
   if (ret != CVI_SUCCESS) {
@@ -75,11 +77,11 @@ bool VoOutput::open(std::string *error) {
 
   VO_CHN_ATTR_S chn_attr;
   std::memset(&chn_attr, 0, sizeof(chn_attr));
-  chn_attr.stRect.s32X = 0;
-  chn_attr.stRect.s32Y = 0;
+  chn_attr.stRect.s32X = config_.channel_x;
+  chn_attr.stRect.s32Y = config_.channel_y;
   chn_attr.stRect.u32Width = static_cast<CVI_U32>(config_.width);
   chn_attr.stRect.u32Height = static_cast<CVI_U32>(config_.height);
-  chn_attr.u32Priority = 0;
+  chn_attr.u32Priority = static_cast<CVI_U32>(config_.priority);
 
   ret = CVI_VO_SetChnAttr(config_.layer, config_.channel, &chn_attr);
   if (ret != CVI_SUCCESS) {

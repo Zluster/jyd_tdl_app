@@ -97,6 +97,51 @@ exec "${DIR}/bin/tdl_feature_demo" "$@"
 EOF
 chmod +x "${RESOLVED_PKG_DIR}/run_feature_demo.sh"
 
+cat > "${RESOLVED_PKG_DIR}/run_keypoint_demo.sh" <<'EOF'
+#!/bin/sh
+set -eu
+DIR=$(cd "$(dirname "$0")" && pwd)
+. "${DIR}/env.sh"
+exec "${DIR}/bin/tdl_keypoint_demo" "$@"
+EOF
+chmod +x "${RESOLVED_PKG_DIR}/run_keypoint_demo.sh"
+
+cat > "${RESOLVED_PKG_DIR}/run_semantic_seg_demo.sh" <<'EOF'
+#!/bin/sh
+set -eu
+DIR=$(cd "$(dirname "$0")" && pwd)
+. "${DIR}/env.sh"
+exec "${DIR}/bin/tdl_semantic_seg_demo" "$@"
+EOF
+chmod +x "${RESOLVED_PKG_DIR}/run_semantic_seg_demo.sh"
+
+cat > "${RESOLVED_PKG_DIR}/run_instance_seg_demo.sh" <<'EOF'
+#!/bin/sh
+set -eu
+DIR=$(cd "$(dirname "$0")" && pwd)
+. "${DIR}/env.sh"
+exec "${DIR}/bin/tdl_instance_seg_demo" "$@"
+EOF
+chmod +x "${RESOLVED_PKG_DIR}/run_instance_seg_demo.sh"
+
+cat > "${RESOLVED_PKG_DIR}/run_lane_demo.sh" <<'EOF'
+#!/bin/sh
+set -eu
+DIR=$(cd "$(dirname "$0")" && pwd)
+. "${DIR}/env.sh"
+exec "${DIR}/bin/tdl_lane_demo" "$@"
+EOF
+chmod +x "${RESOLVED_PKG_DIR}/run_lane_demo.sh"
+
+cat > "${RESOLVED_PKG_DIR}/run_vad_demo.sh" <<'EOF'
+#!/bin/sh
+set -eu
+DIR=$(cd "$(dirname "$0")" && pwd)
+. "${DIR}/env.sh"
+exec "${DIR}/bin/tdl_vad_demo" "$@"
+EOF
+chmod +x "${RESOLVED_PKG_DIR}/run_vad_demo.sh"
+
 cat > "${RESOLVED_PKG_DIR}/run_camera_capture_demo.sh" <<'EOF'
 #!/bin/sh
 set -eu

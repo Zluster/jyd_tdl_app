@@ -8,6 +8,7 @@
 namespace tdl_app {
 
 class NnBase;
+class MultiStagePipeline;
 
 class Classifier {
  public:
@@ -51,6 +52,7 @@ class Classifier {
 
  private:
   friend class Pipeline;
+  friend class MultiStagePipeline;
 
   std::string requested_model_type_;
   Config config_;

@@ -1,10 +1,15 @@
 #pragma once
 
+#include <memory>
 #include <string>
+#include <vector>
 
 #include "tdl_app/media_types.hpp"
 
 namespace tdl_app {
+
+class SysContext;
+class VideoBufferManager;
 
 class MediaSystem {
  public:
@@ -12,6 +17,7 @@ class MediaSystem {
     bool reuse_existing = true;
     bool configure_vb = false;
     VideoBufferPoolConfig pool;
+    std::vector<VideoBufferPoolConfig> pools;
 
     static Config attachExisting() {
       Config config;
@@ -26,6 +32,19 @@ class MediaSystem {
       config.reuse_existing = reuse;
       config.configure_vb = true;
       config.pool = pool_config;
+      config.pools.push_back(pool_config);
+      return config;
+    }
+
+    static Config withVideoBuffers(const std::vector<VideoBufferPoolConfig> &pool_configs,
+                                   bool reuse = true) {
+      Config config;
+      config.reuse_existing = reuse;
+      config.configure_vb = true;
+      config.pools = pool_configs;
+      if (!config.pools.empty()) {
+        config.pool = config.pools.front();
+      }
       return config;
     }
   };
@@ -43,9 +62,9 @@ class MediaSystem {
 
  private:
   Config config_;
+  std::unique_ptr<SysContext> sys_context_;
+  std::unique_ptr<VideoBufferManager> video_buffers_;
   bool opened_ = false;
-  bool own_sys_ = false;
-  bool own_vb_ = false;
 };
 
 }  // namespace tdl_app

@@ -88,6 +88,9 @@ class RtspFrameSink::Impl {
     if (!venc_.encode(frame, &packet, error)) {
       return false;
     }
+    if (packet.blocks.empty()) {
+      return true;
+    }
 
     CVI_RTSP_DATA data;
     std::memset(&data, 0, sizeof(data));

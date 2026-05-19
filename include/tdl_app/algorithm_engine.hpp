@@ -43,12 +43,41 @@ struct ModelSessionConfig {
     config.model_type = type;
     return config;
   }
+
+  static ModelSessionConfig simple(
+      const std::string &spec, const std::string &firmware_path = std::string(),
+      const std::string &models = std::string(),
+      const std::string &type = std::string()) {
+    return fromSpec(spec, firmware_path, models, type);
+  }
 };
 
 struct InferOptions {
   float threshold = 0.5f;
   float iou_threshold = 0.45f;
   int top_k = 5;
+
+  static InferOptions withThreshold(float score_threshold) {
+    InferOptions options;
+    options.threshold = score_threshold;
+    return options;
+  }
+
+  static InferOptions detection(float score_threshold = 0.5f,
+                                float nms_iou_threshold = 0.45f) {
+    InferOptions options;
+    options.threshold = score_threshold;
+    options.iou_threshold = nms_iou_threshold;
+    return options;
+  }
+
+  static InferOptions classification(float score_threshold = 0.0f,
+                                     int max_results = 5) {
+    InferOptions options;
+    options.threshold = score_threshold;
+    options.top_k = max_results;
+    return options;
+  }
 };
 
 struct Point {
@@ -65,6 +94,10 @@ struct Box {
   float score = 0.0f;
   int class_id = -1;
   std::vector<Point> landmarks;
+
+  float width() const { return x2 - x1; }
+  float height() const { return y2 - y1; }
+  bool valid() const { return x2 > x1 && y2 > y1; }
 };
 
 struct ClassificationItem {
@@ -85,6 +118,27 @@ struct AlgorithmResult {
   std::vector<float> feature;
   std::vector<std::string> labels;
   std::string text;
+
+  void clear() {
+    classes.clear();
+    boxes.clear();
+    points.clear();
+    attributes.clear();
+    feature.clear();
+    labels.clear();
+    text.clear();
+  }
+
+  bool empty() const {
+    return classes.empty() && boxes.empty() && points.empty() &&
+           attributes.empty() && feature.empty() && text.empty();
+  }
+
+  int classCount() const { return static_cast<int>(classes.size()); }
+  int boxCount() const { return static_cast<int>(boxes.size()); }
+  int pointCount() const { return static_cast<int>(points.size()); }
+  int attributeCount() const { return static_cast<int>(attributes.size()); }
+  int featureCount() const { return static_cast<int>(feature.size()); }
 };
 
 class AlgorithmEngine {
