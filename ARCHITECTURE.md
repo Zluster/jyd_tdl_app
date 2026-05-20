@@ -1,113 +1,67 @@
-# 架构说明
+# tdl_app_sdk 架构说明
 
-工程分成两条并行主线：
+本文是根目录架构文档，描述项目整体组成和职责划分。
 
-1. 媒体栈
-2. 算法栈
+## 设计目标
 
-二者只通过 `Frame / FrameSource / FrameSink` 交汇。这样相机、RTSP、图片输入、算法包装和输出链路不会互相污染。
+- 提供稳定、可复用的上层 C++ API
+- 收敛厂商 SDK 细节
+- 支持图片、相机原生帧和板端媒体图输入
+- 支持 SDK 主机交叉编译和板端原生编译
+- 保持算法、媒体、输出模块解耦
 
-## 媒体栈
+## 主要模块
 
-公开类主要包括：
+### 1. 公共 API 层
 
-- `MediaSystem`
-- `SysContext`
-- `VideoBufferManager`
-- `VideoBufferPool`
-- `ViChannel`
-- `VpssGroup`
-- `MediaLink`
-- `FrameReader`
-- `Camera`
-- `Mmf`
-- `SensorMedia`
-- `VdecChannel`
-- `VencChannel`
-- `VoOutput`
-- `GraphicVoLayer`
-- `OsdRegion`
-- `RegionOverlay`
-- `RtspStreamer`
-- `MipiDevice`
+主要位于：
 
-职责划分：
+- `include/tdl_app/`
 
-- `MediaSystem / SysContext`：管理 `SYS/VB/ION`
-- `ViChannel / VpssGroup / MediaLink`：搭建媒体图
-- `FrameReader / Camera`：读取原生帧
-- `VencChannel / VdecChannel / RtspStreamer`：编码、解码、推流
-- `VoOutput / GraphicVoLayer / OsdRegion / RegionOverlay`：显示与叠图
-- `SensorMedia / Mmf`：把板级启动过程封到更高一层
-
-板级差异相关代码放在：
-
-- `src/media/private/`
-
-上层业务原则上不要直接碰这里。
-
-## 算法栈
-
-算法侧分四层：
-
-1. 输入抽象：`FrameSource`
-2. 模型运行时：`NnBase` 及其子类
-3. 输出抽象：`FrameSink`
-4. 编排层：`Pipeline / MultiStagePipeline`
-
-当前主要运行时：
-
-- `NnYolov5`
-- `NnYolov8`
-- `NnClassifier`
-- `NnFeature`
-- `NnScrfd`
-- `NnFaceAttribute`
-- `NnPlateRecognizer`
-
-这些类各自负责：
-
-- 模型加载
-- 预处理
-- 调用 BMRuntime 或 `tdl_sdk`
-- 输出 tensor 解码
-- 后处理
-- 填充统一结果结构
-
-## 统一结果结构
-
-大多数上层接口最后都会收敛到以下结构：
-
-- `AlgorithmResult`
-- `KeypointResult`
-- `SemanticSegmentationResult`
-- `InstanceSegmentationResult`
-- `LaneDetectionResult`
-- `VoiceActivityResult`
-
-这样做的目的是让上层业务代码不需要理解底层每个模型的原始 tensor 形状。
-
-## 为什么这样设计
-
-核心目标有三个：
-
-1. 把厂商 SDK 细节压到内部。
-2. 让图片输入和相机输入走同一套算法调用面。
-3. 为多模型、多阶段和脚本绑定保留稳定接口。
-
-## 当前推荐入口
-
-单模型场景优先用：
+对外典型类包括：
 
 - `Detector`
 - `Classifier`
 - `FaceDetector`
 - `FeatureExtractor`
+- `Camera`
+- `Pipeline`
 
-多阶段场景优先用：
+### 2. 算法实现层
 
-- `MultiStagePipeline`
+主要位于：
 
-媒体控制或板级能力优先用：
+- `src/algorithm/`
 
-- `advanced.hpp`
+负责：
+
+- 模型加载
+- 预处理
+- 推理调用
+- 后处理
+
+### 3. 媒体实现层
+
+主要位于：
+
+- `src/media/`
+- `src/media/private/`
+
+负责：
+
+- sensor / MIPI / ISP / VI / VPSS
+- OSD、显示、编码、RTSP
+- `Frame` 与相机链路封装
+
+### 4. 平台依赖层
+
+- CV184X 专用依赖：`third_party/cv184x/lib`
+- 系统通用依赖：`OpenCV`、`zlib`、`tinyalsa`
+
+## 当前重要结论
+
+- 板端原生编译已经可工作
+- 通用库已改用系统库
+- 相机抓图当前已验证使用：
+  - `sensor_cfg_cv1842hp_wevb_cv2003_ipcamera.ini`
+  - `--backend vpss`

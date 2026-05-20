@@ -1,10 +1,10 @@
 # 算法说明
 
-本文说明当前算法运行时布局、后处理职责以及扩展方式。
+本文说明当前算法运行时布局、主要后处理职责以及新增算法时建议遵循的模式。
 
-## 运行时分层
+## 当前算法目录
 
-算法实现主要在：
+算法核心实现主要位于：
 
 - `src/algorithm/algorithm_engine.cpp`
 - `src/algorithm/nn_yolov5.cpp`
@@ -15,7 +15,9 @@
 - `src/algorithm/nn_face_attribute.cpp`
 - `src/algorithm/nn_plate_recognizer.cpp`
 
-对外公开包装主要是：
+## 对外封装类
+
+当前常用算法封装包括：
 
 - `Detector`
 - `Classifier`
@@ -29,143 +31,190 @@
 - `LaneDetector`
 - `VoiceActivityDetector`
 
-包装层负责选择运行时，运行时负责真正的预处理、推理和后处理。
+这些封装类负责：
+
+- 选择运行时实现
+- 提供统一的加载、推理入口
+- 把结果写回统一结构
 
 ## 当前算法家族
 
-- `NnYolov5`：YOLOv5 风格目标检测
-- `NnYolov8`：YOLOv8 风格目标检测
-- `NnClassifier`：分类
-- `NnFeature`：特征提取
-- `NnScrfd`：SCRFD 人脸检测
-- `NnFaceAttribute`：人脸属性
-- `NnPlateRecognizer`：车牌识别
-- `KeypointDetector`：关键点
-- `SemanticSegmenter`：语义分割
-- `InstanceSegmenter`：实例分割
-- `LaneDetector`：车道线
-- `VoiceActivityDetector`：语音活动检测
+### 检测
+
+- `NnYolov5`
+- `NnYolov8`
+- `NnScrfd`
+
+### 分类与特征
+
+- `NnClassifier`
+- `NnFeature`
+
+### 人脸与 OCR
+
+- `NnFaceAttribute`
+- `NnPlateRecognizer`
+
+### 其它
+
+- `KeypointDetector`
+- `SemanticSegmenter`
+- `InstanceSegmenter`
+- `LaneDetector`
+- `VoiceActivityDetector`
 
 ## YOLOv5 当前实现
 
-`YOLOv5` 当前负责：
-
-- 模型打开
-- 图片或原生帧输入统一
-- letterbox 预处理
-- `BGR -> RGB`
-- 输入量化适配
-- BMRuntime 推理
-- 输出反量化
-- anchor 解码
-- 阈值过滤
-- NMS
-- 标签映射
-
-### 当前输入支持
+### 输入支持
 
 - 图片路径
 - `Frame`
 - `VIDEO_FRAME_INFO_S`
 
-### 当前原生帧支持格式
+### 当前支持的原生帧格式
 
-- `RGB888`
-- `BGR888`
-- `RGB888_PLANAR`
-- `BGR888_PLANAR`
-- `NV12`
-- `NV21`
-- `YUV400`
+- `PIXEL_FORMAT_RGB_888`
+- `PIXEL_FORMAT_BGR_888`
+- `PIXEL_FORMAT_RGB_888_PLANAR`
+- `PIXEL_FORMAT_BGR_888_PLANAR`
+- `PIXEL_FORMAT_NV12`
+- `PIXEL_FORMAT_NV21`
+- `PIXEL_FORMAT_YUV_400`
 
-### 输出
+### 主要处理流程
 
-- `AlgorithmResult.boxes`
-- `AlgorithmResult.labels`
+1. 统一得到输入图像
+2. `letterbox`
+3. `BGR -> RGB`
+4. 输入量化适配
+5. BMRuntime 推理
+6. 输出反量化
+7. anchor 解码
+8. 阈值过滤
+9. NMS
+10. 写回 `AlgorithmResult.boxes` 和 `labels`
 
 ## YOLOv8 当前实现
 
-`YOLOv8` 负责：
+主要处理流程与 YOLOv5 类似，但后处理重点是：
 
-- 图片 / 帧输入
-- letterbox
 - DFL 解码
-- 阈值过滤
+- 分类分数解析
 - NMS
-- 标签映射
 
-输出仍然是：
+最终输出仍然统一写入：
 
 - `AlgorithmResult.boxes`
 - `AlgorithmResult.labels`
 
 ## 分类与特征
 
-`Classifier` 负责：
+### Classifier
 
-- resize / 通道转换 / 归一化
+负责：
+
+- resize
+- 通道转换
+- 归一化
 - score 向量解析
-- softmax 可选
+- softmax（按需）
 - top-k 输出
 
-输出：
+最终输出：
 
 - `AlgorithmResult.classes`
 - `AlgorithmResult.labels`
 
-`FeatureExtractor` 负责：
+### FeatureExtractor
+
+负责：
 
 - 图像预处理
 - embedding 导出
 - 可选 L2 归一化
 
-输出：
+最终输出：
 
 - `AlgorithmResult.feature`
 
-## 人脸和 OCR
+## 人脸与车牌
 
-`SCRFD` 负责：
+### SCRFD
 
-- box 解码
+负责：
+
+- 人脸框解码
 - 5 点 landmark 解码
+- 阈值过滤
 - NMS
 
-输出：
+最终输出：
 
 - `AlgorithmResult.boxes`
 - `AlgorithmResult.boxes[i].landmarks`
 
-`FaceAttributeClassifier` 负责：
+### FaceAttributeClassifier
 
-- 人脸 crop
+负责：
+
+- 人脸 ROI 裁剪
 - 多头输出映射
 - 属性结果导出
 
-输出：
+最终输出：
 
 - `AlgorithmResult.attributes`
 
-`PlateRecognizer` 负责：
+### PlateRecognizer
 
-- ROI 裁剪
+负责：
+
+- 车牌 ROI 处理
 - CTC greedy decode
-- 文本输出
+- 去 blank、去重复
+- 输出最终文本
 
-输出：
+最终输出：
 
 - `AlgorithmResult.text`
 
-## 扩展规则
+## 新增算法时的建议规则
 
-新增算法 wrapper 时，建议遵守：
+### 1. 初始化只做一次
 
-1. `load/open` 里只做一次性初始化。
-2. `predict/predictFrame` 只做单次推理路径。
-3. 预处理写在运行时类内部。
-4. 后处理也写在运行时类内部，不要散落到 demo。
-5. 最终统一写回稳定结果结构。
+`load/open` 阶段只做一次性初始化，例如：
 
-开发模板见：
+- 申请 device
+- 设置 firmware 环境
+- 创建 runtime
+- 加载 bmodel
 
-- [开发指南](DEV_GUIDE.md)
+### 2. 单次推理路径要收敛
+
+`predict/predictFrame` 只负责：
+
+- 调预处理
+- 调推理
+- 调后处理
+- 写回结果
+
+### 3. 后处理必须放在运行时内部
+
+不要把以下逻辑散落到 demo：
+
+- NMS
+- softmax
+- anchor 解码
+- DFL 解码
+- CTC decode
+- landmark 映射
+
+### 4. 优先复用统一结果结构
+
+如无必要，不要再新造很多零散结构，优先复用：
+
+- `AlgorithmResult`
+- `KeypointResult`
+- `SemanticSegmentationResult`
+- `InstanceSegmentationResult`
+- `LaneDetectionResult`

@@ -3,8 +3,10 @@
 本文档说明如何在一块新的 CVITEK 板子上，从 `git clone` 开始完成：
 
 - 板端原生编译
-- 使用系统通用库，而不是仓库内 bundle 的 OpenCV、zlib、tinyalsa
+- 使用系统通用库，而不是仓库内 bundle 的 `OpenCV`、`zlib`、`tinyalsa`
 - 运行纯算法 demo
+- 运行相机抓图 demo
+- 运行音频 AIO 基础验证
 - 排查常见环境问题
 
 ## 1. 当前依赖策略
@@ -132,7 +134,7 @@ sh scripts/run_with_board_env.sh /mnt/sd/tdl_build_sys/tdl_classify_demo ...
 
 ## 6. 纯算法 demo 测试命令
 
-分类 demo：
+### 分类 demo
 
 ```sh
 cd /mnt/git/jyd_tdl_app
@@ -145,7 +147,7 @@ cd /mnt/git/jyd_tdl_app
   --output /mnt/sd/dog_cls_syslibs.jpg
 ```
 
-检测 demo：
+### 检测 demo
 
 ```sh
 cd /mnt/git/jyd_tdl_app
@@ -190,7 +192,7 @@ cd /mnt/git/jyd_tdl_app
 
 ## 8. 音频 AIO 基本测试
 
-录音：
+### 录音
 
 ```sh
 cd /mnt/git/jyd_tdl_app
@@ -203,7 +205,7 @@ cd /mnt/git/jyd_tdl_app
   --output /mnt/sd/test_ai_16k_mono.pcm
 ```
 
-播放：
+### 播放
 
 ```sh
 cd /mnt/git/jyd_tdl_app
@@ -217,7 +219,7 @@ cd /mnt/git/jyd_tdl_app
 
 如果文件大小符合预期但仍然听不到声音，优先检查：
 
-- 板端扬声器/功放硬件路径是否实际接通
+- 板端扬声器、功放硬件路径是否实际接通
 - DAC 输出音量是否被系统其它流程覆盖
 - 当前板卡音频通道是否确实连到外放，而不是耳机或其它路径
 
@@ -307,17 +309,17 @@ cmake --build /mnt/sd/tdl_build_sys --target tdl_classify_demo -j1
 
 ## 11. 新设备从 clone 到编译测试的完整步骤
 
-1. clone 仓库：
+1. 安装系统依赖：
+
+```sh
+apk add opencv-dev tinyalsa-dev zlib-dev
+```
+
+2. clone 仓库：
 
 ```sh
 git clone https://github.com/Zluster/jyd_tdl_app.git /mnt/git/jyd_tdl_app
 cd /mnt/git/jyd_tdl_app
-```
-
-2. 如系统尚未安装通用依赖，先安装：
-
-```sh
-apk add opencv-dev tinyalsa-dev zlib-dev
 ```
 
 3. 执行板端初始化：
@@ -356,7 +358,7 @@ cd /mnt/git/jyd_tdl_app
   --output /mnt/sd/dog_cls_syslibs.jpg
 ```
 
-7. 运行抓图测试：
+7. 运行相机抓图测试：
 
 ```sh
 /mnt/sd/tdl_build_sys/tdl_camera_capture_demo \
@@ -370,4 +372,19 @@ cd /mnt/git/jyd_tdl_app
   --output /mnt/sd/fullstack_probe.jpg
 ```
 
-做到这里，就已经具备一台新板子从 clone 到编译、算法测试、相机测试的完整闭环。
+8. 运行音频测试：
+
+```sh
+/mnt/sd/tdl_build_sys/tdl_audio_aio_demo \
+  --mode record \
+  --seconds 5 \
+  --ai-volume 24 \
+  --output /mnt/sd/test_ai_16k_mono.pcm
+
+/mnt/sd/tdl_build_sys/tdl_audio_aio_demo \
+  --mode play \
+  --input /mnt/sd/test_ai_16k_mono.pcm \
+  --ao-volume 24
+```
+
+做到这里，就完成了一台新设备从 clone 到编译、算法测试、相机测试、音频测试的完整闭环。
