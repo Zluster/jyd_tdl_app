@@ -78,6 +78,7 @@ target_include_directories(tdl_app_sdk
     "${CMAKE_CURRENT_LIST_DIR}/include"
   PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}/src"
+    $<$<NOT:$<BOOL:${TDL_HAS_LINUX_FB_H}>>:${CMAKE_CURRENT_LIST_DIR}/src/compat>
     "${TDL_CV184X_INCLUDE_DIRS}"
 )
 

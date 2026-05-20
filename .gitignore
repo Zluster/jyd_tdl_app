@@ -9,3 +9,5 @@ host-tools/
 *.log
 validation_out/
 compile_commands.json
+models
+firmware

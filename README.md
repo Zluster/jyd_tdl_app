@@ -119,6 +119,7 @@ tdl_app_sdk/
 - [绑定设计](docs/BINDINGS.md)
 - [双核控制](docs/DUAL_CORE.md)
 - [API 与 demo 对照](docs/ALG_INFO.md)
+- [板端原生编译与测试指南](docs/board_native_build_guide_zh.md)
 
 ## 关于 `--firmware`
 

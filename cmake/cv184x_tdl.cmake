@@ -1,9 +1,17 @@
+include(CheckIncludeFileCXX)
+
 if(NOT EXISTS "${TDL_APP_THIRD_PARTY_DIR}")
   message(FATAL_ERROR
     "Missing dependency bundle: ${TDL_APP_THIRD_PARTY_DIR}\n"
     "Run scripts/collect_cv184x_deps.sh in the Sophpi SDK, or set "
     "-DTDL_APP_THIRD_PARTY_DIR=/path/to/cv184x bundle.")
 endif()
+
+find_package(OpenCV REQUIRED COMPONENTS core imgproc imgcodecs)
+find_package(ZLIB REQUIRED)
+find_library(TDL_TINYALSA_LIBRARY NAMES tinyalsa REQUIRED)
+
+check_include_file_cxx("linux/fb.h" TDL_HAS_LINUX_FB_H)
 
 set(TDL_CV184X_INCLUDE_DIRS
   "${TDL_APP_THIRD_PARTY_DIR}/include"
@@ -14,12 +22,11 @@ set(TDL_CV184X_INCLUDE_DIRS
   "${TDL_APP_THIRD_PARTY_DIR}/cvi_mpi/include/isp"
   "${CMAKE_CURRENT_LIST_DIR}/../third_party/vendor/ini"
   "${TDL_APP_THIRD_PARTY_DIR}/cvi_rtsp/include"
-  "${TDL_APP_THIRD_PARTY_DIR}/opencv/include"
+  ${OpenCV_INCLUDE_DIRS}
 )
 
 set(TDL_CV184X_LIBRARY_DIRS
   "${TDL_APP_THIRD_PARTY_DIR}/lib"
-  "${TDL_APP_THIRD_PARTY_DIR}/opencv/lib"
 )
 
 foreach(dir IN LISTS TDL_CV184X_LIBRARY_DIRS)
@@ -30,9 +37,7 @@ endforeach()
 
 set(TDL_CV184X_LIBS
   tdl_core
-  opencv_imgcodecs
-  opencv_imgproc
-  opencv_core
+  ${OpenCV_LIBS}
   bmrt
   bmlib
   model_combine
@@ -68,8 +73,8 @@ set(TDL_CV184X_LIBS
   sns_full
   sns_cv2003
   teaisp
-  tinyalsa
-  z
+  ${TDL_TINYALSA_LIBRARY}
+  ZLIB::ZLIB
   dl
   rt
   pthread
