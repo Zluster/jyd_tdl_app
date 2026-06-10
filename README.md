@@ -227,3 +227,7 @@ sh scripts/run_with_board_env.sh /mnt/sd/tdl_build_sys/tdl_classify_demo ...
 - 单张图保留图片路径接口，便于离线验证。
 - 多模型同时运行时，每个模型实例独立持有自己的 runtime，不要在业务层反复创建和销毁。
 - 板端初始化后，优先使用 `env.sh` 或 `scripts/run_with_board_env.sh`，避免遗漏 `LD_LIBRARY_PATH` 和 `BMRUNTIME_USING_FIRMWARE`。
+
+## Additional Guides
+
+- [算法测试与 model_tool 分析指南](docs/ALGORITHM_TESTING_GUIDE_CN.md)

@@ -52,6 +52,7 @@ class VencChannel {
 
   struct EncodedPacket {
     std::vector<std::vector<std::uint8_t>> blocks;
+    bool key_frame = false;
   };
 
   VencChannel();

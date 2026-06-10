@@ -22,7 +22,7 @@ void printUsage() {
 }
 
 bool parseArgs(int argc, char **argv, Options *opt) {
-  opt->common.model_spec = "./configs/model_specs/yolov5s_det_coco80.ini";
+  opt->common.model_spec = "./configs/model_specs/yolov5s_det_coco80.mud";
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
     bool handled = false;
@@ -62,10 +62,8 @@ int main(int argc, char **argv) {
   }
 
   std::string error;
-  tdl_app::Detector::Config config = image_demo_support::detectorConfig(opt.common);
-  config.model_type = "YOLOV5";
-  tdl_app::Detector detector(config, &error);
-  if (!detector.initialized()) {
+  tdl_app::Detector detector("YOLOV5");
+  if (!detector.load(image_demo_support::detectorConfig(opt.common), &error)) {
     std::cerr << "initialize failed: " << error << "\n";
     return 2;
   }
@@ -73,8 +71,8 @@ int main(int argc, char **argv) {
   tdl_app::InferOptions infer_options;
   infer_options.threshold = opt.common.threshold;
 
-  tdl_app::AlgorithmResult result = detector(opt.common.image, infer_options, &error);
-  if (!error.empty()) {
+  tdl_app::AlgorithmResult result;
+  if (!detector.run(opt.common.image, infer_options, &result, &error)) {
     std::cerr << "run failed: " << error << "\n";
     return 3;
   }

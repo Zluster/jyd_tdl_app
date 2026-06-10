@@ -9,6 +9,23 @@
 namespace tdl_app {
 namespace {
 
+}  // namespace
+
+FaceAttributeClassifier::FaceAttributeClassifier() = default;
+
+FaceAttributeClassifier::FaceAttributeClassifier(std::string model_type)
+    : requested_model_type_(std::move(model_type)) {}
+
+FaceAttributeClassifier::~FaceAttributeClassifier() = default;
+
+FaceAttributeClassifier::FaceAttributeClassifier(
+    FaceAttributeClassifier &&) noexcept = default;
+
+FaceAttributeClassifier &FaceAttributeClassifier::operator=(
+    FaceAttributeClassifier &&) noexcept = default;
+
+namespace {
+
 EngineConfig toEngineConfig(const FaceAttributeClassifier::Config &config) {
   EngineConfig out;
   out.model_descriptor_file = config.model_spec;
@@ -37,19 +54,6 @@ std::string resolveModelType(const FaceAttributeClassifier::Config &config) {
 }
 
 }  // namespace
-
-FaceAttributeClassifier::FaceAttributeClassifier() = default;
-
-FaceAttributeClassifier::FaceAttributeClassifier(std::string model_type)
-    : requested_model_type_(std::move(model_type)) {}
-
-FaceAttributeClassifier::~FaceAttributeClassifier() = default;
-
-FaceAttributeClassifier::FaceAttributeClassifier(
-    FaceAttributeClassifier &&) noexcept = default;
-
-FaceAttributeClassifier &FaceAttributeClassifier::operator=(
-    FaceAttributeClassifier &&) noexcept = default;
 
 bool FaceAttributeClassifier::load(const Config &config, std::string *error) {
   config_ = config;

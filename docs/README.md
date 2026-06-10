@@ -38,3 +38,7 @@
 - 相机抓图当前推荐使用：
   - `configs/sensor_cfg_cv1842hp_wevb_cv2003_ipcamera.ini`
   - `--backend vpss`
+
+## Additional Guides
+
+- [算法测试与 model_tool 分析指南](ALGORITHM_TESTING_GUIDE_CN.md)

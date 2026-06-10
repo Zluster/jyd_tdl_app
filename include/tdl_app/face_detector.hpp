@@ -7,8 +7,8 @@
 
 namespace tdl_app {
 
-class NnScrfd;
 class MultiStagePipeline;
+class NnBase;
 class Pipeline;
 
 class FaceDetector {
@@ -51,7 +51,7 @@ class FaceDetector {
 
   std::string requested_model_type_;
   Config config_;
-  std::shared_ptr<NnScrfd> model_;
+  std::shared_ptr<NnBase> model_;
 };
 
 }  // namespace tdl_app

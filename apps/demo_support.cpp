@@ -47,7 +47,18 @@ void dumpResult(const tdl_app::AlgorithmResult &result) {
     const auto &b = result.boxes[i];
     std::cout << "  [" << i << "] id=" << b.class_id << " score=" << b.score
               << " box=(" << b.x1 << "," << b.y1 << "," << b.x2 << ","
-              << b.y2 << ") landmarks=" << b.landmarks.size() << "\n";
+              << b.y2 << ") landmarks=" << b.landmarks.size();
+    if (b.landmarks.size() == 4) {
+      std::cout << " obb=(";
+      for (size_t j = 0; j < b.landmarks.size(); ++j) {
+        if (j > 0) {
+          std::cout << " ";
+        }
+        std::cout << b.landmarks[j].x << "," << b.landmarks[j].y;
+      }
+      std::cout << ")";
+    }
+    std::cout << "\n";
   }
 
   std::cout << "points: " << result.points.size() << "\n";
@@ -76,9 +87,30 @@ bool saveAnnotatedImage(const std::string &image_path,
   }
 
   for (const auto &box : result.boxes) {
-    const cv::Point p1(static_cast<int>(box.x1), static_cast<int>(box.y1));
-    const cv::Point p2(static_cast<int>(box.x2), static_cast<int>(box.y2));
-    cv::rectangle(image, p1, p2, cv::Scalar(0, 255, 0), 2);
+    cv::Point p1(static_cast<int>(box.x1), static_cast<int>(box.y1));
+    cv::Point p2(static_cast<int>(box.x2), static_cast<int>(box.y2));
+    if (box.landmarks.size() == 4) {
+      std::vector<cv::Point> contour;
+      contour.reserve(4);
+      for (const auto &landmark : box.landmarks) {
+        contour.emplace_back(static_cast<int>(landmark.x),
+                             static_cast<int>(landmark.y));
+      }
+      const std::vector<std::vector<cv::Point>> contours{contour};
+      cv::polylines(image, contours, true, cv::Scalar(0, 255, 0), 2,
+                    cv::LINE_AA);
+      for (const auto &landmark : box.landmarks) {
+        cv::circle(image,
+                   cv::Point(static_cast<int>(landmark.x),
+                             static_cast<int>(landmark.y)),
+                   3, cv::Scalar(255, 0, 0), cv::FILLED);
+      }
+      const cv::Rect rect = cv::boundingRect(contour);
+      p1 = rect.tl();
+      p2 = rect.br();
+    } else {
+      cv::rectangle(image, p1, p2, cv::Scalar(0, 255, 0), 2);
+    }
 
     const std::string text =
         labelForBox(result, box) + ":" + cv::format("%.2f", box.score);
@@ -94,11 +126,13 @@ bool saveAnnotatedImage(const std::string &image_path,
                 cv::Point(p1.x + 3, text_top + text_size.height + 1),
                 cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0), 1);
 
-    for (const auto &landmark : box.landmarks) {
-      cv::circle(image,
-                 cv::Point(static_cast<int>(landmark.x),
-                           static_cast<int>(landmark.y)),
-                 2, cv::Scalar(255, 0, 0), cv::FILLED);
+    if (box.landmarks.size() != 4) {
+      for (const auto &landmark : box.landmarks) {
+        cv::circle(image,
+                   cv::Point(static_cast<int>(landmark.x),
+                             static_cast<int>(landmark.y)),
+                   2, cv::Scalar(255, 0, 0), cv::FILLED);
+      }
     }
   }
 

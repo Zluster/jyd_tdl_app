@@ -9,6 +9,22 @@
 namespace tdl_app {
 namespace {
 
+}  // namespace
+
+PlateRecognizer::PlateRecognizer() = default;
+
+PlateRecognizer::PlateRecognizer(std::string model_type)
+    : requested_model_type_(std::move(model_type)) {}
+
+PlateRecognizer::~PlateRecognizer() = default;
+
+PlateRecognizer::PlateRecognizer(PlateRecognizer &&) noexcept = default;
+
+PlateRecognizer &PlateRecognizer::operator=(PlateRecognizer &&) noexcept =
+    default;
+
+namespace {
+
 EngineConfig toEngineConfig(const PlateRecognizer::Config &config) {
   EngineConfig out;
   out.model_descriptor_file = config.model_spec;
@@ -37,18 +53,6 @@ std::string resolveModelType(const PlateRecognizer::Config &config) {
 }
 
 }  // namespace
-
-PlateRecognizer::PlateRecognizer() = default;
-
-PlateRecognizer::PlateRecognizer(std::string model_type)
-    : requested_model_type_(std::move(model_type)) {}
-
-PlateRecognizer::~PlateRecognizer() = default;
-
-PlateRecognizer::PlateRecognizer(PlateRecognizer &&) noexcept = default;
-
-PlateRecognizer &PlateRecognizer::operator=(PlateRecognizer &&) noexcept =
-    default;
 
 bool PlateRecognizer::load(const Config &config, std::string *error) {
   config_ = config;

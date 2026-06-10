@@ -1,17 +1,211 @@
 #include "tdl_app/semantic_segmenter.hpp"
 
+#include <algorithm>
 #include <cstring>
+#include <memory>
 #include <utility>
+#include <vector>
+
+#include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
 
 #include "c_apis/tdl_sdk.h"
 #include "c_apis/tdl_utils.h"
+#include "algorithm/private/bmrt_utils.hpp"
 #include "algorithm/private/tdl_sdk_utils.hpp"
 
 namespace tdl_app {
+namespace {
 
-class SemanticSegmenter::Impl {
+struct SemanticSegRuntime {
+  virtual ~SemanticSegRuntime() = default;
+  virtual bool run(const std::string &image_path,
+                   SemanticSegmentationResult *result,
+                   std::string *error) = 0;
+  virtual bool runFrame(const Frame &frame, SemanticSegmentationResult *result,
+                        std::string *error) = 0;
+  virtual void reset() = 0;
+  virtual bool initialized() const = 0;
+};
+
+class TopformerRuntime : public SemanticSegRuntime {
  public:
-  bool load(const Config &config, const std::string &requested_model_type,
+  bool open(const SemanticSegmenter::Config &config,
+            const std::string &requested_model_type,
+            std::string *resolved_model_type, std::string *error) {
+    const std::string model_type = private_tdl_sdk::resolveModelToken(
+        config, requested_model_type, "TOPFORMER_SEG_PERSON_FACE_VEHICLE",
+        error);
+    if (model_type.empty()) {
+      return false;
+    }
+
+    if (!loadModelDescriptor(config.model_spec, &descriptor_, error)) {
+      return false;
+    }
+    if (descriptor_.runtime.empty()) {
+      descriptor_.runtime = "semantic_segmentation";
+    }
+    if (descriptor_.task_name.empty()) {
+      descriptor_.task_name = "segmentation";
+    }
+    if (descriptor_.input_type.empty()) {
+      descriptor_.input_type = "rgb";
+    }
+
+    EngineConfig engine_config;
+    engine_config.model_descriptor_file = config.model_spec;
+    engine_config.model_dir = config.model_dir;
+    engine_config.bmrt_firmware = config.firmware;
+    if (!session_.open(engine_config, descriptor_, error)) {
+      return false;
+    }
+
+    const bm_net_info_t *net_info = session_.netInfo();
+    if (!net_info || net_info->input_num != 1) {
+      private_tdl_sdk::setError(
+          error,
+          "custom semantic segmentation runtime currently supports exactly one input");
+      session_.close();
+      return false;
+    }
+    if (net_info->output_num < 1) {
+      private_tdl_sdk::setError(error, "semantic segmentation model has no outputs");
+      session_.close();
+      return false;
+    }
+
+    mean_ = bmrt_runtime::expandChannelValues(descriptor_.mean, 0.0f);
+    scale_ = bmrt_runtime::expandChannelValues(descriptor_.scale, 1.0f / 255.0f);
+
+    if (!buildOutputs(error)) {
+      session_.close();
+      return false;
+    }
+
+    if (resolved_model_type) {
+      *resolved_model_type = model_type;
+    }
+    return true;
+  }
+
+  bool run(const std::string &image_path, SemanticSegmentationResult *result,
+           std::string *error) override {
+    cv::Mat image = cv::imread(image_path, cv::IMREAD_COLOR);
+    if (image.empty()) {
+      private_tdl_sdk::setError(error, "failed to read image: " + image_path);
+      return false;
+    }
+    return infer(image, result, error);
+  }
+
+  bool runFrame(const Frame &frame, SemanticSegmentationResult *result,
+                std::string *error) override {
+    if (frame.image_path.empty()) {
+      private_tdl_sdk::setError(
+          error, "custom semantic segmentation runtime currently supports image_path only");
+      return false;
+    }
+    return run(frame.image_path, result, error);
+  }
+
+  void reset() override { session_.close(); }
+  bool initialized() const override { return session_.opened(); }
+
+ private:
+  bool buildOutputs(std::string *error) {
+    argmax_index_ = -1;
+    conf_index_ = -1;
+    output_width_ = 0;
+    output_height_ = 0;
+
+    const bm_net_info_t *net_info = session_.netInfo();
+    const auto &stage = net_info->stages[0];
+    for (int i = 0; i < net_info->output_num; ++i) {
+      const bm_shape_t &shape = stage.output_shapes[i];
+      if (shape.num_dims == 3) {
+        argmax_index_ = i;
+        output_height_ = shape.dims[1];
+        output_width_ = shape.dims[2];
+      } else if (shape.num_dims == 4 && shape.dims[0] == 1) {
+        conf_index_ = i;
+      }
+    }
+
+    if (argmax_index_ < 0 || output_width_ <= 0 || output_height_ <= 0) {
+      private_tdl_sdk::setError(error, "unable to locate argmax output for segmentation");
+      return false;
+    }
+    return true;
+  }
+
+  void preprocess(const cv::Mat &image, std::vector<float> *tensor) const {
+    cv::Mat resized;
+    cv::resize(image, resized, cv::Size(session_.inputWidth(), session_.inputHeight()),
+               0, 0, cv::INTER_LINEAR);
+    bmrt_runtime::writeImageToTensor(
+        resized, bmrt_runtime::wantsRgbInput(descriptor_, true),
+        session_.nchwLayout(), mean_, scale_, tensor);
+  }
+
+  bool infer(const cv::Mat &image, SemanticSegmentationResult *result,
+             std::string *error) {
+    if (!result) {
+      private_tdl_sdk::setError(error,
+                                "semantic segmentation result pointer is null");
+      return false;
+    }
+
+    std::vector<float> input_tensor;
+    preprocess(image, &input_tensor);
+
+    std::vector<bmrt_runtime::OutputTensor> outputs;
+    if (!session_.launch(input_tensor, &outputs, error)) {
+      return false;
+    }
+    if (argmax_index_ < 0 || argmax_index_ >= static_cast<int>(outputs.size())) {
+      private_tdl_sdk::setError(error, "invalid argmax output index");
+      return false;
+    }
+
+    result->clear();
+    result->width = image.cols;
+    result->height = image.rows;
+    result->output_width = output_width_;
+    result->output_height = output_height_;
+
+    const auto &argmax = outputs[static_cast<size_t>(argmax_index_)].data;
+    result->class_id.resize(argmax.size(), 0);
+    for (size_t i = 0; i < argmax.size(); ++i) {
+      const float value = std::max(0.0f, std::min(argmax[i], 255.0f));
+      result->class_id[i] = static_cast<std::uint8_t>(value);
+    }
+
+    result->class_conf.resize(argmax.size(), 255);
+    if (conf_index_ >= 0 && conf_index_ < static_cast<int>(outputs.size())) {
+      const auto &conf = outputs[static_cast<size_t>(conf_index_)].data;
+      for (size_t i = 0; i < result->class_conf.size() && i < conf.size(); ++i) {
+        const float value = std::max(0.0f, std::min(conf[i] * 255.0f, 255.0f));
+        result->class_conf[i] = static_cast<std::uint8_t>(value);
+      }
+    }
+    return true;
+  }
+
+  ModelDescriptor descriptor_;
+  std::vector<float> mean_;
+  std::vector<float> scale_;
+  bmrt_runtime::Session session_;
+  int argmax_index_ = -1;
+  int conf_index_ = -1;
+  int output_width_ = 0;
+  int output_height_ = 0;
+};
+
+class LegacySemanticSegRuntime : public SemanticSegRuntime {
+ public:
+  bool load(const SemanticSegmenter::Config &config,
+            const std::string &requested_model_type,
             std::string *resolved_model_type, std::string *error) {
     const std::string model_type = private_tdl_sdk::resolveModelToken(
         config, requested_model_type, "TOPFORMER_SEG_PERSON_FACE_VEHICLE",
@@ -29,7 +223,7 @@ class SemanticSegmenter::Impl {
   }
 
   bool run(const std::string &image_path, SemanticSegmentationResult *result,
-           std::string *error) {
+           std::string *error) override {
     private_tdl_sdk::ImageGuard image;
     if (!image.load(image_path, error)) {
       return false;
@@ -38,7 +232,7 @@ class SemanticSegmenter::Impl {
   }
 
   bool runFrame(const Frame &frame, SemanticSegmentationResult *result,
-                std::string *error) {
+                std::string *error) override {
     private_tdl_sdk::ImageGuard image;
     if (!image.wrap(frame, error)) {
       return false;
@@ -46,6 +240,10 @@ class SemanticSegmenter::Impl {
     return infer(image.get(), result, error);
   }
 
+  void reset() override { session_.close(); }
+  bool initialized() const override { return session_.initialized(); }
+
+ private:
   bool infer(TDLImage image, SemanticSegmentationResult *result,
              std::string *error) {
     if (!session_.initialized()) {
@@ -84,11 +282,71 @@ class SemanticSegmenter::Impl {
     return true;
   }
 
-  void reset() { session_.close(); }
-  bool initialized() const { return session_.initialized(); }
+  private_tdl_sdk::Session session_;
+};
+
+}  // namespace
+
+class SemanticSegmenter::Impl {
+ public:
+  bool load(const Config &config, const std::string &requested_model_type,
+            std::string *resolved_model_type, std::string *error) {
+    const std::string model_type = private_tdl_sdk::resolveModelToken(
+        config, requested_model_type, "TOPFORMER_SEG_PERSON_FACE_VEHICLE",
+        error);
+    if (model_type.empty()) {
+      return false;
+    }
+
+    runtime_.reset();
+    const bool prefer_custom =
+        bmrt_runtime::startsWith(
+            bmrt_runtime::toUpper(model_type), "TOPFORMER_SEG_PERSON_FACE_VEHICLE");
+    if (prefer_custom) {
+      std::unique_ptr<TopformerRuntime> runtime(new TopformerRuntime());
+      if (!runtime->open(config, model_type, resolved_model_type, error)) {
+        return false;
+      }
+      runtime_ = std::move(runtime);
+      return true;
+    }
+    private_tdl_sdk::setError(
+        error,
+        "unsupported semantic segmentation model_type for custom BMRT runtime: " +
+            model_type);
+    return false;
+  }
+
+  bool run(const std::string &image_path, SemanticSegmentationResult *result,
+           std::string *error) {
+    if (!runtime_) {
+      private_tdl_sdk::setError(error, "semantic segmenter is not initialized");
+      return false;
+    }
+    return runtime_->run(image_path, result, error);
+  }
+
+  bool runFrame(const Frame &frame, SemanticSegmentationResult *result,
+                std::string *error) {
+    if (!runtime_) {
+      private_tdl_sdk::setError(error, "semantic segmenter is not initialized");
+      return false;
+    }
+    return runtime_->runFrame(frame, result, error);
+  }
+
+  void reset() {
+    if (runtime_) {
+      runtime_->reset();
+    }
+  }
+
+  bool initialized() const {
+    return runtime_ && runtime_->initialized();
+  }
 
  private:
-  private_tdl_sdk::Session session_;
+  std::unique_ptr<SemanticSegRuntime> runtime_;
 };
 
 SemanticSegmenter::SemanticSegmenter() = default;

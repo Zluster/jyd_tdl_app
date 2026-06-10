@@ -162,10 +162,6 @@ void Pipeline::setNullSink() {
   setSink(std::unique_ptr<FrameSink>(new NullFrameSink()));
 }
 
-void Pipeline::setRtspSink(const RtspFrameSink::Config &config) {
-  setSink(std::unique_ptr<FrameSink>(new RtspFrameSink(config)));
-}
-
 bool Pipeline::open(std::string *error) {
   return impl_->open(error);
 }

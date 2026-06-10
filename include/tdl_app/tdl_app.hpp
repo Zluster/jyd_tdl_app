@@ -17,6 +17,9 @@
 #include "tdl_app/pipeline.hpp"
 #include "tdl_app/plate_recognizer.hpp"
 #include "tdl_app/semantic_segmenter.hpp"
+#include "tdl_app/self_learning_classifier.hpp"
+#include "tdl_app/single_object_tracker.hpp"
+#include "tdl_app/speech_recognizer.hpp"
 #include "tdl_app/vision_task_types.hpp"
 #include "tdl_app/voice_activity_detector.hpp"
 

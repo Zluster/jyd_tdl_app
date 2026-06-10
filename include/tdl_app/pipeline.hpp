@@ -43,7 +43,6 @@ class Pipeline {
   void clearBootstrap();
   void setSink(std::unique_ptr<FrameSink> sink);
   void setNullSink();
-  void setRtspSink(const RtspFrameSink::Config &config);
 
   bool open(std::string *error = nullptr);
   bool runOnce(const InferOptions &options, AlgorithmResult *result,

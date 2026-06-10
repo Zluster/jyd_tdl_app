@@ -16,6 +16,7 @@
 
 #include "bmlib_runtime.h"
 #include "bmruntime_interface.h"
+#include "tpu_fp16.h"
 
 #include "tdl_app/algorithm_engine.hpp"
 #include "tdl_app/model_descriptor.hpp"
@@ -97,6 +98,17 @@ inline bool wantsRgbInput(const ModelDescriptor &descriptor,
     return default_rgb;
   }
   return toUpper(descriptor.input_type) != "BGR";
+}
+
+inline float quantizeInputValue(float value, float input_scale,
+                                int input_zero_point) {
+  if (input_scale == 0.0f) {
+    return value;
+  }
+  if (std::fabs(input_scale) > 1.0f) {
+    return value * input_scale + input_zero_point;
+  }
+  return value / input_scale + input_zero_point;
 }
 
 inline void writeImageToTensor(const cv::Mat &image, bool rgb_input,
@@ -282,8 +294,7 @@ class Session {
       auto *dst = reinterpret_cast<int8_t *>(input_bytes.data());
       for (size_t i = 0; i < input_tensor.size(); ++i) {
         const float q =
-            input_scale == 0.0f ? input_tensor[i]
-                                : input_tensor[i] / input_scale + input_zero_point;
+            quantizeInputValue(input_tensor[i], input_scale, input_zero_point);
         dst[i] = clampCast<int8_t>(q);
       }
       input_ptrs[0] = input_bytes.data();
@@ -292,8 +303,7 @@ class Session {
       auto *dst = reinterpret_cast<uint8_t *>(input_bytes.data());
       for (size_t i = 0; i < input_tensor.size(); ++i) {
         const float q =
-            input_scale == 0.0f ? input_tensor[i]
-                                : input_tensor[i] / input_scale + input_zero_point;
+            quantizeInputValue(input_tensor[i], input_scale, input_zero_point);
         dst[i] = clampCast<uint8_t>(q);
       }
       input_ptrs[0] = input_bytes.data();
@@ -345,6 +355,18 @@ class Session {
         const float *raw = reinterpret_cast<const float *>(
             output_bytes[static_cast<size_t>(i)].data());
         out.data.assign(raw, raw + element_count);
+      } else if (net_info_->output_dtypes[i] == BM_FLOAT16) {
+        const fp16 *raw = reinterpret_cast<const fp16 *>(
+            output_bytes[static_cast<size_t>(i)].data());
+        for (size_t j = 0; j < element_count; ++j) {
+          out.data[j] = fp16_to_fp32(raw[j]).fval;
+        }
+      } else if (net_info_->output_dtypes[i] == BM_BFLOAT16) {
+        const bf16 *raw = reinterpret_cast<const bf16 *>(
+            output_bytes[static_cast<size_t>(i)].data());
+        for (size_t j = 0; j < element_count; ++j) {
+          out.data[j] = bf16_to_fp32(raw[j]).fval;
+        }
       } else if (net_info_->output_dtypes[i] == BM_INT8) {
         const int8_t *raw = reinterpret_cast<const int8_t *>(
             output_bytes[static_cast<size_t>(i)].data());
@@ -358,6 +380,34 @@ class Session {
         for (size_t j = 0; j < element_count; ++j) {
           out.data[j] =
               (static_cast<int>(raw[j]) - output_zero_point) * output_scale;
+        }
+      } else if (net_info_->output_dtypes[i] == BM_INT16) {
+        const int16_t *raw = reinterpret_cast<const int16_t *>(
+            output_bytes[static_cast<size_t>(i)].data());
+        for (size_t j = 0; j < element_count; ++j) {
+          out.data[j] =
+              (static_cast<int>(raw[j]) - output_zero_point) * output_scale;
+        }
+      } else if (net_info_->output_dtypes[i] == BM_UINT16) {
+        const uint16_t *raw = reinterpret_cast<const uint16_t *>(
+            output_bytes[static_cast<size_t>(i)].data());
+        for (size_t j = 0; j < element_count; ++j) {
+          out.data[j] =
+              (static_cast<int>(raw[j]) - output_zero_point) * output_scale;
+        }
+      } else if (net_info_->output_dtypes[i] == BM_INT32) {
+        const int32_t *raw = reinterpret_cast<const int32_t *>(
+            output_bytes[static_cast<size_t>(i)].data());
+        for (size_t j = 0; j < element_count; ++j) {
+          out.data[j] =
+              (static_cast<float>(raw[j]) - output_zero_point) * output_scale;
+        }
+      } else if (net_info_->output_dtypes[i] == BM_UINT32) {
+        const uint32_t *raw = reinterpret_cast<const uint32_t *>(
+            output_bytes[static_cast<size_t>(i)].data());
+        for (size_t j = 0; j < element_count; ++j) {
+          out.data[j] =
+              (static_cast<float>(raw[j]) - output_zero_point) * output_scale;
         }
       } else {
         setError(error, "runtime does not support this output dtype");

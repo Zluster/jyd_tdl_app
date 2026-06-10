@@ -5,7 +5,7 @@ model = ../../models/cv184x/your_classifier.bmodel
 [extra]
 runtime = classifier
 task = classify
-model_type = CLS_CUSTOM
+model_type = CUSTOM_CLASSIFIER
 input_type = rgb
 preprocess = resize
 mean = 0, 0, 0

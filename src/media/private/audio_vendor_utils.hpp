@@ -16,6 +16,20 @@ inline void setError(std::string *error, const std::string &message) {
   }
 }
 
+inline std::size_t bytesPerSample(AudioBitWidth value) {
+  switch (value) {
+    case AudioBitWidth::Bits8:
+      return 1;
+    case AudioBitWidth::Bits16:
+      return 2;
+    case AudioBitWidth::Bits24:
+      return 3;
+    case AudioBitWidth::Bits32:
+      return 4;
+  }
+  return 0;
+}
+
 inline AUDIO_SAMPLE_RATE_E toVendor(AudioSampleRate value) {
   return static_cast<AUDIO_SAMPLE_RATE_E>(static_cast<int>(value));
 }
@@ -103,11 +117,16 @@ inline AUDIO_FRAME_S toVendor(const AudioFrame &frame) {
   out.enSoundmode = toVendor(frame.sound_mode);
   out.u64TimeStamp = frame.timestamp;
   out.u32Seq = frame.sequence;
-  out.u32Len = frame.bytes_per_channel != 0
-                   ? frame.bytes_per_channel
-                   : static_cast<CVI_U32>(frame.channels.empty()
-                                              ? 0
-                                              : frame.channels.front().size());
+  const std::size_t channel_bytes =
+      frame.bytes_per_channel != 0
+          ? frame.bytes_per_channel
+          : static_cast<CVI_U32>(frame.channels.empty()
+                                     ? 0
+                                     : frame.channels.front().size());
+  const std::size_t sample_bytes = bytesPerSample(frame.bit_width);
+  out.u32Len = sample_bytes == 0
+                   ? 0
+                   : static_cast<CVI_U32>(channel_bytes / sample_bytes);
   for (std::size_t i = 0; i < frame.channels.size() && i < 2; ++i) {
     out.u64VirAddr[i] =
         const_cast<CVI_U8 *>(reinterpret_cast<const CVI_U8 *>(
@@ -121,19 +140,22 @@ inline void fromVendor(const AUDIO_FRAME_S &vendor_frame, AudioBitWidth bit_widt
   if (!frame) {
     return;
   }
+  const std::size_t sample_bytes = bytesPerSample(bit_width);
+  const std::size_t channel_bytes =
+      static_cast<std::size_t>(vendor_frame.u32Len) * sample_bytes;
   frame->bit_width = bit_width;
   frame->sound_mode = sound_mode;
   frame->timestamp = vendor_frame.u64TimeStamp;
   frame->sequence = vendor_frame.u32Seq;
-  frame->bytes_per_channel = vendor_frame.u32Len;
+  frame->bytes_per_channel = static_cast<std::uint32_t>(channel_bytes);
   frame->channels.clear();
   for (int i = 0; i < 2; ++i) {
-    if (!vendor_frame.u64VirAddr[i] || vendor_frame.u32Len == 0) {
+    if (!vendor_frame.u64VirAddr[i] || channel_bytes == 0) {
       continue;
     }
     const std::uint8_t *begin =
         reinterpret_cast<const std::uint8_t *>(vendor_frame.u64VirAddr[i]);
-    frame->channels.emplace_back(begin, begin + vendor_frame.u32Len);
+    frame->channels.emplace_back(begin, begin + channel_bytes);
   }
 }
 

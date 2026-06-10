@@ -28,8 +28,8 @@ struct Options {
   int points_per_frame = 160;
   int frame_count = 8;
   int frame_depth = 8;
-  int ai_volume = 0;
-  int ao_volume = 0;
+  int ai_volume = 24;
+  int ao_volume = 24;
   int timeout_ms = 1000;
   bool enable_ao_vqe = false;
 };
@@ -63,8 +63,8 @@ void printUsage() {
       << "  --ao-channel N        AO channel id (default 0)\n"
       << "  --ai-card-id N        AI card id (default -1)\n"
       << "  --ao-card-id N        AO card id (default -1)\n"
-      << "  --ai-volume N         AI volume step (default 0)\n"
-      << "  --ao-volume N         AO volume db (default 0)\n"
+      << "  --ai-volume N         AI volume step (default 24)\n"
+      << "  --ao-volume N         AO volume db (default 24)\n"
       << "  --enable-ao-vqe       Enable AO speaker VQE preset\n";
 }
 

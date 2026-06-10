@@ -4,6 +4,7 @@
 #include <cstring>
 
 #include "cvi_type.h"
+#include "cvi_comm_venc.h"
 #include "cvi_venc.h"
 #include "tdl_app/frame_source.hpp"
 
@@ -23,6 +24,13 @@ void setError(std::string *error, const std::string &message) {
 
 PAYLOAD_TYPE_E toPayload(VencChannel::Codec codec) {
   return codec == VencChannel::Codec::H265 ? PT_H265 : PT_H264;
+}
+
+bool isKeyPack(const VENC_PACK_S &pack, VencChannel::Codec codec) {
+  if (codec == VencChannel::Codec::H265) {
+    return pack.DataType.enH265EType > H265E_NALU_PSLICE;
+  }
+  return pack.DataType.enH264EType > H264E_NALU_PSLICE;
 }
 
 class VencChannelImpl {
@@ -135,9 +143,13 @@ class VencChannelImpl {
     }
 
     packet->blocks.clear();
+    packet->key_frame = false;
     packet->blocks.reserve(stream.u32PackCount);
     for (unsigned int i = 0; i < stream.u32PackCount; ++i) {
       const VENC_PACK_S &pack = stream.pstPack[i];
+      if (isKeyPack(pack, config_.codec)) {
+        packet->key_frame = true;
+      }
       const auto *begin = pack.pu8Addr + pack.u32Offset;
       const auto size = static_cast<std::size_t>(pack.u32Len - pack.u32Offset);
       packet->blocks.emplace_back(begin, begin + size);

@@ -3,40 +3,11 @@
 #include <memory>
 #include <utility>
 
-#include "tdl_app/model_descriptor.hpp"
 #include "tdl_app/nn_base.hpp"
-#include "tdl_app/nn_yolov5.hpp"
-#include "tdl_app/nn_yolov8.hpp"
+#include "algorithm/private/runtime_factory.hpp"
 
 namespace tdl_app {
 namespace {
-
-EngineConfig toEngineConfig(const Detector::Config &config) {
-  EngineConfig out;
-  out.model_descriptor_file = config.model_spec;
-  out.model_dir = config.model_dir;
-  out.bmrt_firmware = config.firmware;
-  return out;
-}
-
-std::string resolveModelType(const Detector::Config &config) {
-  if (!config.model_type.empty()) {
-    return config.model_type;
-  }
-  if (!config.model_spec.empty()) {
-    ModelDescriptor descriptor;
-    std::string error;
-    if (loadModelDescriptor(config.model_spec, &descriptor, &error)) {
-      if (!descriptor.model_type.empty()) {
-        return descriptor.model_type;
-      }
-      if (!descriptor.runtime.empty()) {
-        return descriptor.runtime;
-      }
-    }
-  }
-  return "YOLOV5";
-}
 
 }  // namespace
 
@@ -66,13 +37,18 @@ bool Detector::load(const Config &config, std::string *error) {
   if (config_.model_type.empty() && !requested_model_type_.empty()) {
     config_.model_type = requested_model_type_;
   }
-  requested_model_type_ = resolveModelType(config_);
-  if (requested_model_type_.rfind("YOLOV8", 0) == 0) {
-    model_.reset(new NnYolov8(requested_model_type_));
-  } else {
-    model_.reset(new NnYolov5(requested_model_type_));
+  requested_model_type_ = private_runtime_factory::resolveModelType(
+      config_, requested_model_type_, "YOLOV5");
+  const std::string runtime_name = private_runtime_factory::inferRuntime(
+      TaskType::Detection, requested_model_type_, nullptr);
+  model_ = private_runtime_factory::createRuntime(runtime_name,
+                                                  requested_model_type_, error);
+  if (!model_) {
+    last_error_ = error ? *error : "detector runtime create failed";
+    return false;
   }
-  const bool ok = model_->load(toEngineConfig(config_), error);
+  const bool ok = model_->load(private_runtime_factory::toEngineConfig(config_),
+                               error);
   if (!ok) {
     last_error_ = error ? *error : "detector load failed";
     model_.reset();

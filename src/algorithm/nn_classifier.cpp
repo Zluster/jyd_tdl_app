@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cctype>
 #include <cstdint>
@@ -28,6 +29,21 @@ void setError(std::string *error, const std::string &message) {
   if (error) {
     *error = message;
   }
+}
+
+bool debugEnabled() {
+  const char *value = std::getenv("TDL_APP_CLASSIFIER_DEBUG");
+  return value && value[0] != '\0' && std::strcmp(value, "0") != 0;
+}
+
+template <typename... Args>
+void debugLog(const char *fmt, Args... args) {
+  if (!debugEnabled()) {
+    return;
+  }
+  std::fprintf(stderr, "[classifier-debug] ");
+  std::fprintf(stderr, fmt, args...);
+  std::fprintf(stderr, "\n");
 }
 
 template <typename T>
@@ -95,6 +111,17 @@ bool wantsSoftmax(const ModelDescriptor &descriptor) {
   const std::string value = toUpper(it->second);
   return value == "1" || value == "TRUE" || value == "YES" ||
          value == "ON";
+}
+
+float quantizeInputValue(float value, float input_scale,
+                         int input_zero_point) {
+  if (input_scale == 0.0f) {
+    return value;
+  }
+  if (std::fabs(input_scale) > 1.0f) {
+    return value * input_scale + input_zero_point;
+  }
+  return value / input_scale + input_zero_point;
 }
 
 }  // namespace
@@ -171,6 +198,15 @@ class NnClassifier::CustomRuntime {
     labels_ = descriptor.labels;
     softmax_output_ = wantsSoftmax(descriptor);
     input_dtype_ = net_info_->input_dtypes[0];
+    debugLog("open model=%s input=%dx%d layout=%s input_dtype=%d input_scale=%.8f input_zp=%d output_dtype=%d output_scale=%.8f output_zp=%d labels=%d",
+             resolveModelPath(descriptor).c_str(), input_width_, input_height_,
+             nchw_layout_ ? "NCHW" : "NHWC", static_cast<int>(input_dtype_),
+             net_info_->input_scales ? net_info_->input_scales[0] : 1.0f,
+             net_info_->input_zero_point ? net_info_->input_zero_point[0] : 0,
+             static_cast<int>(net_info_->output_dtypes[0]),
+             net_info_->output_scales ? net_info_->output_scales[0] : 1.0f,
+             net_info_->output_zero_point ? net_info_->output_zero_point[0] : 0,
+             static_cast<int>(labels_.size()));
     opened_ = true;
     return true;
   }
@@ -293,28 +329,49 @@ class NnClassifier::CustomRuntime {
         net_info_->input_scales ? net_info_->input_scales[0] : 1.0f;
     const int input_zero_point =
         net_info_->input_zero_point ? net_info_->input_zero_point[0] : 0;
+    if (debugEnabled() && !input_tensor.empty()) {
+      const auto mm = std::minmax_element(input_tensor.begin(), input_tensor.end());
+      debugLog("input tensor range=[%.6f,%.6f] v0=%.6f v1=%.6f v2=%.6f",
+               *mm.first, *mm.second, input_tensor[0],
+               input_tensor.size() > 1 ? input_tensor[1] : 0.0f,
+               input_tensor.size() > 2 ? input_tensor[2] : 0.0f);
+    }
 
     if (input_dtype_ == BM_FLOAT32) {
       input_ptrs[0] = const_cast<float *>(input_tensor.data());
     } else if (input_dtype_ == BM_INT8) {
       input_bytes.resize(input_tensor.size());
       auto *dst = reinterpret_cast<int8_t *>(input_bytes.data());
+      int q_min = 127;
+      int q_max = -128;
       for (size_t i = 0; i < input_tensor.size(); ++i) {
-        const float q = input_scale == 0.0f
-                            ? input_tensor[i]
-                            : input_tensor[i] / input_scale + input_zero_point;
+        const float q =
+            quantizeInputValue(input_tensor[i], input_scale, input_zero_point);
         dst[i] = clampCast<int8_t>(q);
+        q_min = std::min(q_min, static_cast<int>(dst[i]));
+        q_max = std::max(q_max, static_cast<int>(dst[i]));
       }
+      debugLog("quantized int8 range=[%d,%d] q0=%d q1=%d q2=%d",
+               q_min, q_max, static_cast<int>(dst[0]),
+               input_tensor.size() > 1 ? static_cast<int>(dst[1]) : 0,
+               input_tensor.size() > 2 ? static_cast<int>(dst[2]) : 0);
       input_ptrs[0] = input_bytes.data();
     } else if (input_dtype_ == BM_UINT8) {
       input_bytes.resize(input_tensor.size());
       auto *dst = reinterpret_cast<uint8_t *>(input_bytes.data());
+      int q_min = 255;
+      int q_max = 0;
       for (size_t i = 0; i < input_tensor.size(); ++i) {
-        const float q = input_scale == 0.0f
-                            ? input_tensor[i]
-                            : input_tensor[i] / input_scale + input_zero_point;
+        const float q =
+            quantizeInputValue(input_tensor[i], input_scale, input_zero_point);
         dst[i] = clampCast<uint8_t>(q);
+        q_min = std::min(q_min, static_cast<int>(dst[i]));
+        q_max = std::max(q_max, static_cast<int>(dst[i]));
       }
+      debugLog("quantized uint8 range=[%d,%d] q0=%d q1=%d q2=%d",
+               q_min, q_max, static_cast<int>(dst[0]),
+               input_tensor.size() > 1 ? static_cast<int>(dst[1]) : 0,
+               input_tensor.size() > 2 ? static_cast<int>(dst[2]) : 0);
       input_ptrs[0] = input_bytes.data();
     } else {
       setError(error, "classifier runtime does not support this input dtype");
@@ -371,6 +428,14 @@ class NnClassifier::CustomRuntime {
       } else {
         setError(error, "classifier runtime does not support this output dtype");
         return false;
+      }
+      if (debugEnabled() && !decoded.empty()) {
+        const auto mm =
+            std::minmax_element(decoded.begin(), decoded.end());
+        debugLog("output[%d] range=[%.6f,%.6f] v0=%.6f v1=%.6f v2=%.6f",
+                 i, *mm.first, *mm.second, decoded[0],
+                 decoded.size() > 1 ? decoded[1] : 0.0f,
+                 decoded.size() > 2 ? decoded[2] : 0.0f);
       }
       outputs->push_back(std::move(decoded));
     }

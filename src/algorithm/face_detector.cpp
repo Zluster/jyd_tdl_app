@@ -1,43 +1,11 @@
 #include "tdl_app/face_detector.hpp"
 
-#include <memory>
 #include <utility>
 
-#include "tdl_app/model_descriptor.hpp"
-#include "tdl_app/nn_scrfd.hpp"
+#include "tdl_app/nn_base.hpp"
+#include "algorithm/private/runtime_factory.hpp"
 
 namespace tdl_app {
-namespace {
-
-EngineConfig toEngineConfig(const FaceDetector::Config &config) {
-  EngineConfig out;
-  out.model_descriptor_file = config.model_spec;
-  out.model_dir = config.model_dir;
-  out.bmrt_firmware = config.firmware;
-  return out;
-}
-
-std::string resolveModelType(const FaceDetector::Config &config) {
-  if (!config.model_type.empty()) {
-    return config.model_type;
-  }
-  if (!config.model_spec.empty()) {
-    ModelDescriptor descriptor;
-    std::string error;
-    if (loadModelDescriptor(config.model_spec, &descriptor, &error)) {
-      if (!descriptor.model_type.empty()) {
-        return descriptor.model_type;
-      }
-      if (!descriptor.runtime.empty()) {
-        return descriptor.runtime;
-      }
-    }
-  }
-  return "SCRFD";
-}
-
-}  // namespace
-
 FaceDetector::FaceDetector() = default;
 
 FaceDetector::FaceDetector(std::string model_type)
@@ -45,18 +13,42 @@ FaceDetector::FaceDetector(std::string model_type)
 
 FaceDetector::~FaceDetector() = default;
 
-FaceDetector::FaceDetector(FaceDetector &&) noexcept = default;
+FaceDetector::FaceDetector(FaceDetector &&other) noexcept
+    : requested_model_type_(std::move(other.requested_model_type_)),
+      config_(std::move(other.config_)),
+      model_(std::move(other.model_)) {}
 
-FaceDetector &FaceDetector::operator=(FaceDetector &&) noexcept = default;
+FaceDetector &FaceDetector::operator=(FaceDetector &&other) noexcept {
+  if (this == &other) {
+    return *this;
+  }
+  reset();
+  requested_model_type_ = std::move(other.requested_model_type_);
+  config_ = std::move(other.config_);
+  model_ = std::move(other.model_);
+  return *this;
+}
 
 bool FaceDetector::load(const Config &config, std::string *error) {
   config_ = config;
   if (config_.model_type.empty() && !requested_model_type_.empty()) {
     config_.model_type = requested_model_type_;
   }
-  requested_model_type_ = resolveModelType(config_);
-  model_.reset(new NnScrfd(requested_model_type_));
-  return model_->load(toEngineConfig(config_), error);
+  requested_model_type_ = private_runtime_factory::resolveModelType(
+      config_, requested_model_type_, "SCRFD");
+  const std::string runtime_name = private_runtime_factory::inferRuntime(
+      TaskType::FaceDetection, requested_model_type_, nullptr);
+  model_ = private_runtime_factory::createRuntime(runtime_name,
+                                                  requested_model_type_, error);
+  if (!model_) {
+    return false;
+  }
+  if (!model_->load(private_runtime_factory::toEngineConfig(config_), error)) {
+    model_.reset();
+    return false;
+  }
+  requested_model_type_ = model_->modelType();
+  return true;
 }
 
 bool FaceDetector::load(const std::string &model_spec, std::string *error) {

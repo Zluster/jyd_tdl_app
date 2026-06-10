@@ -1,8 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
-PROJECT_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
+if [ -f "./CMakeLists.txt" ] && [ -d "./third_party/cv184x" ]; then
+  PROJECT_ROOT=$(pwd)
+else
+  SCRIPT_PATH="${BASH_SOURCE:-$0}"
+  SCRIPT_DIR=$(cd "$(dirname "${SCRIPT_PATH}")" && pwd)
+  PROJECT_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
+fi
 THIRD_PARTY_DIR="${TDL_APP_THIRD_PARTY_DIR:-${PROJECT_ROOT}/third_party/cv184x}"
 DEFAULT_PKG_DIR="${PROJECT_ROOT}/package/tdl_app_sdk_cv184x"
 FALLBACK_PKG_DIR="${PROJECT_ROOT}/package_user/tdl_app_sdk_cv184x"
@@ -32,15 +37,15 @@ if [ ! -d "${RESOLVED_INSTALL_DIR}" ]; then
 fi
 
 rm -rf "${RESOLVED_PKG_DIR}"
-mkdir -p "${RESOLVED_PKG_DIR}/bin" "${RESOLVED_PKG_DIR}/lib" "${RESOLVED_PKG_DIR}/models" "${RESOLVED_PKG_DIR}/configs" "${RESOLVED_PKG_DIR}/firmware"
+mkdir -p "${RESOLVED_PKG_DIR}/bin" "${RESOLVED_PKG_DIR}/lib" "${RESOLVED_PKG_DIR}/models" "${RESOLVED_PKG_DIR}/configs" "${RESOLVED_PKG_DIR}/firmware" "${RESOLVED_PKG_DIR}/assets"
 
 cp -a "${RESOLVED_INSTALL_DIR}/bin/." "${RESOLVED_PKG_DIR}/bin/" 2>/dev/null || true
 cp -a "${RESOLVED_INSTALL_DIR}/lib/." "${RESOLVED_PKG_DIR}/lib/" 2>/dev/null || true
 cp -a "${RESOLVED_INSTALL_DIR}/configs/." "${RESOLVED_PKG_DIR}/configs/" 2>/dev/null || true
 cp -a "${THIRD_PARTY_DIR}/lib/." "${RESOLVED_PKG_DIR}/lib/"
-cp -a "${THIRD_PARTY_DIR}/opencv/lib/." "${RESOLVED_PKG_DIR}/lib/"
 cp -a "${THIRD_PARTY_DIR}/models/." "${RESOLVED_PKG_DIR}/models/"
 cp -a "${THIRD_PARTY_DIR}/firmware/." "${RESOLVED_PKG_DIR}/firmware/" 2>/dev/null || true
+cp -a "${PROJECT_ROOT}/assets/." "${RESOLVED_PKG_DIR}/assets/" 2>/dev/null || true
 
 cat > "${RESOLVED_PKG_DIR}/env.sh" <<'EOF'
 #!/bin/sh
@@ -178,15 +183,6 @@ exec "${DIR}/bin/tdl_camera_feature_demo" "$@"
 EOF
 chmod +x "${RESOLVED_PKG_DIR}/run_camera_feature_demo.sh"
 
-cat > "${RESOLVED_PKG_DIR}/run_camera_rtsp_demo.sh" <<'EOF'
-#!/bin/sh
-set -eu
-DIR=$(cd "$(dirname "$0")" && pwd)
-. "${DIR}/env.sh"
-exec "${DIR}/bin/tdl_camera_rtsp_demo" "$@"
-EOF
-chmod +x "${RESOLVED_PKG_DIR}/run_camera_rtsp_demo.sh"
-
 cat > "${RESOLVED_PKG_DIR}/run_multi_vpss_demo.sh" <<'EOF'
 #!/bin/sh
 set -eu
@@ -232,7 +228,16 @@ exec "${DIR}/bin/tdl_graphic_vo_demo" "$@"
 EOF
 chmod +x "${RESOLVED_PKG_DIR}/run_graphic_vo_demo.sh"
 
-tar -czf "${RESOLVED_PKG_DIR}.tar.gz" -C "$(dirname "${RESOLVED_PKG_DIR}")" "$(basename "${RESOLVED_PKG_DIR}")"
+cat > "${RESOLVED_PKG_DIR}/run_pp_ocr_demo.sh" <<'EOF'
+#!/bin/sh
+set -eu
+DIR=$(cd "$(dirname "$0")" && pwd)
+. "${DIR}/env.sh"
+exec "${DIR}/bin/tdl_pp_ocr_demo" "$@"
+EOF
+chmod +x "${RESOLVED_PKG_DIR}/run_pp_ocr_demo.sh"
+
+tar cf - -C "$(dirname "${RESOLVED_PKG_DIR}")" "$(basename "${RESOLVED_PKG_DIR}")" | gzip -9 > "${RESOLVED_PKG_DIR}.tar.gz"
 echo "Install dir: ${RESOLVED_INSTALL_DIR}"
 echo "Package dir: ${RESOLVED_PKG_DIR}"
 echo "Package: ${RESOLVED_PKG_DIR}.tar.gz"

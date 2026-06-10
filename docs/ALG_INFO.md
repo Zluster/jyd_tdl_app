@@ -1,12 +1,10 @@
 # API 与 Demo 对照
 
-本文给出当前公开 API 与 demo 程序的对应关系，方便快速定位示例代码。
-
-## 公共算法 API 对照
+## 公共 API 对照表
 
 | API | 主要输出 | 对应 demo |
 | --- | --- | --- |
-| `Detector` | `AlgorithmResult.boxes / labels` | `tdl_detect_demo`、`tdl_yolov5_demo`、`tdl_yolov8_demo`、`tdl_camera_detect_demo` |
+| `Detector` | `AlgorithmResult.boxes / labels` | `tdl_detect_demo`、`tdl_yolov5_demo`、`tdl_yolov8_demo`、`tdl_camera_detect_demo`、`tdl_camera_rtsp_demo` |
 | `Classifier` | `AlgorithmResult.classes / labels` | `tdl_classify_demo`、`tdl_camera_classify_demo` |
 | `FaceDetector` | `AlgorithmResult.boxes[*].landmarks` | `tdl_face_detect_demo`、`tdl_face_attr_pipeline_demo` 第一阶段 |
 | `FaceAttributeClassifier` | `AlgorithmResult.attributes` | `tdl_face_attribute_demo`、`tdl_face_attr_pipeline_demo` 第二阶段 |
@@ -17,75 +15,78 @@
 | `InstanceSegmenter` | `InstanceSegmentationResult` | `tdl_instance_seg_demo` |
 | `LaneDetector` | `LaneDetectionResult` | `tdl_lane_demo` |
 | `VoiceActivityDetector` | `VoiceActivityResult` | `tdl_vad_demo` |
+| `Camera` | `Frame` | `tdl_camera_capture_demo` 以及所有 `tdl_camera_*` |
+| `MultiStagePipeline` | 多阶段聚合结果 | `tdl_face_attr_pipeline_demo` |
 
-## 媒体与相机 API 对照
+## 高级媒体 API 对照表
 
 | API | 作用 | 对应 demo |
 | --- | --- | --- |
-| `Camera` | 获取 `Frame` | `tdl_camera_capture_demo` 以及所有 `tdl_camera_*` |
 | `SensorMedia` | sensor / MIPI / ISP / VI / VPSS 启动 | 多个 `tdl_camera_*` demo |
 | `Mmf` | `SYS/VB/VPSS/...` 快速启动 | 多个 `tdl_camera_*` demo |
 | `RtspStreamer` | RTSP 推流 | `tdl_camera_rtsp_demo` |
-| `OsdRegion` | OSD 区域叠加 | `tdl_osd_demo`、`tdl_media_smoke_demo` |
+| `OsdRegion` | OSD 区域 | `tdl_osd_demo`、`tdl_media_smoke_demo` |
 | `GraphicVoLayer` | 图形显示层 | `tdl_graphic_vo_demo` |
 | `VdecChannel` | 解码通道 | `tdl_vdec_demo` |
 | `VencChannel` | 编码通道 | `tdl_media_smoke_demo` |
 
-## 音频相关 demo
+## 后处理怎么理解
 
-| demo | 作用 |
-| --- | --- |
-| `tdl_audio_aio_demo` | AI 录音、AO 播放、基础 AIO 验证 |
-
-## 后处理如何理解
-
-统一理解为六步：
+先记一个统一框架：
 
 1. 预处理
 2. 推理
-3. 输出解析或反量化
+3. 输出反量化或解析
 4. 后处理解码
-5. 过滤或聚合
+5. 过滤 / 聚合
 6. 写回稳定结果结构
 
 ### YOLOv5
 
-- `letterbox`
-- `BGR -> RGB`
-- 输入归一化
-- anchor 解码
-- 分数计算
-- NMS
+- 先做 letterbox
+- 再 `BGR -> RGB`
+- 再除以 `255`
+- 输出按网格和 anchor 解码
+- 分数是 `obj * class_score`
+- 最后回映射到原图并做 NMS
 
 ### YOLOv8
 
-- `letterbox`
-- DFL 解码
-- 分类分数解析
-- NMS
+- 同样先 letterbox
+- 再做 DFL 解码
+- 计算分类分数
+- 回映射到原图
+- 做 NMS
 
 ### Classifier
 
-- resize
-- 通道转换
-- 归一化
-- score 向量解析
-- top-k
+- resize / 通道转换 / 归一化
+- 读 score 向量
+- 需要时 softmax
+- 取 top-k
 
 ### FeatureExtractor
 
-- 图像预处理
-- embedding 输出
-- 按需 L2 归一化
+- 和分类预处理相近
+- 输出不是类别，而是 embedding
+- 需要时做 L2 归一化
 
 ### SCRFD
 
-- box 解码
-- landmark 解码
+- 解码 face box
+- 解码 5 点 landmark
+- 阈值过滤
 - NMS
+
+### FaceAttribute
+
+- 可先做人脸 ROI 裁剪
+- 多头输出映射为属性
+- 不需要 NMS
 
 ### PlateRecognizer
 
-- 车牌 ROI 处理
-- CTC decode
-- 文本拼接
+- 可先裁剪车牌 ROI
+- 做 CTC greedy decode
+- 去 blank、去重复
+- 拼成最终字符串

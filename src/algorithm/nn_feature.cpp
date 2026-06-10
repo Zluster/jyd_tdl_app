@@ -91,6 +91,17 @@ bool wantsL2Normalize(const ModelDescriptor &descriptor) {
   return value == "L2" || value == "TRUE" || value == "1";
 }
 
+float quantizeInputValue(float value, float input_scale,
+                         int input_zero_point) {
+  if (input_scale == 0.0f) {
+    return value;
+  }
+  if (std::fabs(input_scale) > 1.0f) {
+    return value * input_scale + input_zero_point;
+  }
+  return value / input_scale + input_zero_point;
+}
+
 }  // namespace
 
 class NnFeature::CustomRuntime {
@@ -270,9 +281,8 @@ class NnFeature::CustomRuntime {
       input_bytes.resize(input_tensor.size());
       auto *dst = reinterpret_cast<int8_t *>(input_bytes.data());
       for (size_t i = 0; i < input_tensor.size(); ++i) {
-        const float q = input_scale == 0.0f
-                            ? input_tensor[i]
-                            : input_tensor[i] / input_scale + input_zero_point;
+        const float q =
+            quantizeInputValue(input_tensor[i], input_scale, input_zero_point);
         dst[i] = clampCast<int8_t>(q);
       }
       input_ptrs[0] = input_bytes.data();
@@ -280,9 +290,8 @@ class NnFeature::CustomRuntime {
       input_bytes.resize(input_tensor.size());
       auto *dst = reinterpret_cast<uint8_t *>(input_bytes.data());
       for (size_t i = 0; i < input_tensor.size(); ++i) {
-        const float q = input_scale == 0.0f
-                            ? input_tensor[i]
-                            : input_tensor[i] / input_scale + input_zero_point;
+        const float q =
+            quantizeInputValue(input_tensor[i], input_scale, input_zero_point);
         dst[i] = clampCast<uint8_t>(q);
       }
       input_ptrs[0] = input_bytes.data();

@@ -52,7 +52,11 @@ inline MMF_CHN_S toMmfChannel(const MediaChannel &channel) {
   MMF_CHN_S out;
   std::memset(&out, 0, sizeof(out));
   out.enModId = toModId(channel.module);
-  out.s32DevId = channel.device;
+  // CVITEK MMF treats VO destination MMF_CHN_S::s32DevId as VO layer rather
+  // than VO device. Keep the public MediaChannel::vo(device, channel) API for
+  // now and map VO to layer 0, which matches the current single-panel setup.
+  out.s32DevId =
+      (channel.module == MediaModule::Vo) ? 0 : channel.device;
   out.s32ChnId = channel.channel;
   return out;
 }

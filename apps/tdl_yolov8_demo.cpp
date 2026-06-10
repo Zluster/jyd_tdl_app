@@ -22,7 +22,7 @@ void printUsage() {
 }
 
 bool parseArgs(int argc, char **argv, Options *opt) {
-  opt->common.model_spec = "./configs/model_specs/yolov8n_det_coco80.ini";
+  opt->common.model_spec = "./configs/model_specs/yolov8n_det_coco80.mud";
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
     bool handled = false;

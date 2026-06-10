@@ -1,7 +1,6 @@
 #include "tdl_app/algorithm_engine.hpp"
 
 #include <algorithm>
-#include <cctype>
 #include <cstdlib>
 #include <memory>
 #include <string>
@@ -9,13 +8,7 @@
 #include "tdl_app/frame_source.hpp"
 #include "tdl_app/model_descriptor.hpp"
 #include "tdl_app/nn_base.hpp"
-#include "tdl_app/nn_classifier.hpp"
-#include "tdl_app/nn_face_attribute.hpp"
-#include "tdl_app/nn_feature.hpp"
-#include "tdl_app/nn_plate_recognizer.hpp"
-#include "tdl_app/nn_scrfd.hpp"
-#include "tdl_app/nn_yolov5.hpp"
-#include "tdl_app/nn_yolov8.hpp"
+#include "algorithm/private/runtime_factory.hpp"
 
 namespace tdl_app {
 namespace {
@@ -24,18 +17,6 @@ void setError(std::string *error, const std::string &message) {
   if (error) {
     *error = message;
   }
-}
-
-std::string normalizeToken(std::string value) {
-  std::transform(value.begin(), value.end(), value.begin(),
-                 [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
-  std::replace(value.begin(), value.end(), '-', '_');
-  return value;
-}
-
-bool startsWith(const std::string &value, const std::string &prefix) {
-  return value.size() >= prefix.size() &&
-         value.compare(0, prefix.size(), prefix) == 0;
 }
 
 std::string defaultModelForTask(TaskType task) {
@@ -50,75 +31,6 @@ std::string defaultModelForTask(TaskType task) {
       return "FEATURE";
     case TaskType::FaceAttribute:
       return "FACE_ATTRIBUTE";
-    case TaskType::Landmark:
-    case TaskType::Keypoint:
-      return "";
-    case TaskType::Ocr:
-      return "PLATE_RECOGNIZER";
-  }
-  return "";
-}
-
-std::string inferRuntime(TaskType task, const std::string &model_name,
-                         const ModelDescriptor *descriptor) {
-  if (descriptor && !descriptor->runtime.empty()) {
-    return normalizeToken(descriptor->runtime);
-  }
-  if (descriptor && !descriptor->task_name.empty()) {
-    const std::string task_name = normalizeToken(descriptor->task_name);
-    if (task_name == "DETECT" || task_name == "DETECTION") {
-      return startsWith(normalizeToken(model_name), "YOLOV5") ? "YOLOV5" : "YOLOV8";
-    }
-    if (task_name == "FACE_DETECT" || task_name == "FACE_DETECTION") {
-      return "SCRFD";
-    }
-    if (task_name == "FACE_ATTR" || task_name == "FACE_ATTRIBUTE") {
-      return "FACE_ATTRIBUTE";
-    }
-    if (task_name == "CLASSIFY" || task_name == "CLASSIFICATION") {
-      return "CLASSIFIER";
-    }
-    if (task_name == "FEATURE") {
-      return "FEATURE";
-    }
-    if (task_name == "OCR") {
-      return "PLATE_RECOGNIZER";
-    }
-  }
-  const std::string normalized = normalizeToken(model_name);
-  if (startsWith(normalized, "SCRFD")) {
-    return "SCRFD";
-  }
-  if (startsWith(normalized, "FACE_ATTRIBUTE")) {
-    return "FACE_ATTRIBUTE";
-  }
-  if (startsWith(normalized, "PLATE_") || startsWith(normalized, "LPR")) {
-    return "PLATE_RECOGNIZER";
-  }
-  if (startsWith(normalized, "YOLOV8")) {
-    return "YOLOV8";
-  }
-  if (startsWith(normalized, "YOLOV5")) {
-    return "YOLOV5";
-  }
-  if (startsWith(normalized, "FEATURE")) {
-    return "FEATURE";
-  }
-  if (startsWith(normalized, "CLS") || startsWith(normalized, "CLASSIFIER")) {
-    return "CLASSIFIER";
-  }
-
-  switch (task) {
-    case TaskType::Classification:
-      return "CLASSIFIER";
-    case TaskType::Detection:
-      return "YOLOV8";
-    case TaskType::FaceDetection:
-      return "SCRFD";
-    case TaskType::FaceAttribute:
-      return "FACE_ATTRIBUTE";
-    case TaskType::Feature:
-      return "FEATURE";
     case TaskType::Landmark:
     case TaskType::Keypoint:
       return "";
@@ -177,10 +89,13 @@ class AlgorithmEngine::Impl {
     if (resolved_model_type.empty()) {
       resolved_model_type = defaultModelForTask(task);
     }
-    resolved_model_type = normalizeToken(resolved_model_type);
+    resolved_model_type =
+        private_runtime_factory::normalizeToken(resolved_model_type);
 
     const std::string runtime =
-        inferRuntime(task, resolved_model_type, descriptor_loaded_ ? &descriptor_ : nullptr);
+        private_runtime_factory::inferRuntime(
+            task, resolved_model_type,
+            descriptor_loaded_ ? &descriptor_ : nullptr);
     if (runtime.empty()) {
       setError(error, "unsupported task/model combination for custom runtime");
       return false;
@@ -234,22 +149,9 @@ class AlgorithmEngine::Impl {
     }
 
     std::shared_ptr<NnBase> next_runtime;
-    if (runtime_name == "YOLOV8") {
-      next_runtime.reset(new NnYolov8(model_type));
-    } else if (runtime_name == "YOLOV5") {
-      next_runtime.reset(new NnYolov5(model_type));
-    } else if (runtime_name == "SCRFD") {
-      next_runtime.reset(new NnScrfd(model_type));
-    } else if (runtime_name == "CLASSIFIER") {
-      next_runtime.reset(new NnClassifier(model_type));
-    } else if (runtime_name == "FACE_ATTRIBUTE") {
-      next_runtime.reset(new NnFaceAttribute(model_type));
-    } else if (runtime_name == "PLATE_RECOGNIZER") {
-      next_runtime.reset(new NnPlateRecognizer(model_type));
-    } else if (runtime_name == "FEATURE") {
-      next_runtime.reset(new NnFeature(model_type));
-    } else {
-      setError(error, "unsupported runtime: " + runtime_name);
+    next_runtime = private_runtime_factory::createRuntime(runtime_name,
+                                                          model_type, error);
+    if (!next_runtime) {
       return false;
     }
 

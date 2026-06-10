@@ -26,6 +26,7 @@ namespace {
 constexpr int kInputChannels = 3;
 constexpr int kRegMax = 16;
 constexpr int kBoxChannels = 4 * kRegMax;
+constexpr int kObbAngleChannels = 1;
 
 void setError(std::string *error, const std::string &message) {
   if (error) {
@@ -65,6 +66,58 @@ float intersectionOverUnion(const Box &lhs, const Box &rhs) {
   return inter / denom;
 }
 
+bool isOrientedBox(const Box &box) {
+  return box.landmarks.size() == 4;
+}
+
+float contourAreaAbs(const std::vector<cv::Point2f> &points) {
+  if (points.size() < 3) {
+    return 0.0f;
+  }
+  return std::fabs(static_cast<float>(cv::contourArea(points)));
+}
+
+bool cornersFromBox(const Box &box, std::vector<cv::Point2f> *corners) {
+  if (!corners || box.landmarks.size() != 4) {
+    return false;
+  }
+  corners->clear();
+  corners->reserve(4);
+  for (const auto &landmark : box.landmarks) {
+    corners->emplace_back(landmark.x, landmark.y);
+  }
+  return true;
+}
+
+float orientedIntersectionOverUnion(const Box &lhs, const Box &rhs) {
+  std::vector<cv::Point2f> lhs_corners;
+  std::vector<cv::Point2f> rhs_corners;
+  if (!cornersFromBox(lhs, &lhs_corners) || !cornersFromBox(rhs, &rhs_corners)) {
+    return intersectionOverUnion(lhs, rhs);
+  }
+
+  std::vector<cv::Point2f> intersection;
+  const int relation = cv::rotatedRectangleIntersection(
+      cv::minAreaRect(lhs_corners), cv::minAreaRect(rhs_corners), intersection);
+  if (relation == cv::INTERSECT_NONE) {
+    return 0.0f;
+  }
+
+  const float lhs_area = contourAreaAbs(lhs_corners);
+  const float rhs_area = contourAreaAbs(rhs_corners);
+  float inter_area = 0.0f;
+  if (relation == cv::INTERSECT_FULL) {
+    inter_area = std::min(lhs_area, rhs_area);
+  } else {
+    inter_area = contourAreaAbs(intersection);
+  }
+  const float denom = lhs_area + rhs_area - inter_area;
+  if (denom <= 0.0f) {
+    return 0.0f;
+  }
+  return inter_area / denom;
+}
+
 std::vector<Box> nonMaxSuppression(const std::vector<Box> &boxes, float iou_threshold) {
   std::vector<int> order(boxes.size());
   std::iota(order.begin(), order.end(), 0);
@@ -87,7 +140,11 @@ std::vector<Box> nonMaxSuppression(const std::vector<Box> &boxes, float iou_thre
       if (boxes[index].class_id != boxes[other].class_id) {
         continue;
       }
-      if (intersectionOverUnion(boxes[index], boxes[other]) > iou_threshold) {
+      const float iou =
+          (isOrientedBox(boxes[index]) || isOrientedBox(boxes[other]))
+              ? orientedIntersectionOverUnion(boxes[index], boxes[other])
+              : intersectionOverUnion(boxes[index], boxes[other]);
+      if (iou > iou_threshold) {
         removed[other] = true;
       }
     }
@@ -137,6 +194,7 @@ class NnYolov8::CustomRuntime {
     int feat_h = 0;
     int bbox_index = -1;
     int cls_index = -1;
+    int angle_index = -1;
     int cls_offset = 0;
   };
 
@@ -164,6 +222,14 @@ class NnYolov8::CustomRuntime {
     }
 
     labels_ = descriptor.labels;
+    obb_mode_ = false;
+    const auto obb_it = descriptor.extra.find("type");
+    if (obb_it != descriptor.extra.end()) {
+      obb_mode_ = toUpper(obb_it->second) == "OBB";
+    }
+    if (!obb_mode_) {
+      obb_mode_ = startsWith(toUpper(descriptor.model_type), "YOLOV8_OBB");
+    }
     const std::string model_path = resolveModelPath(descriptor);
     if (!bmrt_load_bmodel(runtime_, model_path.c_str())) {
       setError(error, "bmrt_load_bmodel failed: " + model_path);
@@ -279,6 +345,7 @@ class NnYolov8::CustomRuntime {
       int feat_h = 0;
       int bbox_index = -1;
       int cls_index = -1;
+      int angle_index = -1;
       int cls_offset = 0;
     };
 
@@ -308,11 +375,24 @@ class NnYolov8::CustomRuntime {
         return branch.stride == stride_h;
       });
       if (it == temp.end()) {
-        temp.push_back(TempBranch{stride_h, feat_w, feat_h, -1, -1, 0});
+        temp.push_back(TempBranch{stride_h, feat_w, feat_h, -1, -1, -1, 0});
         it = temp.end() - 1;
       }
 
-      if (channel == kBoxChannels) {
+      if (obb_mode_) {
+        if (channel == kBoxChannels) {
+          it->bbox_index = i;
+        } else if (channel == kObbAngleChannels) {
+          it->angle_index = i;
+        } else if (num_classes_ > 0 && channel == num_classes_) {
+          it->cls_index = i;
+          it->cls_offset = 0;
+        } else {
+          num_classes_ = channel;
+          it->cls_index = i;
+          it->cls_offset = 0;
+        }
+      } else if (channel == kBoxChannels) {
         it->bbox_index = i;
       } else if (num_classes_ > 0 && channel == num_classes_) {
         it->cls_index = i;
@@ -341,12 +421,14 @@ class NnYolov8::CustomRuntime {
     }
 
     for (auto &branch : temp) {
-      if (branch.bbox_index < 0 || branch.cls_index < 0) {
+      if (branch.bbox_index < 0 || branch.cls_index < 0 ||
+          (obb_mode_ && branch.angle_index < 0)) {
         setError(error, "incomplete YOLOv8 output branches");
         return false;
       }
       branches_.push_back(OutputBranch{branch.stride, branch.feat_w, branch.feat_h,
                                        branch.bbox_index, branch.cls_index,
+                                       branch.angle_index,
                                        branch.cls_offset});
     }
 
@@ -508,6 +590,58 @@ class NnYolov8::CustomRuntime {
     return values;
   }
 
+  Point mapPoint(float x, float y, int image_width, int image_height, float ratio,
+                 int top, int left) const {
+    Point point;
+    point.x = (x - static_cast<float>(left)) / ratio;
+    point.y = (y - static_cast<float>(top)) / ratio;
+    point.x = std::max(0.0f, std::min(point.x, static_cast<float>(image_width)));
+    point.y = std::max(0.0f, std::min(point.y, static_cast<float>(image_height)));
+    return point;
+  }
+
+  Box decodeOrientedBox(const std::vector<float> &distances, float angle, float grid_x,
+                        float grid_y, const OutputBranch &branch, int image_width,
+                        int image_height, float ratio, int top, int left,
+                        int class_id, float score) const {
+    const float xf = (distances[2] - distances[0]) * 0.5f;
+    const float yf = (distances[3] - distances[1]) * 0.5f;
+    const float cos_a = std::cos(angle);
+    const float sin_a = std::sin(angle);
+    const float center_x = (grid_x + xf * cos_a - yf * sin_a) * branch.stride;
+    const float center_y = (grid_y + xf * sin_a + yf * cos_a) * branch.stride;
+    const float width = (distances[0] + distances[2]) * branch.stride;
+    const float height = (distances[1] + distances[3]) * branch.stride;
+    const float half_w = width * 0.5f;
+    const float half_h = height * 0.5f;
+
+    static const float kCornerSigns[4][2] = {
+        {-1.0f, -1.0f}, {1.0f, -1.0f}, {1.0f, 1.0f}, {-1.0f, 1.0f}};
+
+    Box box;
+    box.class_id = class_id;
+    box.score = score;
+    box.x1 = static_cast<float>(image_width);
+    box.y1 = static_cast<float>(image_height);
+    box.x2 = 0.0f;
+    box.y2 = 0.0f;
+    box.landmarks.reserve(4);
+
+    for (const auto &sign : kCornerSigns) {
+      const float local_x = sign[0] * half_w;
+      const float local_y = sign[1] * half_h;
+      const float x = center_x + local_x * cos_a - local_y * sin_a;
+      const float y = center_y + local_x * sin_a + local_y * cos_a;
+      Point mapped = mapPoint(x, y, image_width, image_height, ratio, top, left);
+      box.x1 = std::min(box.x1, mapped.x);
+      box.y1 = std::min(box.y1, mapped.y);
+      box.x2 = std::max(box.x2, mapped.x);
+      box.y2 = std::max(box.y2, mapped.y);
+      box.landmarks.push_back(mapped);
+    }
+    return box;
+  }
+
   std::vector<Box> decode(const std::vector<std::vector<float>> &outputs,
                           const std::vector<bm_shape_t> &output_shapes,
                           int image_width, int image_height, float ratio, int top,
@@ -524,6 +658,8 @@ class NnYolov8::CustomRuntime {
     for (const auto &branch : branches_) {
       const std::vector<float> &bbox_out = outputs[branch.bbox_index];
       const std::vector<float> &cls_out = outputs[branch.cls_index];
+      const std::vector<float> *angle_out =
+          obb_mode_ ? &outputs[branch.angle_index] : nullptr;
       const int anchor_count = branch.feat_w * branch.feat_h;
 
       for (int anchor = 0; anchor < anchor_count; ++anchor) {
@@ -558,16 +694,25 @@ class NnYolov8::CustomRuntime {
         const float y2 = (grid_y + distances[3]) * branch.stride;
 
         Box box;
-        box.class_id = best_class;
-        box.score = score;
-        box.x1 = (x1 - left) / ratio;
-        box.y1 = (y1 - top) / ratio;
-        box.x2 = (x2 - left) / ratio;
-        box.y2 = (y2 - top) / ratio;
-        box.x1 = std::max(0.0f, std::min(box.x1, static_cast<float>(image_width)));
-        box.y1 = std::max(0.0f, std::min(box.y1, static_cast<float>(image_height)));
-        box.x2 = std::max(0.0f, std::min(box.x2, static_cast<float>(image_width)));
-        box.y2 = std::max(0.0f, std::min(box.y2, static_cast<float>(image_height)));
+        if (obb_mode_ && angle_out) {
+          const float angle =
+              (sigmoid((*angle_out)[anchor]) - 0.25f) *
+              static_cast<float>(CV_PI);
+          box = decodeOrientedBox(distances, angle, grid_x, grid_y, branch,
+                                  image_width, image_height, ratio, top, left,
+                                  best_class, score);
+        } else {
+          box.class_id = best_class;
+          box.score = score;
+          box.x1 = (x1 - left) / ratio;
+          box.y1 = (y1 - top) / ratio;
+          box.x2 = (x2 - left) / ratio;
+          box.y2 = (y2 - top) / ratio;
+          box.x1 = std::max(0.0f, std::min(box.x1, static_cast<float>(image_width)));
+          box.y1 = std::max(0.0f, std::min(box.y1, static_cast<float>(image_height)));
+          box.x2 = std::max(0.0f, std::min(box.x2, static_cast<float>(image_width)));
+          box.y2 = std::max(0.0f, std::min(box.y2, static_cast<float>(image_height)));
+        }
         boxes.push_back(box);
       }
     }
@@ -586,6 +731,7 @@ class NnYolov8::CustomRuntime {
   bm_data_type_t input_dtype_ = BM_UINT8;
   std::vector<std::string> labels_;
   std::vector<OutputBranch> branches_;
+  bool obb_mode_ = false;
   bool opened_ = false;
 };
 

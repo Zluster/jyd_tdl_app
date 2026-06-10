@@ -20,6 +20,7 @@ struct ScrfdBranch {
   int feat_w = 0;
   int feat_h = 0;
   int num_anchors = 2;
+  bool channel_last = false;
   int score_index = -1;
   int bbox_index = -1;
   int landmark_index = -1;
@@ -134,16 +135,29 @@ class NnScrfd::CustomRuntime {
 
       for (int i = 0; i < net_info->output_num; ++i) {
         const bm_shape_t &shape = stage.output_shapes[i];
-        if (shape.num_dims != 4 || shape.dims[2] != branch.feat_h ||
-            shape.dims[3] != branch.feat_w) {
+        if (shape.num_dims != 4) {
           continue;
         }
-        if (shape.dims[1] == branch.num_anchors) {
+
+        const bool nchw_match = shape.dims[2] == branch.feat_h &&
+                                shape.dims[3] == branch.feat_w;
+        const bool nhwc_match = shape.dims[1] == branch.feat_h &&
+                                shape.dims[2] == branch.feat_w;
+        if (!nchw_match && !nhwc_match) {
+          continue;
+        }
+
+        const bool channel_last = nhwc_match && !nchw_match;
+        const int channel_dim = channel_last ? shape.dims[3] : shape.dims[1];
+        if (channel_dim == branch.num_anchors) {
           branch.score_index = i;
-        } else if (shape.dims[1] == branch.num_anchors * 4) {
+          branch.channel_last = channel_last;
+        } else if (channel_dim == branch.num_anchors * 4) {
           branch.bbox_index = i;
-        } else if (shape.dims[1] == branch.num_anchors * 10) {
+          branch.channel_last = channel_last;
+        } else if (channel_dim == branch.num_anchors * 10) {
           branch.landmark_index = i;
+          branch.channel_last = channel_last;
         }
       }
 
@@ -171,7 +185,7 @@ class NnScrfd::CustomRuntime {
                cv::INTER_LINEAR);
 
     cv::Mat padded(session_.inputHeight(), session_.inputWidth(), CV_8UC3,
-                   cv::Scalar(0, 0, 0));
+                   cv::Scalar(127, 127, 127));
     resized.copyTo(padded(cv::Rect(*left, *top, resized_w, resized_h)));
 
     bmrt_runtime::writeImageToTensor(
@@ -191,31 +205,50 @@ class NnScrfd::CustomRuntime {
       const auto &landmark =
           outputs[static_cast<size_t>(branch.landmark_index)].data;
       const int count = branch.feat_w * branch.feat_h;
+      const int bbox_channels = branch.num_anchors * 4;
+      const int landmark_channels = branch.num_anchors * 10;
+
+      const auto scoreAt = [&](int index, int anchor) -> float {
+        if (branch.channel_last) {
+          return score[static_cast<size_t>(index * branch.num_anchors + anchor)];
+        }
+        return score[static_cast<size_t>(index + count * anchor)];
+      };
+      const auto bboxAt = [&](int index, int anchor, int component) -> float {
+        if (branch.channel_last) {
+          return bbox[static_cast<size_t>(index * bbox_channels +
+                                          anchor * 4 + component)];
+        }
+        return bbox[static_cast<size_t>(index +
+                                        count * (anchor * 4 + component))];
+      };
+      const auto landmarkAt = [&](int index, int anchor, int component) -> float {
+        if (branch.channel_last) {
+          return landmark[static_cast<size_t>(index * landmark_channels +
+                                              anchor * 10 + component)];
+        }
+        return landmark[static_cast<size_t>(index +
+                                            count * (anchor * 10 + component))];
+      };
 
       for (int anchor = 0; anchor < branch.num_anchors; ++anchor) {
         for (int index = 0; index < count; ++index) {
-          const float conf = score[static_cast<size_t>(index + count * anchor)];
+          const float conf = scoreAt(index, anchor);
           if (conf < threshold) {
             continue;
           }
 
           const int grid_y = index / branch.feat_w;
           const int grid_x = index % branch.feat_w;
-          const float center_x = static_cast<float>(grid_x * branch.stride);
-          const float center_y = static_cast<float>(grid_y * branch.stride);
+          const float center_x =
+              static_cast<float>((grid_x + 0.5f) * branch.stride);
+          const float center_y =
+              static_cast<float>((grid_y + 0.5f) * branch.stride);
 
-          const float x1 = center_x - bbox[static_cast<size_t>(
-                                            index + count * (anchor * 4 + 0))] *
-                                            branch.stride;
-          const float y1 = center_y - bbox[static_cast<size_t>(
-                                            index + count * (anchor * 4 + 1))] *
-                                            branch.stride;
-          const float x2 = center_x + bbox[static_cast<size_t>(
-                                            index + count * (anchor * 4 + 2))] *
-                                            branch.stride;
-          const float y2 = center_y + bbox[static_cast<size_t>(
-                                            index + count * (anchor * 4 + 3))] *
-                                            branch.stride;
+          const float x1 = center_x - bboxAt(index, anchor, 0) * branch.stride;
+          const float y1 = center_y - bboxAt(index, anchor, 1) * branch.stride;
+          const float x2 = center_x + bboxAt(index, anchor, 2) * branch.stride;
+          const float y2 = center_y + bboxAt(index, anchor, 3) * branch.stride;
           if (x1 >= x2 || y1 >= y2) {
             continue;
           }
@@ -236,15 +269,10 @@ class NnScrfd::CustomRuntime {
 
           for (int k = 0; k < kLandmarkCount; ++k) {
             Point point;
-            point.x =
-                (landmark[static_cast<size_t>(index +
-                                              count * (anchor * 10 + k * 2))] *
-                     branch.stride +
-                 center_x - left) /
-                ratio;
-            point.y = (landmark[static_cast<size_t>(
-                                   index + count * (anchor * 10 + k * 2 + 1))] *
-                           branch.stride +
+            point.x = (landmarkAt(index, anchor, k * 2) * branch.stride +
+                       center_x - left) /
+                      ratio;
+            point.y = (landmarkAt(index, anchor, k * 2 + 1) * branch.stride +
                        center_y - top) /
                       ratio;
             point.x = std::max(0.0f,

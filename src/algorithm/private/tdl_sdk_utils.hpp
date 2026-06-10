@@ -25,6 +25,9 @@ inline std::string normalizeToken(std::string value) {
       value.begin(), value.end(), value.begin(),
       [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
   std::replace(value.begin(), value.end(), '-', '_');
+  if (value == "SCRFD") {
+    return "SCRFD_DET_FACE";
+  }
   return value;
 }
 

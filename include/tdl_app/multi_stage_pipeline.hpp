@@ -51,7 +51,6 @@ class MultiStagePipeline {
   void clearBootstrap();
   void setSink(std::unique_ptr<FrameSink> sink);
   void setNullSink();
-  void setRtspSink(const RtspFrameSink::Config &config);
 
   int addDetectorStage(const std::string &name, const Detector &detector);
   int addDetectorStage(const Detector &detector) {

@@ -14,7 +14,16 @@ set(TDL_APP_THIRD_PARTY_DIR
 
 include(cmake/cv184x_tdl.cmake)
 
-add_library(tdl_app_sdk STATIC
+function(tdl_append_existing out_var)
+  foreach(path IN LISTS ARGN)
+    if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/${path}")
+      list(APPEND ${out_var} "${path}")
+    endif()
+  endforeach()
+  set(${out_var} "${${out_var}}" PARENT_SCOPE)
+endfunction()
+
+set(TDL_APP_SOURCES
   third_party/vendor/ini/ini.c
   src/algorithm/algorithm_engine.cpp
   src/algorithm/classifier.cpp
@@ -61,7 +70,6 @@ add_library(tdl_app_sdk STATIC
   src/media/private/sensor_media_vi_isp.cpp
   src/media/private/sensor_media_vpss.cpp
   src/media/region_overlay.cpp
-  src/media/rtsp_streamer.cpp
   src/media/sensor_media.cpp
   src/simple_pipeline.cpp
   src/media/sys_context.cpp
@@ -72,6 +80,23 @@ add_library(tdl_app_sdk STATIC
   src/media/vi_channel.cpp
   src/media/vpss_group.cpp
 )
+
+tdl_append_existing(TDL_APP_SOURCES
+  src/algorithm/keyword_spotter.cpp
+  src/algorithm/self_learning_classifier.cpp
+  src/algorithm/single_object_tracker.cpp
+)
+
+if(TDL_HAS_AUDIO_RUNTIME)
+  tdl_append_existing(TDL_APP_SOURCES
+    src/algorithm/speech_recognizer.cpp
+    src/media/audio_frontend.cpp
+  )
+else()
+  message(STATUS "Audio runtime dependencies not found; skip speech/audio frontend sources")
+endif()
+
+add_library(tdl_app_sdk STATIC ${TDL_APP_SOURCES})
 
 target_include_directories(tdl_app_sdk
   PUBLIC
@@ -87,187 +112,74 @@ target_link_libraries(tdl_app_sdk
     ${TDL_CV184X_LIBS}
 )
 
+function(tdl_add_demo target)
+  set(options)
+  set(oneValueArgs)
+  set(multiValueArgs SOURCES)
+  cmake_parse_arguments(TDL_DEMO "${options}" "${oneValueArgs}" "${multiValueArgs}" ${ARGN})
+  if(NOT TDL_DEMO_SOURCES)
+    return()
+  endif()
+  foreach(src IN LISTS TDL_DEMO_SOURCES)
+    if(NOT EXISTS "${CMAKE_CURRENT_LIST_DIR}/${src}")
+      return()
+    endif()
+  endforeach()
+  add_executable(${target} ${TDL_DEMO_SOURCES})
+  target_sources(${target} PRIVATE third_party/vendor/ini/ini.c)
+  target_include_directories(${target} PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
+  target_link_libraries(${target} PRIVATE tdl_app_sdk)
+  set(TDL_APP_DEMO_TARGETS ${TDL_APP_DEMO_TARGETS} ${target} PARENT_SCOPE)
+endfunction()
+
+set(TDL_APP_DEMO_TARGETS)
+
 if(TDL_APP_BUILD_DEMOS)
-  add_executable(tdl_detect_demo apps/tdl_detect_demo.cpp apps/demo_support.cpp)
-  target_sources(tdl_detect_demo PRIVATE third_party/vendor/ini/ini.c)
-  target_include_directories(tdl_detect_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
-  target_link_libraries(tdl_detect_demo PRIVATE tdl_app_sdk)
-
-  add_executable(tdl_yolov5_demo apps/tdl_yolov5_demo.cpp apps/demo_support.cpp)
-  target_sources(tdl_yolov5_demo PRIVATE third_party/vendor/ini/ini.c)
-  target_include_directories(tdl_yolov5_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
-  target_link_libraries(tdl_yolov5_demo PRIVATE tdl_app_sdk)
-
-  add_executable(tdl_yolov8_demo apps/tdl_yolov8_demo.cpp apps/demo_support.cpp)
-  target_sources(tdl_yolov8_demo PRIVATE third_party/vendor/ini/ini.c)
-  target_include_directories(tdl_yolov8_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
-  target_link_libraries(tdl_yolov8_demo PRIVATE tdl_app_sdk)
-
-  add_executable(tdl_classify_demo apps/tdl_classify_demo.cpp apps/demo_support.cpp)
-  target_sources(tdl_classify_demo PRIVATE third_party/vendor/ini/ini.c)
-  target_include_directories(tdl_classify_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
-  target_link_libraries(tdl_classify_demo PRIVATE tdl_app_sdk)
-
-  add_executable(tdl_feature_demo apps/tdl_feature_demo.cpp apps/demo_support.cpp)
-  target_sources(tdl_feature_demo PRIVATE third_party/vendor/ini/ini.c)
-  target_include_directories(tdl_feature_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
-  target_link_libraries(tdl_feature_demo PRIVATE tdl_app_sdk)
-
-  add_executable(tdl_keypoint_demo apps/tdl_keypoint_demo.cpp)
-  target_sources(tdl_keypoint_demo PRIVATE third_party/vendor/ini/ini.c)
-  target_include_directories(tdl_keypoint_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
-  target_link_libraries(tdl_keypoint_demo PRIVATE tdl_app_sdk)
-
-  add_executable(tdl_semantic_seg_demo apps/tdl_semantic_seg_demo.cpp)
-  target_sources(tdl_semantic_seg_demo PRIVATE third_party/vendor/ini/ini.c)
-  target_include_directories(tdl_semantic_seg_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
-  target_link_libraries(tdl_semantic_seg_demo PRIVATE tdl_app_sdk)
-
-  add_executable(tdl_instance_seg_demo apps/tdl_instance_seg_demo.cpp)
-  target_sources(tdl_instance_seg_demo PRIVATE third_party/vendor/ini/ini.c)
-  target_include_directories(tdl_instance_seg_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
-  target_link_libraries(tdl_instance_seg_demo PRIVATE tdl_app_sdk)
-
-  add_executable(tdl_lane_demo apps/tdl_lane_demo.cpp)
-  target_sources(tdl_lane_demo PRIVATE third_party/vendor/ini/ini.c)
-  target_include_directories(tdl_lane_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
-  target_link_libraries(tdl_lane_demo PRIVATE tdl_app_sdk)
-
-  add_executable(tdl_vad_demo apps/tdl_vad_demo.cpp)
-  target_sources(tdl_vad_demo PRIVATE third_party/vendor/ini/ini.c)
-  target_include_directories(tdl_vad_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
-  target_link_libraries(tdl_vad_demo PRIVATE tdl_app_sdk)
-
-  add_executable(tdl_audio_aio_demo apps/tdl_audio_aio_demo.cpp)
-  target_sources(tdl_audio_aio_demo PRIVATE third_party/vendor/ini/ini.c)
-  target_include_directories(tdl_audio_aio_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
-  target_link_libraries(tdl_audio_aio_demo PRIVATE tdl_app_sdk)
-
-  add_executable(tdl_face_detect_demo apps/tdl_face_detect_demo.cpp apps/demo_support.cpp)
-  target_sources(tdl_face_detect_demo PRIVATE third_party/vendor/ini/ini.c)
-  target_include_directories(tdl_face_detect_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
-  target_link_libraries(tdl_face_detect_demo PRIVATE tdl_app_sdk)
-
-  add_executable(tdl_face_attribute_demo apps/tdl_face_attribute_demo.cpp apps/demo_support.cpp)
-  target_sources(tdl_face_attribute_demo PRIVATE third_party/vendor/ini/ini.c)
-  target_include_directories(tdl_face_attribute_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
-  target_link_libraries(tdl_face_attribute_demo PRIVATE tdl_app_sdk)
-
-  add_executable(tdl_face_attr_pipeline_demo
-    apps/tdl_face_attr_pipeline_demo.cpp
-    apps/demo_support.cpp
-  )
-  target_sources(tdl_face_attr_pipeline_demo PRIVATE third_party/vendor/ini/ini.c)
-  target_include_directories(tdl_face_attr_pipeline_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
-  target_link_libraries(tdl_face_attr_pipeline_demo PRIVATE tdl_app_sdk)
-
-  add_executable(tdl_plate_recognize_demo apps/tdl_plate_recognize_demo.cpp apps/demo_support.cpp)
-  target_sources(tdl_plate_recognize_demo PRIVATE third_party/vendor/ini/ini.c)
-  target_include_directories(tdl_plate_recognize_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
-  target_link_libraries(tdl_plate_recognize_demo PRIVATE tdl_app_sdk)
-
-  add_executable(tdl_camera_capture_demo
-    apps/tdl_camera_capture_demo.cpp
-    apps/camera_demo_support.cpp
-  )
-  target_sources(tdl_camera_capture_demo PRIVATE third_party/vendor/ini/ini.c)
-  target_include_directories(tdl_camera_capture_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
-  target_link_libraries(tdl_camera_capture_demo PRIVATE tdl_app_sdk)
-
-  add_executable(tdl_camera_detect_demo
-    apps/tdl_camera_detect_demo.cpp
-    apps/demo_support.cpp
-    apps/camera_demo_support.cpp
-  )
-  target_sources(tdl_camera_detect_demo PRIVATE third_party/vendor/ini/ini.c)
-  target_include_directories(tdl_camera_detect_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
-  target_link_libraries(tdl_camera_detect_demo PRIVATE tdl_app_sdk)
-
-  add_executable(tdl_camera_classify_demo
-    apps/tdl_camera_classify_demo.cpp
-    apps/demo_support.cpp
-    apps/camera_demo_support.cpp
-  )
-  target_sources(tdl_camera_classify_demo PRIVATE third_party/vendor/ini/ini.c)
-  target_include_directories(tdl_camera_classify_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
-  target_link_libraries(tdl_camera_classify_demo PRIVATE tdl_app_sdk)
-
-  add_executable(tdl_camera_feature_demo
-    apps/tdl_camera_feature_demo.cpp
-    apps/demo_support.cpp
-    apps/camera_demo_support.cpp
-  )
-  target_sources(tdl_camera_feature_demo PRIVATE third_party/vendor/ini/ini.c)
-  target_include_directories(tdl_camera_feature_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
-  target_link_libraries(tdl_camera_feature_demo PRIVATE tdl_app_sdk)
-
-  add_executable(tdl_camera_rtsp_demo
-    apps/tdl_camera_rtsp_demo.cpp
-    apps/camera_demo_support.cpp
-  )
-  target_sources(tdl_camera_rtsp_demo PRIVATE third_party/vendor/ini/ini.c)
-  target_include_directories(tdl_camera_rtsp_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
-  target_link_libraries(tdl_camera_rtsp_demo PRIVATE tdl_app_sdk)
-
-  add_executable(tdl_multi_vpss_demo
-    apps/tdl_multi_vpss_demo.cpp
-    apps/camera_demo_support.cpp
-  )
-  target_sources(tdl_multi_vpss_demo PRIVATE third_party/vendor/ini/ini.c)
-  target_include_directories(tdl_multi_vpss_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
-  target_link_libraries(tdl_multi_vpss_demo PRIVATE tdl_app_sdk)
-
-  add_executable(tdl_media_smoke_demo apps/tdl_media_smoke_demo.cpp)
-  target_sources(tdl_media_smoke_demo PRIVATE third_party/vendor/ini/ini.c)
-  target_include_directories(tdl_media_smoke_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
-  target_link_libraries(tdl_media_smoke_demo PRIVATE tdl_app_sdk)
-
-  add_executable(tdl_osd_demo apps/tdl_osd_demo.cpp)
-  target_sources(tdl_osd_demo PRIVATE third_party/vendor/ini/ini.c)
-  target_include_directories(tdl_osd_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
-  target_link_libraries(tdl_osd_demo PRIVATE tdl_app_sdk)
-
-  add_executable(tdl_graphic_vo_demo apps/tdl_graphic_vo_demo.cpp)
-  target_sources(tdl_graphic_vo_demo PRIVATE third_party/vendor/ini/ini.c)
-  target_include_directories(tdl_graphic_vo_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
-  target_link_libraries(tdl_graphic_vo_demo PRIVATE tdl_app_sdk)
-
-  add_executable(tdl_vdec_demo apps/tdl_vdec_demo.cpp)
-  target_sources(tdl_vdec_demo PRIVATE third_party/vendor/ini/ini.c)
-  target_include_directories(tdl_vdec_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
-  target_link_libraries(tdl_vdec_demo PRIVATE tdl_app_sdk)
+  tdl_add_demo(tdl_detect_demo SOURCES apps/tdl_detect_demo.cpp apps/demo_support.cpp)
+  tdl_add_demo(tdl_yolov5_demo SOURCES apps/tdl_yolov5_demo.cpp apps/demo_support.cpp)
+  tdl_add_demo(tdl_yolov8_demo SOURCES apps/tdl_yolov8_demo.cpp apps/demo_support.cpp)
+  tdl_add_demo(tdl_classify_demo SOURCES apps/tdl_classify_demo.cpp apps/demo_support.cpp)
+  tdl_add_demo(tdl_feature_demo SOURCES apps/tdl_feature_demo.cpp apps/demo_support.cpp)
+  tdl_add_demo(tdl_keypoint_demo SOURCES apps/tdl_keypoint_demo.cpp)
+  tdl_add_demo(tdl_face_dense_keypoint_demo SOURCES apps/tdl_face_dense_keypoint_demo.cpp apps/demo_support.cpp)
+  tdl_add_demo(tdl_semantic_seg_demo SOURCES apps/tdl_semantic_seg_demo.cpp)
+  tdl_add_demo(tdl_instance_seg_demo SOURCES apps/tdl_instance_seg_demo.cpp)
+  tdl_add_demo(tdl_single_object_tracker_demo SOURCES apps/tdl_single_object_tracker_demo.cpp)
+  tdl_add_demo(tdl_self_learn_classify_demo SOURCES apps/tdl_self_learn_classify_demo.cpp)
+  tdl_add_demo(tdl_lane_demo SOURCES apps/tdl_lane_demo.cpp)
+  tdl_add_demo(tdl_audio_aio_demo SOURCES apps/tdl_audio_aio_demo.cpp)
+  tdl_add_demo(tdl_face_detect_demo SOURCES apps/tdl_face_detect_demo.cpp apps/demo_support.cpp)
+  tdl_add_demo(tdl_face_attribute_demo SOURCES apps/tdl_face_attribute_demo.cpp apps/demo_support.cpp)
+  tdl_add_demo(tdl_face_attr_pipeline_demo SOURCES apps/tdl_face_attr_pipeline_demo.cpp apps/demo_support.cpp)
+  tdl_add_demo(tdl_plate_recognize_demo SOURCES apps/tdl_plate_recognize_demo.cpp apps/demo_support.cpp)
+  tdl_add_demo(tdl_camera_capture_demo SOURCES apps/tdl_camera_capture_demo.cpp apps/camera_demo_support.cpp)
+  tdl_add_demo(tdl_camera_detect_demo SOURCES apps/tdl_camera_detect_demo.cpp apps/demo_support.cpp apps/camera_demo_support.cpp)
+  tdl_add_demo(tdl_camera_classify_demo SOURCES apps/tdl_camera_classify_demo.cpp apps/demo_support.cpp apps/camera_demo_support.cpp)
+  tdl_add_demo(tdl_camera_feature_demo SOURCES apps/tdl_camera_feature_demo.cpp apps/demo_support.cpp apps/camera_demo_support.cpp)
+  tdl_add_demo(tdl_multi_vpss_demo SOURCES apps/tdl_multi_vpss_demo.cpp apps/camera_demo_support.cpp)
+  tdl_add_demo(tdl_media_smoke_demo SOURCES apps/tdl_media_smoke_demo.cpp)
+  tdl_add_demo(tdl_osd_demo SOURCES apps/tdl_osd_demo.cpp)
+  tdl_add_demo(tdl_pp_ocr_demo SOURCES apps/tdl_pp_ocr_demo.cpp apps/demo_support.cpp)
+  tdl_add_demo(tdl_graphic_vo_demo SOURCES apps/tdl_graphic_vo_demo.cpp)
+  tdl_add_demo(tdl_mmf_osd_fill_demo SOURCES apps/tdl_mmf_osd_fill_demo.cpp)
+  tdl_add_demo(tdl_mmf_vo_fill_demo SOURCES apps/tdl_mmf_vo_fill_demo.cpp)
+  tdl_add_demo(tdl_mmf_vpss_probe_demo SOURCES apps/tdl_mmf_vpss_probe_demo.cpp)
+  tdl_add_demo(tdl_vdec_demo SOURCES apps/tdl_vdec_demo.cpp)
+  if(TDL_HAS_AUDIO_RUNTIME)
+    tdl_add_demo(tdl_asr_demo SOURCES apps/tdl_asr_demo.cpp)
+    tdl_add_demo(tdl_kws_demo SOURCES apps/tdl_kws_demo.cpp)
+    tdl_add_demo(tdl_vad_demo SOURCES apps/tdl_vad_demo.cpp)
+  else()
+    message(STATUS "Audio runtime dependencies not found; skip ASR/KWS/VAD demos")
+  endif()
 endif()
 
 install(TARGETS tdl_app_sdk
   ARCHIVE DESTINATION lib
 )
 
-if(TDL_APP_BUILD_DEMOS)
-  install(TARGETS tdl_detect_demo
-    tdl_yolov5_demo
-    tdl_yolov8_demo
-    tdl_classify_demo
-    tdl_feature_demo
-    tdl_keypoint_demo
-    tdl_semantic_seg_demo
-    tdl_instance_seg_demo
-    tdl_lane_demo
-    tdl_vad_demo
-    tdl_audio_aio_demo
-    tdl_face_detect_demo
-    tdl_face_attribute_demo
-    tdl_face_attr_pipeline_demo
-    tdl_plate_recognize_demo
-    tdl_camera_capture_demo
-    tdl_camera_detect_demo
-    tdl_camera_classify_demo
-    tdl_camera_feature_demo
-    tdl_camera_rtsp_demo
-    tdl_multi_vpss_demo
-    tdl_media_smoke_demo
-    tdl_osd_demo
-    tdl_graphic_vo_demo
-    tdl_vdec_demo
+if(TDL_APP_BUILD_DEMOS AND TDL_APP_DEMO_TARGETS)
+  install(TARGETS ${TDL_APP_DEMO_TARGETS}
     RUNTIME DESTINATION bin
   )
 endif()

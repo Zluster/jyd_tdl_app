@@ -319,10 +319,6 @@ void MultiStagePipeline::setNullSink() {
   setSink(std::unique_ptr<FrameSink>(new NullFrameSink()));
 }
 
-void MultiStagePipeline::setRtspSink(const RtspFrameSink::Config &config) {
-  setSink(std::unique_ptr<FrameSink>(new RtspFrameSink(config)));
-}
-
 int MultiStagePipeline::addDetectorStage(const std::string &name,
                                          const Detector &detector) {
   StageDef stage;
