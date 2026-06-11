@@ -33,6 +33,12 @@ struct CommonOptions {
   int preview_width = 0;
   int preview_height = 0;
   int preview_pixel_format = 18;
+  bool enable_pip_output = false;
+  int pip_group = 0;
+  int pip_channel = 2;
+  int pip_width = 0;
+  int pip_height = 0;
+  int pip_pixel_format = 18;
 };
 
 struct CameraRuntime {

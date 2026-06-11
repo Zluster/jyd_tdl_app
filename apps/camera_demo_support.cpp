@@ -177,6 +177,13 @@ bool openCameraRuntime(const CommonOptions &opt, CameraRuntime *runtime,
           opt.preview_group, opt.preview_channel, opt.preview_width,
           opt.preview_height, opt.preview_pixel_format, false));
     }
+    if (opt.enable_pip_output &&
+        opt.pip_width > 0 &&
+        opt.pip_height > 0) {
+      sensor_config.vpss_outputs.push_back(tdl_app::SensorMedia::vpssOutput(
+          opt.pip_group, opt.pip_channel, opt.pip_width,
+          opt.pip_height, opt.pip_pixel_format, false));
+    }
     runtime->sensor_media.reset(new tdl_app::SensorMedia(sensor_config));
     if (!runtime->sensor_media->open(error)) {
       return false;
