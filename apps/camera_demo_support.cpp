@@ -170,6 +170,13 @@ bool openCameraRuntime(const CommonOptions &opt, CameraRuntime *runtime,
                          opt.sensor_ini, use_vpss_backend, opt.device, opt.pipe,
                          opt.channel, opt.group, opt.channel, opt.width,
                          opt.height, opt.pixel_format));
+    if (opt.enable_preview_output &&
+        opt.preview_width > 0 &&
+        opt.preview_height > 0) {
+      sensor_config.vpss_outputs.push_back(tdl_app::SensorMedia::vpssOutput(
+          opt.preview_group, opt.preview_channel, opt.preview_width,
+          opt.preview_height, opt.preview_pixel_format, false));
+    }
     runtime->sensor_media.reset(new tdl_app::SensorMedia(sensor_config));
     if (!runtime->sensor_media->open(error)) {
       return false;
@@ -225,6 +232,16 @@ void closeCameraRuntime(CameraRuntime *runtime) {
   if (runtime->mmf) {
     runtime->mmf->close();
   }
+}
+
+tdl_app::MediaChannel previewChannel(const CommonOptions &opt,
+                                     const tdl_app::Camera::Config &camera_config) {
+  if (opt.enable_preview_output && opt.preview_width > 0 && opt.preview_height > 0) {
+    return tdl_app::MediaChannel::vpss(opt.preview_group, opt.preview_channel);
+  }
+  return camera_config.backend == tdl_app::Camera::Backend::Vi
+             ? tdl_app::MediaChannel::vi(camera_config.pipe, camera_config.channel)
+             : tdl_app::MediaChannel::vpss(camera_config.group, camera_config.channel);
 }
 
 std::string frameOutputPath(const std::string &output, int index) {

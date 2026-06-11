@@ -23,12 +23,23 @@ void setError(std::string *error, const std::string &message) {
 }
 
 PAYLOAD_TYPE_E toPayload(VencChannel::Codec codec) {
-  return codec == VencChannel::Codec::H265 ? PT_H265 : PT_H264;
+  switch (codec) {
+    case VencChannel::Codec::H265:
+      return PT_H265;
+    case VencChannel::Codec::Mjpeg:
+      return PT_MJPEG;
+    case VencChannel::Codec::H264:
+    default:
+      return PT_H264;
+  }
 }
 
 bool isKeyPack(const VENC_PACK_S &pack, VencChannel::Codec codec) {
   if (codec == VencChannel::Codec::H265) {
     return pack.DataType.enH265EType > H265E_NALU_PSLICE;
+  }
+  if (codec == VencChannel::Codec::Mjpeg) {
+    return true;
   }
   return pack.DataType.enH264EType > H264E_NALU_PSLICE;
 }
@@ -64,13 +75,19 @@ class VencChannelImpl {
       attr.stRcAttr.stH264Cbr.fr32DstFrameRate = config_.dst_fps;
       attr.stRcAttr.stH264Cbr.u32SrcFrameRate = static_cast<CVI_U32>(config_.src_fps);
       attr.stRcAttr.stH264Cbr.u32BitRate = static_cast<CVI_U32>(config_.bitrate_kbps);
-    } else {
+    } else if (attr.stVencAttr.enType == PT_H265) {
       attr.stRcAttr.enRcMode = VENC_RC_MODE_H265CBR;
       attr.stRcAttr.stH265Cbr.u32Gop = static_cast<CVI_U32>(config_.gop);
       attr.stRcAttr.stH265Cbr.u32StatTime = 2;
       attr.stRcAttr.stH265Cbr.fr32DstFrameRate = config_.dst_fps;
       attr.stRcAttr.stH265Cbr.u32SrcFrameRate = static_cast<CVI_U32>(config_.src_fps);
       attr.stRcAttr.stH265Cbr.u32BitRate = static_cast<CVI_U32>(config_.bitrate_kbps);
+    } else {
+      attr.stRcAttr.enRcMode = VENC_RC_MODE_MJPEGCBR;
+      attr.stRcAttr.stMjpegCbr.u32StatTime = 2;
+      attr.stRcAttr.stMjpegCbr.u32SrcFrameRate = static_cast<CVI_U32>(config_.src_fps);
+      attr.stRcAttr.stMjpegCbr.fr32DstFrameRate = config_.dst_fps;
+      attr.stRcAttr.stMjpegCbr.u32BitRate = static_cast<CVI_U32>(config_.bitrate_kbps);
     }
 
     int ret = CVI_VENC_CreateChn(config_.channel, &attr);

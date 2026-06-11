@@ -13,6 +13,7 @@ class VencChannel {
   enum class Codec {
     H264,
     H265,
+    Mjpeg,
   };
 
   struct Config {
@@ -47,6 +48,15 @@ class VencChannel {
     Config config = h264(channel, width, height, bitrate_kbps, src_fps,
                          dst_fps, gop);
     config.codec = Codec::H265;
+    return config;
+  }
+
+  static Config mjpeg(int channel = 0, int width = 1920, int height = 1080,
+                      int bitrate_kbps = 4096, int src_fps = 25,
+                      int dst_fps = 25) {
+    Config config = h264(channel, width, height, bitrate_kbps, src_fps,
+                         dst_fps, 1);
+    config.codec = Codec::Mjpeg;
     return config;
   }
 

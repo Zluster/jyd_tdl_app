@@ -27,6 +27,12 @@ struct CommonOptions {
   int height = 640;
   int timeout_ms = 1000;
   int hold_ms = 0;
+  bool enable_preview_output = false;
+  int preview_group = 0;
+  int preview_channel = 1;
+  int preview_width = 0;
+  int preview_height = 0;
+  int preview_pixel_format = 18;
 };
 
 struct CameraRuntime {
@@ -42,6 +48,8 @@ tdl_app::Camera::Config makeCameraConfig(const CommonOptions &opt);
 bool openCameraRuntime(const CommonOptions &opt, CameraRuntime *runtime,
                        std::string *error = nullptr);
 void closeCameraRuntime(CameraRuntime *runtime);
+tdl_app::MediaChannel previewChannel(const CommonOptions &opt,
+                                     const tdl_app::Camera::Config &camera_config);
 
 std::string frameOutputPath(const std::string &output, int index);
 bool saveFrameAsImage(const tdl_app::Frame &frame, const std::string &output_path,
