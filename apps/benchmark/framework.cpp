@@ -8,6 +8,7 @@ namespace tdl_bench {
 // 各模块在自身 .cpp 中提供的工厂函数。
 std::unique_ptr<BenchmarkModule> createCvModule();
 std::unique_ptr<BenchmarkModule> createDisplayModule();
+std::unique_ptr<BenchmarkModule> createNpuModule();
 
 namespace {
 
@@ -20,6 +21,7 @@ struct RegistryEntry {
 const RegistryEntry kRegistry[] = {
     {"cv", createCvModule},        // id = 0
     {"display", createDisplayModule},  // id = 1
+    {"npu", createNpuModule},      // id = 2
 };
 
 constexpr int kRegistrySize =

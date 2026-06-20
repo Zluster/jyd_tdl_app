@@ -9,7 +9,7 @@ namespace {
 void printUsage() {
   std::cout
       << "Usage:\n"
-      << "  tdl_benchmark_demo [--module cv|display|all] [--list]\n"
+      << "  tdl_benchmark_demo [--module cv|display|npu|all] [--list]\n"
       << "                     [--repeat N] [--loops N]\n"
       << "                     [--warmup N] [--iters N]\n"
       << "                     [--image PATH]\n"

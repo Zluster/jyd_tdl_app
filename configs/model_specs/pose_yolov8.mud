@@ -1,6 +1,6 @@
 [basic]
 type = bmodel
-model = ../../models/cv184x/pose_yolov8n_pose_cv184x_int8_sym.bmodel
+model = ../../models/cv184x/keypoint_yolov8pose_person17_384_640_INT8_cv184x.bmodel
 
 [extra]
 runtime = keypoint
