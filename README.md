@@ -126,15 +126,28 @@ sh scripts/setup_board_native_env.sh
 
 ### 4. 板端原生编译
 
+CMake 配置（仅首次或改 CMakeLists.txt 后需要执行）：
+
 ```sh
 cmake -S /mnt/git/jyd_tdl_app \
   -B /mnt/sd/tdl_build_sys \
   -DCMAKE_BUILD_TYPE=Release
+```
 
+编译指定目标（在 `/mnt/git/jyd_tdl_app` 目录下执行，或加 `--build` 指定构建目录）：
+
+```sh
 cmake --build /mnt/sd/tdl_build_sys --target tdl_classify_demo -j1
 cmake --build /mnt/sd/tdl_build_sys --target tdl_detect_demo -j1
 cmake --build /mnt/sd/tdl_build_sys --target tdl_camera_capture_demo -j1
 cmake --build /mnt/sd/tdl_build_sys --target tdl_audio_aio_demo -j1
+cmake --build /mnt/sd/tdl_build_sys --target tdl_benchmark_demo -j1
+```
+
+编译所有目标：
+
+```sh
+cmake --build /mnt/sd/tdl_build_sys -j1
 ```
 
 ### 5. 加载运行环境
@@ -227,6 +240,74 @@ sh scripts/run_with_board_env.sh /mnt/sd/tdl_build_sys/tdl_classify_demo ...
 - 单张图保留图片路径接口，便于离线验证。
 - 多模型同时运行时，每个模型实例独立持有自己的 runtime，不要在业务层反复创建和销毁。
 - 板端初始化后，优先使用 `env.sh` 或 `scripts/run_with_board_env.sh`，避免遗漏 `LD_LIBRARY_PATH` 和 `BMRUNTIME_USING_FIRMWARE`。
+
+## Benchmark 工具
+
+`tdl_benchmark_demo` 用于测试各模块的性能，包含 NPU 推理各阶段耗时和整体 FPS。
+
+### 用法
+
+```sh
+/mnt/sd/tdl_build_sys/tdl_benchmark_demo [选项]
+```
+
+```text
+Usage:
+  tdl_benchmark_demo [--module cv|display|npu|all] [--list]
+                     [--repeat N] [--loops N]
+                     [--warmup N] [--iters N]
+                     [--image PATH]
+                     [--vo-dev N] [--layer N] [--vo-chn N]
+                     [--screen-width N] [--screen-height N]
+                     [--interface-type N] [--interface-sync N]
+                     [--frames N] [--buffers N]
+
+Notes:
+  --module all  run every registered module in order
+  --repeat N    reload(load->loop->exit) N times (leak/reentry check)
+  --loops N     call loop() N times per load
+```
+
+### NPU 测试
+
+NPU 测试默认读取 `/mnt/sd/test.jpg` 作为输入图像，需提前准备好该文件。也可通过 `--image` 指定其他路径：
+
+```sh
+# 使用默认图像 /mnt/sd/test.jpg
+cd /mnt/git/jyd_tdl_app
+/mnt/sd/tdl_build_sys/tdl_benchmark_demo --module npu
+
+# 指定图像
+/mnt/sd/tdl_build_sys/tdl_benchmark_demo --module npu --image /mnt/sd/my_test.jpg
+
+# 调整 warmup 和迭代次数
+/mnt/sd/tdl_build_sys/tdl_benchmark_demo --module npu --warmup 5 --iters 20
+```
+
+输出示例：
+
+```text
+  yolov8_detect: total 298.718 ms, 3.348 fps | boxes=10, best_cls=0, score=0.903
+      load=159.909  preprocess=52.519  inference=54.581  postprocess=25.414  (ms)
+```
+
+各阶段含义：
+
+| 阶段 | 说明 |
+|------|------|
+| load | `cv::imread` 从磁盘读图并解码，相机取流场景中不存在此开销 |
+| preprocess | resize/letterbox、色彩空间转换、张量布局整理 |
+| inference | `bmrt_launch_data` 含输入量化、NPU 执行、输出反量化 |
+| postprocess | decode 解框/解类别/解关键点 + NMS |
+
+> **注意**：benchmark 的 `load` 阶段因为每次迭代都重新读盘，耗时会偏大。实际相机取流场景只有 preprocess + inference + postprocess 三段开销。
+
+### 编译 benchmark
+
+```sh
+cd /mnt/git/jyd_tdl_app
+cmake --build /mnt/sd/tdl_build_sys --target tdl_benchmark_demo -j1
+```
 
 ## Additional Guides
 
