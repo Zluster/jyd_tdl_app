@@ -253,12 +253,19 @@ class PoseYolov8Runtime : public KeypointRuntime {
 
   bool run(const std::string &image_path, KeypointResult *result,
            std::string *error) {
+    const auto stage_load_begin = bmrt_runtime::SteadyClock::now();
     cv::Mat image = cv::imread(image_path, cv::IMREAD_COLOR);
     if (image.empty()) {
       private_tdl_sdk::setError(error, "failed to read image: " + image_path);
       return false;
     }
-    return inferMat(image, result, error);
+    const auto stage_load_end = bmrt_runtime::SteadyClock::now();
+    if (!inferMat(image, result, error)) {
+      return false;
+    }
+    result->profile.load_ms =
+        bmrt_runtime::elapsedMs(stage_load_begin, stage_load_end);
+    return true;
   }
 
   bool runFrame(const Frame &frame, KeypointResult *result,
@@ -400,16 +407,30 @@ class PoseYolov8Runtime : public KeypointRuntime {
       return false;
     }
 
+    const auto stage_preprocess_begin = bmrt_runtime::SteadyClock::now();
     std::vector<float> input_tensor;
     float ratio = 1.0f;
     int top = 0;
     int left = 0;
     preprocess(image, &input_tensor, &ratio, &top, &left);
+    const auto stage_inference_begin = bmrt_runtime::SteadyClock::now();
 
     std::vector<bmrt_runtime::OutputTensor> outputs;
     if (!session_.launch(input_tensor, &outputs, error)) {
       return false;
     }
+    const auto stage_postprocess_begin = bmrt_runtime::SteadyClock::now();
+
+    auto finalizeProfile = [&]() {
+      const auto stage_postprocess_end = bmrt_runtime::SteadyClock::now();
+      result->profile.preprocess_ms =
+          bmrt_runtime::elapsedMs(stage_preprocess_begin, stage_inference_begin);
+      result->profile.inference_ms =
+          bmrt_runtime::elapsedMs(stage_inference_begin, stage_postprocess_begin);
+      result->profile.postprocess_ms =
+          bmrt_runtime::elapsedMs(stage_postprocess_begin, stage_postprocess_end);
+      result->profile.valid = true;
+    };
 
     std::vector<PoseCandidate> candidates;
     for (const Branch &branch : branches_) {
@@ -490,6 +511,7 @@ class PoseYolov8Runtime : public KeypointRuntime {
       result->clear();
       result->width = image.cols;
       result->height = image.rows;
+      finalizeProfile();
       return true;
     }
 
@@ -504,6 +526,7 @@ class PoseYolov8Runtime : public KeypointRuntime {
       result->clear();
       result->width = image.cols;
       result->height = image.rows;
+      finalizeProfile();
       return true;
     }
 
@@ -527,6 +550,7 @@ class PoseYolov8Runtime : public KeypointRuntime {
     if (best_candidate) {
       result->points = best_candidate->points;
     }
+    finalizeProfile();
     return true;
   }
 

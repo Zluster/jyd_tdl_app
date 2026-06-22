@@ -110,6 +110,18 @@ struct Attribute {
   float value = 0.0f;
 };
 
+struct StageProfile {
+  double load_ms = 0.0;
+  double preprocess_ms = 0.0;
+  double inference_ms = 0.0;
+  double postprocess_ms = 0.0;
+  bool valid = false;
+
+  double totalMs() const {
+    return load_ms + preprocess_ms + inference_ms + postprocess_ms;
+  }
+};
+
 struct AlgorithmResult {
   std::vector<ClassificationItem> classes;
   std::vector<Box> boxes;
@@ -118,6 +130,7 @@ struct AlgorithmResult {
   std::vector<float> feature;
   std::vector<std::string> labels;
   std::string text;
+  StageProfile profile;
 
   void clear() {
     classes.clear();
@@ -127,6 +140,7 @@ struct AlgorithmResult {
     feature.clear();
     labels.clear();
     text.clear();
+    profile = StageProfile{};
   }
 
   bool empty() const {

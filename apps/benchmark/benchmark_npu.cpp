@@ -36,23 +36,41 @@ long readRssKb() {
 
 template <typename Fn>
 double benchOp(Fn &&fn, int warmup, int iters, std::string *summary,
-               std::string *error) {
+               tdl_app::StageProfile *avg_profile, std::string *error) {
   std::string last_summary;
+  tdl_app::StageProfile scratch;
   for (int i = 0; i < warmup; ++i) {
-    if (!fn(&last_summary, error)) {
+    if (!fn(&last_summary, &scratch, error)) {
       return -1.0;
     }
   }
 
+  tdl_app::StageProfile sum;
+  bool profile_valid = iters > 0;
   const auto t0 = std::chrono::steady_clock::now();
   for (int i = 0; i < iters; ++i) {
-    if (!fn(&last_summary, error)) {
+    tdl_app::StageProfile p;
+    if (!fn(&last_summary, &p, error)) {
       return -1.0;
+    }
+    sum.load_ms += p.load_ms;
+    sum.preprocess_ms += p.preprocess_ms;
+    sum.inference_ms += p.inference_ms;
+    sum.postprocess_ms += p.postprocess_ms;
+    if (!p.valid) {
+      profile_valid = false;
     }
   }
   const auto t1 = std::chrono::steady_clock::now();
   if (summary) {
     *summary = last_summary;
+  }
+  if (avg_profile && iters > 0) {
+    avg_profile->load_ms = sum.load_ms / iters;
+    avg_profile->preprocess_ms = sum.preprocess_ms / iters;
+    avg_profile->inference_ms = sum.inference_ms / iters;
+    avg_profile->postprocess_ms = sum.postprocess_ms / iters;
+    avg_profile->valid = profile_valid;
   }
   const double total_us = static_cast<double>(
       std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count());
@@ -121,7 +139,8 @@ class NpuTask {
   const std::string &image() const { return image_; }
 
   virtual bool load(const std::string &firmware, std::string *error) = 0;
-  virtual bool runOnce(std::string *summary, std::string *error) = 0;
+  virtual bool runOnce(std::string *summary, tdl_app::StageProfile *profile,
+                       std::string *error) = 0;
   virtual void unload() = 0;
 
  protected:
@@ -147,7 +166,8 @@ class DetectTask : public NpuTask {
     return detector_->load(sessionConfig(firmware), error);
   }
 
-  bool runOnce(std::string *summary, std::string *error) override {
+  bool runOnce(std::string *summary, tdl_app::StageProfile *profile,
+               std::string *error) override {
     tdl_app::InferOptions options = tdl_app::InferOptions::detection();
     tdl_app::AlgorithmResult result;
     if (!detector_->run(image(), options, &result, error)) {
@@ -155,6 +175,9 @@ class DetectTask : public NpuTask {
     }
     if (summary) {
       *summary = summarizeAlgorithmResult(result);
+    }
+    if (profile) {
+      *profile = result.profile;
     }
     return true;
   }
@@ -180,7 +203,8 @@ class ClassifyTask : public NpuTask {
     return classifier_->load(sessionConfig(firmware), error);
   }
 
-  bool runOnce(std::string *summary, std::string *error) override {
+  bool runOnce(std::string *summary, tdl_app::StageProfile *profile,
+               std::string *error) override {
     tdl_app::InferOptions options = tdl_app::InferOptions::classification();
     tdl_app::AlgorithmResult result;
     if (!classifier_->run(image(), options, &result, error)) {
@@ -188,6 +212,9 @@ class ClassifyTask : public NpuTask {
     }
     if (summary) {
       *summary = summarizeAlgorithmResult(result);
+    }
+    if (profile) {
+      *profile = result.profile;
     }
     return true;
   }
@@ -210,7 +237,8 @@ class FaceTask : public NpuTask {
     return detector_->load(sessionConfig(firmware), error);
   }
 
-  bool runOnce(std::string *summary, std::string *error) override {
+  bool runOnce(std::string *summary, tdl_app::StageProfile *profile,
+               std::string *error) override {
     tdl_app::InferOptions options = tdl_app::InferOptions::detection();
     tdl_app::AlgorithmResult result;
     if (!detector_->run(image(), options, &result, error)) {
@@ -218,6 +246,9 @@ class FaceTask : public NpuTask {
     }
     if (summary) {
       *summary = "faces=" + std::to_string(result.boxCount());
+    }
+    if (profile) {
+      *profile = result.profile;
     }
     return true;
   }
@@ -241,13 +272,17 @@ class KeypointTask : public NpuTask {
     return detector_->load(sessionConfig(firmware), error);
   }
 
-  bool runOnce(std::string *summary, std::string *error) override {
+  bool runOnce(std::string *summary, tdl_app::StageProfile *profile,
+               std::string *error) override {
     tdl_app::KeypointResult result;
     if (!detector_->run(image(), &result, error)) {
       return false;
     }
     if (summary) {
       *summary = "points=" + std::to_string(result.pointCount());
+    }
+    if (profile) {
+      *profile = result.profile;
     }
     return true;
   }
@@ -270,7 +305,8 @@ class FeatureTask : public NpuTask {
     return extractor_->load(sessionConfig(firmware), error);
   }
 
-  bool runOnce(std::string *summary, std::string *error) override {
+  bool runOnce(std::string *summary, tdl_app::StageProfile *profile,
+               std::string *error) override {
     tdl_app::InferOptions options;
     tdl_app::AlgorithmResult result;
     if (!extractor_->run(image(), options, &result, error)) {
@@ -278,6 +314,9 @@ class FeatureTask : public NpuTask {
     }
     if (summary) {
       *summary = summarizeAlgorithmResult(result);
+    }
+    if (profile) {
+      *profile = result.profile;
     }
     return true;
   }
@@ -288,13 +327,23 @@ class FeatureTask : public NpuTask {
   std::unique_ptr<tdl_app::FeatureExtractor> extractor_;
 };
 
-void report(const std::string &item, double ms, const std::string &summary) {
+void report(const std::string &item, double ms,
+            const tdl_app::StageProfile &profile, const std::string &summary) {
   const double fps = ms > 0.0 ? (1000.0 / ms) : 0.0;
-  std::cout << "  " << item << ": " << ms << " ms, " << fps << " fps";
+  std::ostringstream oss;
+  oss << std::fixed << std::setprecision(3);
+  oss << "  " << item << ": total " << ms << " ms, " << fps << " fps";
   if (!summary.empty()) {
-    std::cout << " | " << summary;
+    oss << " | " << summary;
   }
-  std::cout << std::endl;
+  oss << "\n";
+  if (profile.valid) {
+    oss << "      load=" << profile.load_ms
+        << "  preprocess=" << profile.preprocess_ms
+        << "  inference=" << profile.inference_ms
+        << "  postprocess=" << profile.postprocess_ms << "  (ms)\n";
+  }
+  std::cout << oss.str();
 }
 
 class NpuBenchmark : public BenchmarkModule {
@@ -371,11 +420,13 @@ class NpuBenchmark : public BenchmarkModule {
 
       std::string summary;
       std::string run_error;
+      tdl_app::StageProfile profile;
       const double ms = benchOp(
-          [&](std::string *out_summary, std::string *out_error) {
-            return task->runOnce(out_summary, out_error);
+          [&](std::string *out_summary, tdl_app::StageProfile *out_profile,
+              std::string *out_error) {
+            return task->runOnce(out_summary, out_profile, out_error);
           },
-          warmup, iters, &summary, &run_error);
+          warmup, iters, &summary, &profile, &run_error);
 
       task->unload();
       std::cout << "  [unload] " << task->name()
@@ -387,7 +438,7 @@ class NpuBenchmark : public BenchmarkModule {
         }
         return false;
       }
-      report(task->name(), ms, summary);
+      report(task->name(), ms, profile, summary);
       any_ran = true;
     }
 

@@ -11,11 +11,13 @@ struct KeypointResult {
   int width = 0;
   int height = 0;
   std::vector<Point> points;
+  StageProfile profile;
 
   void clear() {
     width = 0;
     height = 0;
     points.clear();
+    profile = StageProfile{};
   }
 
   bool empty() const { return points.empty(); }

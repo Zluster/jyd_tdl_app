@@ -95,26 +95,41 @@ class NnScrfd::CustomRuntime {
       return false;
     }
 
+    const auto stage_load_begin = bmrt_runtime::SteadyClock::now();
     cv::Mat image = cv::imread(image_path, cv::IMREAD_COLOR);
     if (image.empty()) {
       bmrt_runtime::setError(error, "failed to read image: " + image_path);
       return false;
     }
+    const auto stage_preprocess_begin = bmrt_runtime::SteadyClock::now();
 
     std::vector<float> input_tensor;
     float ratio = 1.0f;
     int top = 0;
     int left = 0;
     preprocess(image, &input_tensor, &ratio, &top, &left);
+    const auto stage_inference_begin = bmrt_runtime::SteadyClock::now();
 
     std::vector<bmrt_runtime::OutputTensor> outputs;
     if (!session_.launch(input_tensor, &outputs, error)) {
       return false;
     }
+    const auto stage_postprocess_begin = bmrt_runtime::SteadyClock::now();
 
     *result = AlgorithmResult{};
     result->boxes = decode(outputs, image.cols, image.rows, ratio, top, left,
                            options.threshold, options.iou_threshold);
+    const auto stage_postprocess_end = bmrt_runtime::SteadyClock::now();
+
+    result->profile.load_ms =
+        bmrt_runtime::elapsedMs(stage_load_begin, stage_preprocess_begin);
+    result->profile.preprocess_ms =
+        bmrt_runtime::elapsedMs(stage_preprocess_begin, stage_inference_begin);
+    result->profile.inference_ms =
+        bmrt_runtime::elapsedMs(stage_inference_begin, stage_postprocess_begin);
+    result->profile.postprocess_ms =
+        bmrt_runtime::elapsedMs(stage_postprocess_begin, stage_postprocess_end);
+    result->profile.valid = true;
     return true;
   }
 

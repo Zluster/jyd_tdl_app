@@ -1,6 +1,7 @@
 #include "tdl_app/nn_feature.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cctype>
@@ -187,19 +188,24 @@ class NnFeature::CustomRuntime {
       return false;
     }
 
+    using StageClock = std::chrono::steady_clock;
+    const auto stage_load_begin = StageClock::now();
     cv::Mat image = cv::imread(image_path, cv::IMREAD_COLOR);
     if (image.empty()) {
       setError(error, "failed to read image: " + image_path);
       return false;
     }
+    const auto stage_preprocess_begin = StageClock::now();
 
     std::vector<float> input_tensor;
     preprocess(image, &input_tensor);
+    const auto stage_inference_begin = StageClock::now();
 
     std::vector<float> embedding;
     if (!launch(input_tensor, &embedding, error)) {
       return false;
     }
+    const auto stage_postprocess_begin = StageClock::now();
 
     if (l2_normalize_) {
       normalizeEmbedding(&embedding);
@@ -207,6 +213,19 @@ class NnFeature::CustomRuntime {
 
     *result = AlgorithmResult{};
     result->feature = std::move(embedding);
+    const auto stage_postprocess_end = StageClock::now();
+
+    auto stage_ms = [](StageClock::time_point begin, StageClock::time_point end) {
+      return std::chrono::duration<double, std::milli>(end - begin).count();
+    };
+    result->profile.load_ms = stage_ms(stage_load_begin, stage_preprocess_begin);
+    result->profile.preprocess_ms =
+        stage_ms(stage_preprocess_begin, stage_inference_begin);
+    result->profile.inference_ms =
+        stage_ms(stage_inference_begin, stage_postprocess_begin);
+    result->profile.postprocess_ms =
+        stage_ms(stage_postprocess_begin, stage_postprocess_end);
+    result->profile.valid = true;
     return true;
   }
 

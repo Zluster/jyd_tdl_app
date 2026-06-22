@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstdint>
@@ -30,6 +31,13 @@ inline void setError(std::string *error, const std::string &message) {
   if (error) {
     *error = message;
   }
+}
+
+using SteadyClock = std::chrono::steady_clock;
+
+inline double elapsedMs(const SteadyClock::time_point &start,
+                        const SteadyClock::time_point &end) {
+  return std::chrono::duration<double, std::milli>(end - start).count();
 }
 
 inline std::string toUpper(std::string value) {

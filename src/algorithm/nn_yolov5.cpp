@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -385,15 +386,23 @@ class NnYolov5::CustomRuntime {
       return false;
     }
 
+    const auto stage_load_begin = std::chrono::steady_clock::now();
     cv::Mat image = cv::imread(image_path, cv::IMREAD_COLOR);
     if (image.empty()) {
       setError(error, "failed to read image: " + image_path);
       return false;
     }
+    const auto stage_load_end = std::chrono::steady_clock::now();
     debugLog("inferImage path=%s size=%dx%d", image_path.c_str(), image.cols,
              image.rows);
 
-    return inferMat(image, options, result, error);
+    if (!inferMat(image, options, result, error)) {
+      return false;
+    }
+    result->profile.load_ms =
+        std::chrono::duration<double, std::milli>(stage_load_end - stage_load_begin)
+            .count();
+    return true;
   }
 
   bool inferMat(const cv::Mat &image, const InferOptions &options,
@@ -411,6 +420,8 @@ class NnYolov5::CustomRuntime {
       return false;
     }
 
+    using StageClock = std::chrono::steady_clock;
+    const auto stage_preprocess_begin = StageClock::now();
     std::vector<float> input_data;
     float ratio = 1.0f;
     int top = 0;
@@ -419,17 +430,31 @@ class NnYolov5::CustomRuntime {
     debugLog("inferMat image=%dx%d threshold=%.4f iou=%.4f ratio=%.6f top=%d left=%d",
              image.cols, image.rows, options.threshold, options.iou_threshold,
              ratio, top, left);
+    const auto stage_inference_begin = StageClock::now();
 
     std::vector<std::vector<float>> outputs;
     std::vector<bm_shape_t> output_shapes;
     if (!launch(input_data, &outputs, &output_shapes, error)) {
       return false;
     }
+    const auto stage_postprocess_begin = StageClock::now();
 
     *result = AlgorithmResult{};
     result->labels = labels_;
     result->boxes = decode(outputs, output_shapes, image.cols, image.rows, ratio,
                            top, left, options.threshold, options.iou_threshold);
+    const auto stage_postprocess_end = StageClock::now();
+
+    auto stage_ms = [](StageClock::time_point begin, StageClock::time_point end) {
+      return std::chrono::duration<double, std::milli>(end - begin).count();
+    };
+    result->profile.preprocess_ms =
+        stage_ms(stage_preprocess_begin, stage_inference_begin);
+    result->profile.inference_ms =
+        stage_ms(stage_inference_begin, stage_postprocess_begin);
+    result->profile.postprocess_ms =
+        stage_ms(stage_postprocess_begin, stage_postprocess_end);
+    result->profile.valid = true;
     return true;
   }
 
