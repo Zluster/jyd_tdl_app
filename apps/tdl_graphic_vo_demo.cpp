@@ -7,7 +7,7 @@
 #include <string>
 #include <thread>
 
-#include "tdl_app/advanced.hpp"
+#include "tdl_app/graphic_vo_layer.hpp"
 
 namespace {
 

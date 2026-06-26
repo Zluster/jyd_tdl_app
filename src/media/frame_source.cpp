@@ -10,6 +10,7 @@
 #include "cvi_vi.h"
 #include "cvi_vpss.h"
 #include "cvi_errno.h"
+#include "tdl_app/sys_context.hpp"
 
 namespace tdl_app {
 namespace {
@@ -82,6 +83,9 @@ class CameraSource::Impl {
 
   bool open(std::string *error) {
     close();
+    if (!ensureMmfRuntimeInitialized(error)) {
+      return false;
+    }
     return true;
   }
 

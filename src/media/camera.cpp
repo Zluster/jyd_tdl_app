@@ -4,6 +4,7 @@
 #include <utility>
 
 #include "tdl_app/frame_reader.hpp"
+#include "tdl_app/image.hpp"
 
 namespace tdl_app {
 namespace {
@@ -39,6 +40,11 @@ bool Camera::open(std::string *error) {
   return source_->open(error);
 }
 
+bool Camera::open(CameraSourceId source, std::string *error) {
+  config_ = forSource(source, config_.timeout_ms);
+  return open(error);
+}
+
 bool Camera::read(Frame *frame, std::string *error) {
   if (!source_) {
     if (error) {
@@ -49,11 +55,75 @@ bool Camera::read(Frame *frame, std::string *error) {
   return source_->read(frame, error);
 }
 
+bool Camera::readInfo(CameraFrameInfo *info, std::string *error) {
+  if (!info) {
+    if (error) {
+      *error = "camera frame info is null";
+    }
+    return false;
+  }
+  Frame frame;
+  if (!read(&frame, error)) {
+    return false;
+  }
+  info->width = frame.width;
+  info->height = frame.height;
+  info->pixel_format = frame.format;
+  info->sequence = frame.sequence;
+  info->timestamp_us = frame.timestamp_us;
+  return true;
+}
+
+bool Camera::snapshot(const std::string &path, std::string *error) {
+  bool opened_here = false;
+  if (!source_) {
+    if (!open(error)) {
+      return false;
+    }
+    opened_here = true;
+  }
+
+  Frame frame;
+  const bool ok = read(&frame, error) && Image::save(frame, path, error);
+  if (opened_here) {
+    close();
+  }
+  return ok;
+}
+
 void Camera::close() {
   if (source_) {
     source_->close();
     source_.reset();
   }
+}
+
+Camera::Config Camera::forSource(CameraSourceId source, int timeout_ms) {
+  switch (source) {
+    case CameraSourceId::Ai:
+      return ai(timeout_ms);
+    case CameraSourceId::Live:
+      return live(timeout_ms);
+    case CameraSourceId::Main:
+      return mainFrame(timeout_ms);
+    case CameraSourceId::SubRgb:
+      return subRgb(timeout_ms);
+  }
+  return live(timeout_ms);
+}
+
+const char *Camera::sourceName(CameraSourceId source) {
+  switch (source) {
+    case CameraSourceId::Ai:
+      return "ai";
+    case CameraSourceId::Live:
+      return "live";
+    case CameraSourceId::Main:
+      return "main";
+    case CameraSourceId::SubRgb:
+      return "subrgb";
+  }
+  return "unknown";
 }
 
 std::unique_ptr<FrameSource> Camera::createSource() const {

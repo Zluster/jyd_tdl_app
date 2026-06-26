@@ -1,12 +1,16 @@
 #include "tdl_app/sys_context.hpp"
 
 #include <cstring>
+#include <mutex>
 
 #include "cvi_common.h"
 #include "cvi_sys.h"
 
 namespace tdl_app {
 namespace {
+
+std::mutex g_runtime_init_mutex;
+bool g_runtime_initialized = false;
 
 void setError(std::string *error, const std::string &message) {
   if (error) {
@@ -15,6 +19,23 @@ void setError(std::string *error, const std::string &message) {
 }
 
 }  // namespace
+
+bool ensureMmfRuntimeInitialized(std::string *error) {
+  std::lock_guard<std::mutex> lock(g_runtime_init_mutex);
+  if (g_runtime_initialized) {
+    return true;
+  }
+
+  const int ret = CVI_SYS_Init();
+  if (ret != CVI_SUCCESS) {
+    setError(error, "CVI_SYS_Init failed, ret=" + std::to_string(ret) +
+                        "; check small-core CVI_MMF_MSG service");
+    return false;
+  }
+
+  g_runtime_initialized = true;
+  return true;
+}
 
 SysContext::SysContext() = default;
 
@@ -27,26 +48,36 @@ bool SysContext::open(std::string *error) {
     return true;
   }
 
-  const int ret = CVI_SYS_Init();
-  if (ret == CVI_SUCCESS) {
-    opened_ = true;
-    own_sys_ = true;
-    return true;
-  }
-
   if (config_.reuse_existing) {
+    if (!ensureMmfRuntimeInitialized(error)) {
+      return false;
+    }
     opened_ = true;
     own_sys_ = false;
     return true;
   }
 
-  setError(error, "CVI_SYS_Init failed, ret=" + std::to_string(ret));
+  const int ret = CVI_SYS_Init();
+  if (ret == CVI_SUCCESS) {
+    {
+      std::lock_guard<std::mutex> lock(g_runtime_init_mutex);
+      g_runtime_initialized = true;
+    }
+    opened_ = true;
+    own_sys_ = true;
+    return true;
+  }
+
+  setError(error, "CVI_SYS_Init failed, ret=" + std::to_string(ret) +
+                      "; check small-core CVI_MMF_MSG service");
   return false;
 }
 
 void SysContext::close() {
   if (own_sys_) {
     CVI_SYS_Exit();
+    std::lock_guard<std::mutex> lock(g_runtime_init_mutex);
+    g_runtime_initialized = false;
     own_sys_ = false;
   }
   opened_ = false;

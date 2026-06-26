@@ -1,14 +1,27 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if [ -f "./CMakeLists.txt" ] && [ -d "./third_party/cv184x" ]; then
+if [ -f "./CMakeLists.txt" ] && [ -d "./third_party/cv184x/dual_os" ]; then
   PROJECT_ROOT=$(pwd)
 else
   SCRIPT_PATH="${BASH_SOURCE:-$0}"
   SCRIPT_DIR=$(cd "$(dirname "${SCRIPT_PATH}")" && pwd)
   PROJECT_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
 fi
-THIRD_PARTY_DIR="${TDL_APP_THIRD_PARTY_DIR:-${PROJECT_ROOT}/third_party/cv184x}"
+TDL_APP_PROFILE="${TDL_APP_PROFILE:-dual_os}"
+if [ "${TDL_APP_PROFILE}" != "dual_os" ]; then
+  echo "Unsupported TDL_APP_PROFILE: ${TDL_APP_PROFILE}" >&2
+  echo "jyd_tdl_app only supports dual_os packaging" >&2
+  exit 1
+fi
+THIRD_PARTY_DIR="${TDL_APP_THIRD_PARTY_DIR:-}"
+if [ -z "${THIRD_PARTY_DIR}" ]; then
+  if [ -d "/home/jyd/zwz/sophpi/tdl_app_sdk/third_party/cv184x/dual_os" ]; then
+    THIRD_PARTY_DIR="/home/jyd/zwz/sophpi/tdl_app_sdk/third_party/cv184x/dual_os"
+  else
+    THIRD_PARTY_DIR="${PROJECT_ROOT}/third_party/cv184x/dual_os"
+  fi
+fi
 DEFAULT_PKG_DIR="${PROJECT_ROOT}/package/tdl_app_sdk_cv184x"
 FALLBACK_PKG_DIR="${PROJECT_ROOT}/package_user/tdl_app_sdk_cv184x"
 
@@ -36,6 +49,12 @@ if [ ! -d "${RESOLVED_INSTALL_DIR}" ]; then
   exit 1
 fi
 
+if [ ! -d "${THIRD_PARTY_DIR}" ]; then
+  echo "Missing third-party bundle: ${THIRD_PARTY_DIR}" >&2
+  echo "Set TDL_APP_THIRD_PARTY_DIR or export TDL_APP_PROFILE correctly" >&2
+  exit 1
+fi
+
 rm -rf "${RESOLVED_PKG_DIR}"
 mkdir -p "${RESOLVED_PKG_DIR}/bin" "${RESOLVED_PKG_DIR}/lib" "${RESOLVED_PKG_DIR}/models" "${RESOLVED_PKG_DIR}/configs" "${RESOLVED_PKG_DIR}/firmware" "${RESOLVED_PKG_DIR}/assets"
 
@@ -43,7 +62,7 @@ cp -a "${RESOLVED_INSTALL_DIR}/bin/." "${RESOLVED_PKG_DIR}/bin/" 2>/dev/null || 
 cp -a "${RESOLVED_INSTALL_DIR}/lib/." "${RESOLVED_PKG_DIR}/lib/" 2>/dev/null || true
 cp -a "${RESOLVED_INSTALL_DIR}/configs/." "${RESOLVED_PKG_DIR}/configs/" 2>/dev/null || true
 cp -a "${THIRD_PARTY_DIR}/lib/." "${RESOLVED_PKG_DIR}/lib/"
-cp -a "${THIRD_PARTY_DIR}/models/." "${RESOLVED_PKG_DIR}/models/"
+#cp -a "${THIRD_PARTY_DIR}/models/." "${RESOLVED_PKG_DIR}/models/"
 cp -a "${THIRD_PARTY_DIR}/firmware/." "${RESOLVED_PKG_DIR}/firmware/" 2>/dev/null || true
 cp -a "${PROJECT_ROOT}/assets/." "${RESOLVED_PKG_DIR}/assets/" 2>/dev/null || true
 
@@ -229,6 +248,8 @@ EOF
 chmod +x "${RESOLVED_PKG_DIR}/run_pp_ocr_demo.sh"
 
 tar cf - -C "$(dirname "${RESOLVED_PKG_DIR}")" "$(basename "${RESOLVED_PKG_DIR}")" | gzip -9 > "${RESOLVED_PKG_DIR}.tar.gz"
+echo "TDL_APP_PROFILE=${TDL_APP_PROFILE}"
+echo "TDL_APP_THIRD_PARTY_DIR=${THIRD_PARTY_DIR}"
 echo "Install dir: ${RESOLVED_INSTALL_DIR}"
 echo "Package dir: ${RESOLVED_PKG_DIR}"
 echo "Package: ${RESOLVED_PKG_DIR}.tar.gz"

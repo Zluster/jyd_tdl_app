@@ -3,6 +3,7 @@
 #include <cstring>
 
 #include "cvi_common.h"
+#include "cvi_comm_video.h"
 #include "cvi_vo.h"
 
 namespace tdl_app {
@@ -11,6 +12,20 @@ namespace {
 void setError(std::string *error, const std::string &message) {
   if (error) {
     *error = message;
+  }
+}
+
+ROTATION_E toRotation(int rotation) {
+  switch (rotation) {
+    case 90:
+      return ROTATION_90;
+    case 180:
+      return ROTATION_180;
+    case 270:
+      return ROTATION_270;
+    case 0:
+    default:
+      return ROTATION_0;
   }
 }
 
@@ -89,6 +104,16 @@ bool VoOutput::open(std::string *error) {
     close();
     return false;
   }
+
+  ret = CVI_VO_SetChnRotation(config_.layer, config_.channel,
+                              toRotation(config_.rotation));
+  if (ret != CVI_SUCCESS) {
+    setError(error, "CVI_VO_SetChnRotation failed, ret=" +
+                        std::to_string(ret));
+    close();
+    return false;
+  }
+
   ret = CVI_VO_EnableChn(config_.layer, config_.channel);
   if (ret != CVI_SUCCESS) {
     setError(error, "CVI_VO_EnableChn failed, ret=" + std::to_string(ret));

@@ -6,6 +6,8 @@
 
 namespace tdl_app {
 
+bool ensureMmfRuntimeInitialized(std::string *error = nullptr);
+
 class SysContext {
  public:
   struct Config {

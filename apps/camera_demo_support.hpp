@@ -3,6 +3,7 @@
 #include <cstdlib>
 #include <memory>
 #include <string>
+#include <vector>
 
 #include "tdl_app/advanced.hpp"
 
@@ -13,29 +14,31 @@ struct CommonOptions {
   bool use_mmf = false;
   bool use_sensor_media = false;
   bool use_ipcamera_helper = false;
-  bool attach_existing = false;
-  std::string sensor_ini = "./configs/sensor_cfg_cv1842hp_wevb_cv2003_ipcamera.ini";
+  bool attach_existing = true;
+  std::string sensor_ini;
+  std::string sensor_model;
+  std::string sensor_profile;
   std::string ipcamera_binary = "/mnt/sd/install/ipcamera";
   std::string ipcamera_ini = "/mnt/sd/install/cv1842hp_wevb_cv2003.ini";
   int frames = 1;
   int device = 0;
-  int group = 0;
+  int group = tdl_app::DualOsLayout::kCaptureVpssGroup;
   int pipe = 0;
-  int channel = 0;
+  int channel = tdl_app::DualOsLayout::kAiChannel;
   int pixel_format = 18;
-  int width = 640;
-  int height = 640;
+  int width = tdl_app::DualOsLayout::kAiWidth;
+  int height = tdl_app::DualOsLayout::kAiHeight;
   int timeout_ms = 1000;
   int hold_ms = 0;
   bool enable_preview_output = false;
-  int preview_group = 0;
-  int preview_channel = 1;
+  int preview_group = tdl_app::DualOsLayout::kCaptureVpssGroup;
+  int preview_channel = tdl_app::DualOsLayout::kLiveChannel;
   int preview_width = 0;
   int preview_height = 0;
   int preview_pixel_format = 18;
   bool enable_pip_output = false;
-  int pip_group = 0;
-  int pip_channel = 2;
+  int pip_group = tdl_app::DualOsLayout::kCaptureVpssGroup;
+  int pip_channel = tdl_app::DualOsLayout::kSubRgbChannel;
   int pip_width = 0;
   int pip_height = 0;
   int pip_pixel_format = 18;
@@ -47,9 +50,15 @@ struct CameraRuntime {
   tdl_app::Camera camera;
 };
 
+bool setCameraPreset(CommonOptions *opt, const std::string &preset,
+                     std::string *error = nullptr);
+std::string describeCameraPreset(const CommonOptions &opt);
 const char *backendName(tdl_app::Camera::Backend backend);
 bool parseCommonArgs(int argc, char **argv, int *index, CommonOptions *opt,
                      bool *handled, std::string *error = nullptr);
+bool resolveSensorIni(CommonOptions *opt, std::string *error = nullptr);
+std::vector<tdl_app::SensorMedia::SensorProfile> supportedSensorProfiles();
+std::string describeSensorSelection(const CommonOptions &opt);
 tdl_app::Camera::Config makeCameraConfig(const CommonOptions &opt);
 bool openCameraRuntime(const CommonOptions &opt, CameraRuntime *runtime,
                        std::string *error = nullptr);

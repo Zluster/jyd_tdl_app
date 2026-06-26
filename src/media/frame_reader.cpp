@@ -7,6 +7,7 @@
 #include "cvi_errno.h"
 #include "cvi_vi.h"
 #include "cvi_vpss.h"
+#include "tdl_app/sys_context.hpp"
 
 namespace tdl_app {
 namespace {
@@ -60,6 +61,9 @@ class FrameReaderImpl {
   bool open(std::string *error) {
     if (!isVi(config_.channel) && !isVpss(config_.channel)) {
       setError(error, "frame reader only supports VI or VPSS channels");
+      return false;
+    }
+    if (!ensureMmfRuntimeInitialized(error)) {
       return false;
     }
     opened_ = true;

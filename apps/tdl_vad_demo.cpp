@@ -4,7 +4,8 @@
 #include <string>
 #include <vector>
 
-#include "tdl_app/tdl_app.hpp"
+#include "tdl_app/algorithm_engine.hpp"
+#include "tdl_app/voice_activity_detector.hpp"
 
 namespace {
 

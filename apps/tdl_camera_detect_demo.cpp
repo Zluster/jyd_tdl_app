@@ -25,6 +25,7 @@ void printUsage() {
       << "  tdl_camera_detect_demo --model-spec FILE\n"
       << "                         [--firmware FILE]\n"
       << "                         [--backend vi|vpss]\n"
+      << "                         [default: dual-os existing MMF path]\n"
       << "                         [--use-mmf | --use-sensor-media]\n"
       << "                         [--attach-existing]\n"
       << "                         [--sensor-ini FILE] [--frames N]\n"

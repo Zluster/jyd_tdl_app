@@ -7,10 +7,15 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 set(CMAKE_SKIP_RPATH ON)
 
 option(TDL_APP_BUILD_DEMOS "Build command line demo applications" ON)
+set(TDL_APP_PROFILE "dual_os" CACHE STRING "Build profile")
+
+if(NOT TDL_APP_PROFILE STREQUAL "dual_os")
+  message(FATAL_ERROR "jyd_tdl_app only supports dual_os builds")
+endif()
 
 set(TDL_APP_THIRD_PARTY_DIR
-    "${CMAKE_CURRENT_LIST_DIR}/third_party/cv184x"
-    CACHE PATH "Portable CV184X dependency bundle")
+    "${CMAKE_CURRENT_LIST_DIR}/third_party/cv184x/dual_os"
+    CACHE PATH "Dual-OS CV184X dependency bundle")
 
 include(cmake/cv184x_tdl.cmake)
 
@@ -43,10 +48,12 @@ add_library(tdl_app_sdk STATIC
   src/media/audio_output.cpp
   src/media/audio_system.cpp
   src/media/camera.cpp
+  src/media/display.cpp
   src/media/frame_reader.cpp
   src/media/frame_source.cpp
   src/media/frame_sink.cpp
   src/media/graphic_vo_layer.cpp
+  src/media/image.cpp
   src/media/media_ipc_client.cpp
   src/media/media_ipc_server.cpp
   src/media/media_link.cpp
@@ -180,6 +187,14 @@ if(TDL_APP_BUILD_DEMOS)
   target_include_directories(tdl_camera_capture_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
   target_link_libraries(tdl_camera_capture_demo PRIVATE tdl_app_sdk)
 
+  add_executable(sophpi_camera_demo
+    apps/sophpi_camera_demo.cpp
+    apps/camera_demo_support.cpp
+  )
+  target_sources(sophpi_camera_demo PRIVATE third_party/vendor/ini/ini.c)
+  target_include_directories(sophpi_camera_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
+  target_link_libraries(sophpi_camera_demo PRIVATE tdl_app_sdk)
+
   add_executable(tdl_camera_detect_demo
     apps/tdl_camera_detect_demo.cpp
     apps/demo_support.cpp
@@ -230,10 +245,21 @@ if(TDL_APP_BUILD_DEMOS)
   target_include_directories(tdl_graphic_vo_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
   target_link_libraries(tdl_graphic_vo_demo PRIVATE tdl_app_sdk)
 
-  add_executable(tdl_vpss_format_probe_demo apps/tdl_vpss_format_probe_demo.cpp)
+  add_executable(tdl_vpss_format_probe_demo
+    apps/tdl_vpss_format_probe_demo.cpp
+    apps/camera_demo_support.cpp
+  )
   target_sources(tdl_vpss_format_probe_demo PRIVATE third_party/vendor/ini/ini.c)
   target_include_directories(tdl_vpss_format_probe_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
   target_link_libraries(tdl_vpss_format_probe_demo PRIVATE tdl_app_sdk)
+
+  add_executable(tdl_sensor_profile_probe_demo
+    apps/tdl_sensor_profile_probe_demo.cpp
+    apps/camera_demo_support.cpp
+  )
+  target_sources(tdl_sensor_profile_probe_demo PRIVATE third_party/vendor/ini/ini.c)
+  target_include_directories(tdl_sensor_profile_probe_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
+  target_link_libraries(tdl_sensor_profile_probe_demo PRIVATE tdl_app_sdk)
 
   add_executable(tdl_vdec_demo apps/tdl_vdec_demo.cpp)
   target_sources(tdl_vdec_demo PRIVATE third_party/vendor/ini/ini.c)
@@ -263,6 +289,7 @@ if(TDL_APP_BUILD_DEMOS)
     tdl_face_attr_pipeline_demo
     tdl_plate_recognize_demo
     tdl_camera_capture_demo
+    sophpi_camera_demo
     tdl_camera_detect_demo
     tdl_camera_classify_demo
     tdl_camera_feature_demo
@@ -271,6 +298,7 @@ if(TDL_APP_BUILD_DEMOS)
     tdl_osd_demo
     tdl_graphic_vo_demo
     tdl_vpss_format_probe_demo
+    tdl_sensor_profile_probe_demo
     tdl_vdec_demo
     RUNTIME DESTINATION bin
   )
@@ -289,5 +317,8 @@ install(FILES
   "${CMAKE_CURRENT_LIST_DIR}/configs/sensor_cfg_cv2003_switch_high_addr54_mclk1.ini"
   "${CMAKE_CURRENT_LIST_DIR}/configs/sensor_cfg_cv2003_switch_high_addr54_mclk1_lane21.ini"
   "${CMAKE_CURRENT_LIST_DIR}/configs/sensor_cfg_cv2003_switch_master_addr53_mclk1.ini"
+  "${CMAKE_CURRENT_LIST_DIR}/configs/sensor_cfg_gc2053.ini"
+  "${CMAKE_CURRENT_LIST_DIR}/configs/sensor_cfg_gc2053_1lane.ini"
+  "${CMAKE_CURRENT_LIST_DIR}/configs/sensor_cfg_gc2053_2lane.ini"
   DESTINATION configs
 )

@@ -3,7 +3,10 @@
 #include <string>
 
 #include "demo_support.hpp"
-#include "tdl_app/tdl_app.hpp"
+#include "tdl_app/algorithm_engine.hpp"
+#include "tdl_app/face_attribute_classifier.hpp"
+#include "tdl_app/face_detector.hpp"
+#include "tdl_app/multi_stage_pipeline.hpp"
 
 namespace {
 

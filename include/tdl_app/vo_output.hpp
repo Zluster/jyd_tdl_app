@@ -2,6 +2,7 @@
 
 #include <string>
 
+#include "tdl_app/layout.hpp"
 #include "tdl_app/media_types.hpp"
 
 namespace tdl_app {
@@ -22,6 +23,7 @@ class VoOutput {
     int channel_x = 0;
     int channel_y = 0;
     int priority = 0;
+    int rotation = DualOsLayout::kVoRotation;
   };
 
   static Config display(int device = 0, int layer = 0, int channel = 0,

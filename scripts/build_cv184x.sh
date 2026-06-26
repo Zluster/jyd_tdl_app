@@ -17,13 +17,38 @@ fi
 export TOOLCHAIN_ROOT
 BUILD_DIR="${BUILD_DIR:-${PROJECT_ROOT}/build/cv184x}"
 INSTALL_DIR="${INSTALL_DIR:-${PROJECT_ROOT}/install/cv184x}"
-THIRD_PARTY_DIR="${TDL_APP_THIRD_PARTY_DIR:-${PROJECT_ROOT}/third_party/cv184x}"
+TDL_APP_PROFILE="${TDL_APP_PROFILE:-single_os}"
+THIRD_PARTY_DIR="${TDL_APP_THIRD_PARTY_DIR:-}"
+if [ -z "${THIRD_PARTY_DIR}" ]; then
+  case "${TDL_APP_PROFILE}" in
+    single_os)
+      if [ -d "/home/jyd/zwz/sophpi/tdl_app_sdk/third_party/cv184x/single_os" ]; then
+        THIRD_PARTY_DIR="/home/jyd/zwz/sophpi/tdl_app_sdk/third_party/cv184x/single_os"
+      elif [ -d "${PROJECT_ROOT}/third_party/cv184x" ]; then
+        THIRD_PARTY_DIR="${PROJECT_ROOT}/third_party/cv184x"
+      fi
+      ;;
+    dual_os)
+      if [ -d "/home/jyd/zwz/sophpi/tdl_app_sdk/third_party/cv184x/dual_os" ]; then
+        THIRD_PARTY_DIR="/home/jyd/zwz/sophpi/tdl_app_sdk/third_party/cv184x/dual_os"
+      fi
+      ;;
+    *)
+      echo "Unsupported TDL_APP_PROFILE: ${TDL_APP_PROFILE}" >&2
+      echo "Use TDL_APP_PROFILE=single_os or TDL_APP_PROFILE=dual_os" >&2
+      exit 1
+      ;;
+  esac
+fi
 
 if [ ! -d "${THIRD_PARTY_DIR}" ]; then
   echo "Missing third-party bundle: ${THIRD_PARTY_DIR}" >&2
   echo "Set TDL_APP_THIRD_PARTY_DIR or place cv184x under ${PROJECT_ROOT}/third_party" >&2
   exit 1
 fi
+
+echo "TDL_APP_PROFILE=${TDL_APP_PROFILE}"
+echo "TDL_APP_THIRD_PARTY_DIR=${THIRD_PARTY_DIR}"
 
 cmake -S "${PROJECT_ROOT}" -B "${BUILD_DIR}" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \

@@ -8,7 +8,35 @@ else
   SCRIPT_DIR=$(cd "$(dirname "${SCRIPT_PATH}")" && pwd)
   PROJECT_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
 fi
-THIRD_PARTY_DIR="${TDL_APP_THIRD_PARTY_DIR:-${PROJECT_ROOT}/third_party/cv184x}"
+TDL_APP_PROFILE="${TDL_APP_PROFILE:-dual_os}"
+THIRD_PARTY_DIR="${TDL_APP_THIRD_PARTY_DIR:-}"
+if [ -z "${THIRD_PARTY_DIR}" ]; then
+  case "${TDL_APP_PROFILE}" in
+    dual_os)
+      if [ -d "/home/jyd/zwz/sophpi/tdl_app_sdk/third_party/cv184x/dual_os" ]; then
+        THIRD_PARTY_DIR="/home/jyd/zwz/sophpi/tdl_app_sdk/third_party/cv184x/dual_os"
+      elif [ -d "${PROJECT_ROOT}/third_party/cv184x/dual_os" ]; then
+        THIRD_PARTY_DIR="${PROJECT_ROOT}/third_party/cv184x/dual_os"
+      elif [ -d "${PROJECT_ROOT}/third_party/cv184x" ]; then
+        THIRD_PARTY_DIR="${PROJECT_ROOT}/third_party/cv184x"
+      fi
+      ;;
+    single_os)
+      if [ -d "/home/jyd/zwz/sophpi/tdl_app_sdk/third_party/cv184x/single_os" ]; then
+        THIRD_PARTY_DIR="/home/jyd/zwz/sophpi/tdl_app_sdk/third_party/cv184x/single_os"
+      elif [ -d "${PROJECT_ROOT}/third_party/cv184x/single_os" ]; then
+        THIRD_PARTY_DIR="${PROJECT_ROOT}/third_party/cv184x/single_os"
+      elif [ -d "${PROJECT_ROOT}/third_party/cv184x" ]; then
+        THIRD_PARTY_DIR="${PROJECT_ROOT}/third_party/cv184x"
+      fi
+      ;;
+    *)
+      echo "Unsupported TDL_APP_PROFILE: ${TDL_APP_PROFILE}" >&2
+      echo "Use TDL_APP_PROFILE=dual_os or TDL_APP_PROFILE=single_os" >&2
+      exit 1
+      ;;
+  esac
+fi
 DEFAULT_PKG_DIR="${PROJECT_ROOT}/package/tdl_app_sdk_cv184x"
 FALLBACK_PKG_DIR="${PROJECT_ROOT}/package_user/tdl_app_sdk_cv184x"
 
@@ -33,6 +61,12 @@ fi
 if [ ! -d "${RESOLVED_INSTALL_DIR}" ]; then
   echo "Missing install dir: ${RESOLVED_INSTALL_DIR}" >&2
   echo "Set INSTALL_DIR or run scripts/build_cv184x.sh first" >&2
+  exit 1
+fi
+
+if [ ! -d "${THIRD_PARTY_DIR}" ]; then
+  echo "Missing third-party bundle: ${THIRD_PARTY_DIR}" >&2
+  echo "Set TDL_APP_THIRD_PARTY_DIR or export TDL_APP_PROFILE correctly" >&2
   exit 1
 fi
 
@@ -238,6 +272,8 @@ EOF
 chmod +x "${RESOLVED_PKG_DIR}/run_pp_ocr_demo.sh"
 
 tar cf - -C "$(dirname "${RESOLVED_PKG_DIR}")" "$(basename "${RESOLVED_PKG_DIR}")" | gzip -9 > "${RESOLVED_PKG_DIR}.tar.gz"
+echo "TDL_APP_PROFILE=${TDL_APP_PROFILE}"
+echo "TDL_APP_THIRD_PARTY_DIR=${THIRD_PARTY_DIR}"
 echo "Install dir: ${RESOLVED_INSTALL_DIR}"
 echo "Package dir: ${RESOLVED_PKG_DIR}"
 echo "Package: ${RESOLVED_PKG_DIR}.tar.gz"

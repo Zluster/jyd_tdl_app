@@ -56,6 +56,7 @@ void printUsage() {
   std::cout
       << "Usage:\n"
       << "  tdl_camera_vo_demo [--backend vi|vpss]\n"
+      << "                     [default: dual-os existing MMF path]\n"
       << "                     [--use-mmf | --use-sensor-media]\n"
       << "                     [--attach-existing]\n"
       << "                     [--sensor-ini FILE] [--frames N]\n"

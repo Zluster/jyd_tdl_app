@@ -7,7 +7,9 @@
 #include <string>
 #include <vector>
 
-#include "tdl_app/advanced.hpp"
+#include "tdl_app/audio_input.hpp"
+#include "tdl_app/audio_output.hpp"
+#include "tdl_app/audio_types.hpp"
 
 namespace {
 

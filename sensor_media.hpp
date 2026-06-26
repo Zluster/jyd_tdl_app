@@ -173,29 +173,14 @@ class SensorMedia {
             "CV2003 default 2-lane profile"};
   }
 
-  static SensorProfile cv2003OneLaneProfile() {
-    return {"cv2003_1lane", "./configs/sensor_cfg_cv2003_1lane.ini",
-            "CV2003 1-lane profile"};
-  }
-
   static SensorProfile gc2053Profile() {
-    return {"gc2053", "./configs/sensor_cfg_gc2053.ini",
-            "GC2053 default profile"};
-  }
-
-  static SensorProfile gc2053TwoLaneProfile() {
-    return {"gc2053_2lane", "./configs/sensor_cfg_gc2053_2lane.ini",
-            "GC2053 2-lane profile"};
+    return {"gc2053", "./configs/sensor_cfg_gc2053_2lane.ini",
+            "GC2053 default 2-lane profile"};
   }
 
   static SensorProfile gc2053OneLaneProfile() {
     return {"gc2053_1lane", "./configs/sensor_cfg_gc2053_1lane.ini",
             "GC2053 1-lane profile"};
-  }
-
-  static SensorProfile gc2093Profile() {
-    return {"gc2093", "./configs/sensor_cfg_gc2093.ini",
-            "GC2093 default profile"};
   }
 
  private:
