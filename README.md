@@ -51,14 +51,17 @@ jyd_tdl_app/
 
 ```sh
 cd /home/jyd/zwz/sophpi/jyd_tdl_app
-./scripts/build_cv184x.sh
-./scripts/package_runtime.sh
+export TDL_APP_PROFILE=dual_os
+export TDL_APP_THIRD_PARTY_DIR=/home/aixtr/jyd/jyd_tdl_app/third_party/cv184x/dual_os
+export TOOLCHAIN_ROOT=/home/aixtr/jyd/sophpi/host-tools/gcc/arm-gnu-toolchain-11.3.rel1-x86_64-arm-none-linux-musleabihf
+./scripts/build_cv184x.sh && ./scripts/package_runtime.sh && scp package/tdl_app_sdk_cv184x.tar.gz root@10.0.1.1:/root
 ```
 
 在板子上：
 
 ```sh
 cd /mnt/sd/tdl_app_sdk_cv184x
+gzip -dc tdl_app_sdk_cv184x.tar.gz | tar -xf -
 . ./env.sh
 ./run_camera_capture_demo.sh --source live --output live.jpg
 ./run_camera_capture_demo.sh --source ai --output ai.jpg

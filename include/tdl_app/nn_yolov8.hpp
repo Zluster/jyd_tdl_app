@@ -28,6 +28,7 @@ class NnYolov8 final : public NnBase {
 
  private:
   class CustomRuntime;
+  class SdkRuntime;
 
   bool loadDescriptor(std::string *error);
   bool shouldUseCustomRuntime() const;
@@ -37,6 +38,7 @@ class NnYolov8 final : public NnBase {
   ModelDescriptor descriptor_;
   bool descriptor_loaded_ = false;
   std::unique_ptr<CustomRuntime> custom_runtime_;
+  std::unique_ptr<SdkRuntime> sdk_runtime_;
 };
 
 }  // namespace tdl_app

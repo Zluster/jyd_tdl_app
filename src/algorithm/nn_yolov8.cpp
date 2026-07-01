@@ -19,6 +19,11 @@
 
 #include "bmlib_runtime.h"
 #include "bmruntime_interface.h"
+#include "cvi_comm_video.h"
+#include "cvi_sys.h"
+#include "c_apis/tdl_sdk.h"
+#include "c_apis/tdl_utils.h"
+#include "algorithm/private/tdl_sdk_utils.hpp"
 
 namespace tdl_app {
 namespace {
@@ -43,6 +48,136 @@ std::string toUpper(std::string value) {
 bool startsWith(const std::string &value, const std::string &prefix) {
   return value.size() >= prefix.size() &&
          value.compare(0, prefix.size(), prefix) == 0;
+}
+
+bool copyPackedRgbToBgr(const VIDEO_FRAME_S &vf, unsigned char *mapped,
+                        int width, int height, bool input_is_bgr,
+                        cv::Mat *image) {
+  cv::Mat output(height, width, CV_8UC3);
+  for (int y = 0; y < height; ++y) {
+    const unsigned char *src = mapped + y * vf.u32Stride[0];
+    unsigned char *dst = output.ptr<unsigned char>(y);
+    if (input_is_bgr) {
+      std::memcpy(dst, src, static_cast<size_t>(width) * 3);
+    } else {
+      for (int x = 0; x < width; ++x) {
+        dst[x * 3 + 0] = src[x * 3 + 2];
+        dst[x * 3 + 1] = src[x * 3 + 1];
+        dst[x * 3 + 2] = src[x * 3 + 0];
+      }
+    }
+  }
+  *image = std::move(output);
+  return true;
+}
+
+bool copyPlanarRgbToBgr(const VIDEO_FRAME_S &vf, unsigned char *mapped,
+                        int width, int height, bool input_is_bgr,
+                        cv::Mat *image) {
+  const unsigned char *plane0 = mapped;
+  const unsigned char *plane1 = mapped + vf.u32Length[0];
+  const unsigned char *plane2 = plane1 + vf.u32Length[1];
+  cv::Mat output(height, width, CV_8UC3);
+  for (int y = 0; y < height; ++y) {
+    const unsigned char *src0 = plane0 + y * vf.u32Stride[0];
+    const unsigned char *src1 = plane1 + y * vf.u32Stride[1];
+    const unsigned char *src2 = plane2 + y * vf.u32Stride[2];
+    cv::Vec3b *dst = output.ptr<cv::Vec3b>(y);
+    for (int x = 0; x < width; ++x) {
+      if (input_is_bgr) {
+        dst[x] = cv::Vec3b(src0[x], src1[x], src2[x]);
+      } else {
+        dst[x] = cv::Vec3b(src2[x], src1[x], src0[x]);
+      }
+    }
+  }
+  *image = std::move(output);
+  return true;
+}
+
+// Convert a VPSS/VI frame straight into a BGR cv::Mat in memory so the custom
+// YOLOv8 runtime can consume a live data stream without writing a file first.
+bool videoFrameToBgrMat(const VIDEO_FRAME_INFO_S &video_frame, cv::Mat *image,
+                        std::string *error) {
+  if (!image) {
+    setError(error, "output image pointer is null");
+    return false;
+  }
+  const auto &vf = video_frame.stVFrame;
+  const int width = static_cast<int>(vf.u32Width);
+  const int height = static_cast<int>(vf.u32Height);
+  const int format = static_cast<int>(vf.enPixelFormat);
+  if (width <= 0 || height <= 0) {
+    setError(error, "invalid frame size");
+    return false;
+  }
+
+  std::size_t map_size = 0;
+  for (int i = 0; i < 3; ++i) {
+    map_size += vf.u32Length[i];
+  }
+  if (map_size == 0) {
+    setError(error, "frame buffer length is zero");
+    return false;
+  }
+
+  auto *mapped =
+      static_cast<unsigned char *>(CVI_SYS_Mmap(vf.u64PhyAddr[0], map_size));
+  if (!mapped) {
+    setError(error, "CVI_SYS_Mmap failed");
+    return false;
+  }
+  CVI_SYS_IonInvalidateCache(vf.u64PhyAddr[0], mapped, map_size);
+
+  bool ok = true;
+  if (format == PIXEL_FORMAT_BGR_888) {
+    ok = copyPackedRgbToBgr(vf, mapped, width, height, true, image);
+  } else if (format == PIXEL_FORMAT_RGB_888) {
+    ok = copyPackedRgbToBgr(vf, mapped, width, height, false, image);
+  } else if (format == PIXEL_FORMAT_BGR_888_PLANAR) {
+    ok = copyPlanarRgbToBgr(vf, mapped, width, height, true, image);
+  } else if (format == PIXEL_FORMAT_RGB_888_PLANAR) {
+    ok = copyPlanarRgbToBgr(vf, mapped, width, height, false, image);
+  } else if (format == PIXEL_FORMAT_YUV_400) {
+    cv::Mat gray(height, width, CV_8UC1);
+    for (int y = 0; y < height; ++y) {
+      std::memcpy(gray.ptr(y), mapped + y * vf.u32Stride[0], width);
+    }
+    cv::cvtColor(gray, *image, cv::COLOR_GRAY2BGR);
+  } else if (format == PIXEL_FORMAT_NV12 || format == PIXEL_FORMAT_NV21) {
+    cv::Mat yuv(height + height / 2, width, CV_8UC1);
+    unsigned char *y_base = mapped;
+    unsigned char *uv_base = mapped + vf.u32Length[0];
+    for (int y = 0; y < height; ++y) {
+      std::memcpy(yuv.ptr(y), y_base + y * vf.u32Stride[0], width);
+    }
+    for (int y = 0; y < height / 2; ++y) {
+      std::memcpy(yuv.ptr(height + y), uv_base + y * vf.u32Stride[1], width);
+    }
+    const int code = format == PIXEL_FORMAT_NV21 ? cv::COLOR_YUV2BGR_NV21
+                                                 : cv::COLOR_YUV2BGR_NV12;
+    cv::cvtColor(yuv, *image, code);
+  } else {
+    ok = false;
+    setError(error,
+             "custom YOLOv8 runtime only supports RGB/BGR/NV12/NV21/YUV400 frame input");
+  }
+
+  CVI_SYS_Munmap(mapped, map_size);
+  if (!ok || image->empty()) {
+    setError(error, "failed to convert frame to BGR image");
+    return false;
+  }
+  return true;
+}
+
+bool frameToBgrMat(const Frame &frame, cv::Mat *image, std::string *error) {
+  if (!frame.native) {
+    setError(error, "frame has no native VIDEO_FRAME_INFO_S buffer");
+    return false;
+  }
+  auto *video = static_cast<VIDEO_FRAME_INFO_S *>(frame.native);
+  return videoFrameToBgrMat(*video, image, error);
 }
 
 float sigmoid(float value) {
@@ -289,14 +424,26 @@ class NnYolov8::CustomRuntime {
       setError(error, "custom YOLOv8 runtime is not initialized");
       return false;
     }
+    cv::Mat image = cv::imread(image_path, cv::IMREAD_COLOR);
+    if (image.empty()) {
+      setError(error, "failed to read image: " + image_path);
+      return false;
+    }
+    return inferMat(image, options, result, error);
+  }
+
+  bool inferMat(const cv::Mat &image, const InferOptions &options,
+                AlgorithmResult *result, std::string *error) {
+    if (!opened_) {
+      setError(error, "custom YOLOv8 runtime is not initialized");
+      return false;
+    }
     if (!result) {
       setError(error, "result pointer is null");
       return false;
     }
-
-    cv::Mat image = cv::imread(image_path, cv::IMREAD_COLOR);
     if (image.empty()) {
-      setError(error, "failed to read image: " + image_path);
+      setError(error, "input image is empty");
       return false;
     }
 
@@ -735,6 +882,76 @@ class NnYolov8::CustomRuntime {
   bool opened_ = false;
 };
 
+// Low-copy detection path: hand the VPSS physical frame straight to the TDL SDK
+// (TDL_WrapFrame + TDL_Detection), which does resize/CSC/quantize on VPSS/TPU so
+// the NPU reads device memory directly. Used whenever the model_type is a
+// registered TDL model; the CPU-heavy CustomRuntime stays as a fallback.
+class NnYolov8::SdkRuntime {
+ public:
+  bool open(const EngineConfig &config, const ModelDescriptor &descriptor,
+            const std::string &model_token, std::string *error) {
+    labels_ = descriptor.labels;
+    ModelSessionConfig session_config;
+    session_config.model_spec = config.model_descriptor_file;
+    session_config.model_dir = config.model_dir;
+    session_config.firmware = config.bmrt_firmware;
+    session_config.model_type = model_token;
+    return session_.open(session_config, model_token, error);
+  }
+
+  bool infer(const Frame &frame, const InferOptions &options,
+             AlgorithmResult *result, std::string *error) {
+    if (!session_.initialized()) {
+      setError(error, "SDK YOLOv8 runtime is not initialized");
+      return false;
+    }
+    if (!result) {
+      setError(error, "result pointer is null");
+      return false;
+    }
+
+    private_tdl_sdk::ImageGuard image;
+    if (!image.wrap(frame, error)) {
+      return false;
+    }
+
+    TDLObject meta;
+    std::memset(&meta, 0, sizeof(meta));
+    const int ret = TDL_Detection(session_.handle(), session_.modelId(),
+                                  image.get(), &meta);
+    if (ret != 0) {
+      setError(error, "TDL_Detection failed, ret=" + std::to_string(ret));
+      return false;
+    }
+
+    *result = AlgorithmResult{};
+    result->labels = labels_;
+    result->boxes.reserve(meta.size);
+    for (std::uint32_t i = 0; i < meta.size; ++i) {
+      const TDLObjectInfo &info = meta.info[i];
+      if (info.score < options.threshold) {
+        continue;
+      }
+      Box box;
+      box.x1 = info.box.x1;
+      box.y1 = info.box.y1;
+      box.x2 = info.box.x2;
+      box.y2 = info.box.y2;
+      box.score = info.score;
+      box.class_id = info.class_id;
+      result->boxes.push_back(std::move(box));
+    }
+    TDL_ReleaseObjectMeta(&meta);
+    return true;
+  }
+
+  bool initialized() const { return session_.initialized(); }
+
+ private:
+  private_tdl_sdk::Session session_;
+  std::vector<std::string> labels_;
+};
+
 NnYolov8::NnYolov8(std::string model_type) : model_type_(std::move(model_type)) {}
 
 NnYolov8::~NnYolov8() = default;
@@ -779,6 +996,33 @@ bool NnYolov8::load(EngineConfig config, std::string *error) {
     return false;
   }
 
+  // Prefer the low-copy TDL SDK path when the model_type is a registered TDL
+  // model. Set TDL_APP_YOLOV8_FORCE_BMRT=1 to force the legacy CPU runtime.
+  const char *force_bmrt = std::getenv("TDL_APP_YOLOV8_FORCE_BMRT");
+  const bool use_bmrt_only =
+      force_bmrt && force_bmrt[0] != '\0' && std::strcmp(force_bmrt, "0") != 0;
+  if (!use_bmrt_only) {
+    std::string token = model_type_.empty() ? descriptor_.model_type : model_type_;
+    const std::string normalized = private_tdl_sdk::normalizeToken(token);
+    TDLModel probe_id = TDL_MODEL_INVALID;
+    std::string probe_error;
+    if (!normalized.empty() &&
+        private_tdl_sdk::resolveModelId(normalized, &probe_id, &probe_error)) {
+      std::unique_ptr<SdkRuntime> sdk(new SdkRuntime());
+      std::string sdk_error;
+      if (sdk->open(config_, descriptor_, normalized, &sdk_error)) {
+        sdk_runtime_ = std::move(sdk);
+        initialized_ = true;
+        return true;
+      }
+      // Fall back to the custom BMRT runtime if the SDK path cannot open.
+      if (error) {
+        *error = "SDK runtime open failed (" + sdk_error +
+                 "), falling back to custom BMRT runtime";
+      }
+    }
+  }
+
   if (!shouldUseCustomRuntime()) {
     setError(error,
              "YOLOv8 descriptor is incomplete or model_type does not map to YOLOv8");
@@ -812,15 +1056,25 @@ bool NnYolov8::predict(const std::string &image_path, const InferOptions &option
 
 bool NnYolov8::predictFrame(const Frame &frame, const InferOptions &options,
                             AlgorithmResult *result, std::string *error) {
-  if (!custom_runtime_ || !initialized_) {
+  if (!initialized_) {
     setError(error, "model is not initialized");
     return false;
   }
-  if (frame.image_path.empty()) {
-    setError(error, "custom YOLOv8 runtime currently supports image_path only");
+  if (sdk_runtime_) {
+    return sdk_runtime_->infer(frame, options, result, error);
+  }
+  if (!custom_runtime_) {
+    setError(error, "model is not initialized");
     return false;
   }
-  return custom_runtime_->inferImage(frame.image_path, options, result, error);
+  if (!frame.image_path.empty()) {
+    return custom_runtime_->inferImage(frame.image_path, options, result, error);
+  }
+  cv::Mat image;
+  if (!frameToBgrMat(frame, &image, error)) {
+    return false;
+  }
+  return custom_runtime_->inferMat(image, options, result, error);
 }
 
 }  // namespace tdl_app
