@@ -41,15 +41,11 @@ if(TDL_SOPHPI_ROOT)
   tdl_append_existing_dirs(TDL_FALLBACK_LIB_DIRS
     "${TDL_SOPHPI_ROOT}/cvi_mpi/lib"
     "${TDL_SOPHPI_ROOT}/cvi_mpi/lib/musl_arm_dual"
-    "${TDL_SOPHPI_ROOT}/tdl_app_sdk/third_party/cv184x/lib"
     "${TDL_SOPHPI_ROOT}/tdl_app_sdk/third_party/cv184x/dual_os/lib"
-    "${TDL_SOPHPI_ROOT}/tdl_app_sdk/third_party/cv184x/opencv/lib"
     "${TDL_SOPHPI_ROOT}/tdl_app_sdk/third_party/cv184x/dual_os/opencv/lib"
     "${TDL_SOPHPI_ROOT}/libsophon/install/libsophon-0.4.9/lib"
     "${TDL_SOPHPI_ROOT}/install/soc_cv1843hp_jyd_common_sd_dualos_alios/rootfs/system/lib"
     "${TDL_SOPHPI_ROOT}/install/soc_cv1843hp_jyd_common_sd_dualos_alios/rootfs/system/usr/lib"
-    "${TDL_SOPHPI_ROOT}/install/soc_cv1843hp_jyd_common_sd/rootfs/system/lib"
-    "${TDL_SOPHPI_ROOT}/install/soc_cv1843hp_jyd_common_sd/rootfs/system/usr/lib"
   )
 endif()
 
@@ -60,8 +56,6 @@ elseif(EXISTS "${TDL_APP_THIRD_PARTY_DIR}/include/opencv4")
   set(TDL_OPENCV_INCLUDE_DIR "${TDL_APP_THIRD_PARTY_DIR}/include/opencv4")
 elseif(TDL_SOPHPI_ROOT AND EXISTS "${TDL_SOPHPI_ROOT}/tdl_app_sdk/third_party/cv184x/dual_os/opencv/include")
   set(TDL_OPENCV_INCLUDE_DIR "${TDL_SOPHPI_ROOT}/tdl_app_sdk/third_party/cv184x/dual_os/opencv/include")
-elseif(TDL_SOPHPI_ROOT AND EXISTS "${TDL_SOPHPI_ROOT}/tdl_app_sdk/third_party/cv184x/opencv/include")
-  set(TDL_OPENCV_INCLUDE_DIR "${TDL_SOPHPI_ROOT}/tdl_app_sdk/third_party/cv184x/opencv/include")
 endif()
 
 set(TDL_OPENCV_LIB_DIR "")
@@ -71,8 +65,6 @@ elseif(EXISTS "${TDL_APP_THIRD_PARTY_DIR}/lib")
   set(TDL_OPENCV_LIB_DIR "${TDL_APP_THIRD_PARTY_DIR}/lib")
 elseif(TDL_SOPHPI_ROOT AND EXISTS "${TDL_SOPHPI_ROOT}/tdl_app_sdk/third_party/cv184x/dual_os/opencv/lib")
   set(TDL_OPENCV_LIB_DIR "${TDL_SOPHPI_ROOT}/tdl_app_sdk/third_party/cv184x/dual_os/opencv/lib")
-elseif(TDL_SOPHPI_ROOT AND EXISTS "${TDL_SOPHPI_ROOT}/tdl_app_sdk/third_party/cv184x/opencv/lib")
-  set(TDL_OPENCV_LIB_DIR "${TDL_SOPHPI_ROOT}/tdl_app_sdk/third_party/cv184x/opencv/lib")
 endif()
 
 if(NOT TDL_OPENCV_INCLUDE_DIR OR NOT TDL_OPENCV_LIB_DIR)
@@ -85,18 +77,15 @@ tdl_pick_library(TDL_OPENCV_CORE_LIBRARY
   "${TDL_OPENCV_LIB_DIR}/libopencv_core.so.4.5.0"
   "${TDL_OPENCV_LIB_DIR}/libopencv_core.so"
   "${TDL_SOPHPI_ROOT}/tdl_app_sdk/third_party/cv184x/dual_os/opencv/lib/libopencv_core.so.4.5.0"
-  "${TDL_SOPHPI_ROOT}/tdl_app_sdk/third_party/cv184x/opencv/lib/libopencv_core.so.4.5.0"
   "${TDL_SOPHPI_ROOT}/tdl_sdk/install/CV184X/sample/3rd/opencv/lib/libopencv_core.so.4.5.0")
 tdl_pick_library(TDL_OPENCV_IMGPROC_LIBRARY
   "${TDL_OPENCV_LIB_DIR}/libopencv_imgproc.so.4.5.0"
   "${TDL_OPENCV_LIB_DIR}/libopencv_imgproc.so"
-  "${TDL_SOPHPI_ROOT}/tdl_app_sdk/third_party/cv184x/dual_os/opencv/lib/libopencv_imgproc.so.4.5.0"
-  "${TDL_SOPHPI_ROOT}/tdl_app_sdk/third_party/cv184x/opencv/lib/libopencv_imgproc.so.4.5.0")
+  "${TDL_SOPHPI_ROOT}/tdl_app_sdk/third_party/cv184x/dual_os/opencv/lib/libopencv_imgproc.so.4.5.0")
 tdl_pick_library(TDL_OPENCV_IMGCODECS_LIBRARY
   "${TDL_OPENCV_LIB_DIR}/libopencv_imgcodecs.so.4.5.0"
   "${TDL_OPENCV_LIB_DIR}/libopencv_imgcodecs.so"
-  "${TDL_SOPHPI_ROOT}/tdl_app_sdk/third_party/cv184x/dual_os/opencv/lib/libopencv_imgcodecs.so.4.5.0"
-  "${TDL_SOPHPI_ROOT}/tdl_app_sdk/third_party/cv184x/opencv/lib/libopencv_imgcodecs.so.4.5.0")
+  "${TDL_SOPHPI_ROOT}/tdl_app_sdk/third_party/cv184x/dual_os/opencv/lib/libopencv_imgcodecs.so.4.5.0")
 
 if(NOT TDL_OPENCV_CORE_LIBRARY OR NOT TDL_OPENCV_IMGPROC_LIBRARY OR
    NOT TDL_OPENCV_IMGCODECS_LIBRARY)
@@ -232,16 +221,12 @@ tdl_pick_library(TDL_MODEL_COMBINE_LIBRARY
 tdl_pick_library(TDL_SENSOR_CV2003_LIBRARY
   "${TDL_APP_THIRD_PARTY_DIR}/lib/libsns_cv2003.so"
   "${TDL_APP_THIRD_PARTY_DIR}/lib/libsns_cv2003.a"
-  "${TDL_SOPHPI_ROOT}/tdl_app_sdk/third_party/cv184x/dual_os/lib/libsns_cv2003.so"
-  "${TDL_SOPHPI_ROOT}/tdl_app_sdk/third_party/cv184x/lib/libsns_cv2003.so"
-  "${TDL_SOPHPI_ROOT}/install/soc_cv1843hp_jyd_common_sd/rootfs/system/usr/lib/libsns_cv2003.so")
+  "${TDL_SOPHPI_ROOT}/tdl_app_sdk/third_party/cv184x/dual_os/lib/libsns_cv2003.so")
 
 tdl_pick_library(TDL_SENSOR_GC2053_LIBRARY
   "${TDL_APP_THIRD_PARTY_DIR}/lib/libsns_gc2053.so"
   "${TDL_APP_THIRD_PARTY_DIR}/lib/libsns_gc2053.a"
-  "${TDL_SOPHPI_ROOT}/tdl_app_sdk/third_party/cv184x/dual_os/lib/libsns_gc2053.so"
-  "${TDL_SOPHPI_ROOT}/tdl_app_sdk/third_party/cv184x/lib/libsns_gc2053.so"
-  "${TDL_SOPHPI_ROOT}/install/soc_cv1843hp_jyd_common_sd/rootfs/system/usr/lib/libsns_gc2053.so")
+  "${TDL_SOPHPI_ROOT}/tdl_app_sdk/third_party/cv184x/dual_os/lib/libsns_gc2053.so")
 
 if(NOT TDL_BMRT_LIBRARY OR NOT TDL_BMLIB_LIBRARY OR NOT TDL_BMODEL_LIBRARY OR
    NOT TDL_MODEL_COMBINE_LIBRARY)
@@ -302,7 +287,7 @@ else()
   message(WARNING
     "GC2053 sensor runtime library was not found in TDL_APP_THIRD_PARTY_DIR or "
     "TDL_SOPHPI_ROOT. CV2003 builds remain available, but GC2053 runtime bring-up "
-    "will require building or installing libsns_gc2053.so.")
+    "will require building or installing libsns_gc2053.so in the dual_os bundle.")
 endif()
 
 if(TDL_HAS_AUDIO_RUNTIME)

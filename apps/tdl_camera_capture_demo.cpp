@@ -20,7 +20,7 @@ struct Options {
 void printUsage() {
   std::cout
       << "Usage:\n"
-      << "  tdl_camera_capture_demo [--source live|ai|main|subrgb]\n"
+      << "  tdl_camera_capture_demo [--source live|ai|main|subrgb|screen]\n"
       << "                          [default: dual-os existing MMF path]\n"
       << "                          [run from packaged runtime after '. ./env.sh']\n"
       << "                          [--use-mmf | --use-sensor-media]\n"
@@ -137,3 +137,4 @@ int main(int argc, char **argv) {
   camera_demo_support::closeCameraRuntime(&runtime);
   return 0;
 }
+

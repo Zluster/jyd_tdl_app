@@ -25,7 +25,7 @@ struct CommonOptions {
   int group = tdl_app::DualOsLayout::kCaptureVpssGroup;
   int pipe = 0;
   int channel = tdl_app::DualOsLayout::kAiChannel;
-  int pixel_format = 18;
+  int pixel_format = tdl_app::DualOsLayout::kAiPixelFormat;
   int width = tdl_app::DualOsLayout::kAiWidth;
   int height = tdl_app::DualOsLayout::kAiHeight;
   int timeout_ms = 1000;
@@ -35,13 +35,13 @@ struct CommonOptions {
   int preview_channel = tdl_app::DualOsLayout::kLiveChannel;
   int preview_width = 0;
   int preview_height = 0;
-  int preview_pixel_format = 18;
+  int preview_pixel_format = tdl_app::DualOsLayout::kLivePixelFormat;
   bool enable_pip_output = false;
   int pip_group = tdl_app::DualOsLayout::kCaptureVpssGroup;
   int pip_channel = tdl_app::DualOsLayout::kSubRgbChannel;
   int pip_width = 0;
   int pip_height = 0;
-  int pip_pixel_format = 18;
+  int pip_pixel_format = tdl_app::DualOsLayout::kSubRgbPixelFormat;
 };
 
 struct CameraRuntime {
@@ -72,3 +72,4 @@ bool saveFrameAsImage(const tdl_app::Frame &frame, const std::string &output_pat
 void dumpCameraDiagnostics();
 
 }  // namespace camera_demo_support
+

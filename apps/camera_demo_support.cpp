@@ -75,7 +75,7 @@ bool setCameraPreset(CommonOptions *opt, const std::string &preset,
     opt->channel = tdl_app::DualOsLayout::kAiChannel;
     opt->width = tdl_app::DualOsLayout::kAiWidth;
     opt->height = tdl_app::DualOsLayout::kAiHeight;
-    opt->pixel_format = 18;
+    opt->pixel_format = tdl_app::DualOsLayout::kAiPixelFormat;
     return true;
   }
   if (lower == "live") {
@@ -83,7 +83,7 @@ bool setCameraPreset(CommonOptions *opt, const std::string &preset,
     opt->channel = tdl_app::DualOsLayout::kLiveChannel;
     opt->width = tdl_app::DualOsLayout::kLiveWidth;
     opt->height = tdl_app::DualOsLayout::kLiveHeight;
-    opt->pixel_format = 18;
+    opt->pixel_format = tdl_app::DualOsLayout::kLivePixelFormat;
     return true;
   }
   if (lower == "main") {
@@ -91,7 +91,7 @@ bool setCameraPreset(CommonOptions *opt, const std::string &preset,
     opt->channel = tdl_app::DualOsLayout::kMainChannel;
     opt->width = tdl_app::DualOsLayout::kMainWidth;
     opt->height = tdl_app::DualOsLayout::kMainHeight;
-    opt->pixel_format = 18;
+    opt->pixel_format = tdl_app::DualOsLayout::kMainPixelFormat;
     return true;
   }
   if (lower == "subrgb") {
@@ -99,13 +99,21 @@ bool setCameraPreset(CommonOptions *opt, const std::string &preset,
     opt->channel = tdl_app::DualOsLayout::kSubRgbChannel;
     opt->width = tdl_app::DualOsLayout::kSubRgbWidth;
     opt->height = tdl_app::DualOsLayout::kSubRgbHeight;
-    opt->pixel_format = 2;
+    opt->pixel_format = tdl_app::DualOsLayout::kSubRgbPixelFormat;
+    return true;
+  }
+  if (lower == "screen") {
+    opt->group = tdl_app::DualOsLayout::kDisplayVpssGroup;
+    opt->channel = tdl_app::DualOsLayout::kDisplayChannel;
+    opt->width = tdl_app::DualOsLayout::kDisplaySourceWidth;
+    opt->height = tdl_app::DualOsLayout::kDisplaySourceHeight;
+    opt->pixel_format = tdl_app::DualOsLayout::kDisplayPixelFormat;
     return true;
   }
 
   if (error) {
     *error = "unknown camera preset: " + preset +
-             " (expected ai|live|main|subrgb)";
+             " (expected ai|live|main|subrgb|screen)";
   }
   return false;
 }
@@ -133,6 +141,13 @@ std::string describeCameraPreset(const CommonOptions &opt) {
         opt.height == tdl_app::DualOsLayout::kSubRgbHeight) {
       return "subrgb";
     }
+  }
+  if (opt.backend == "vpss" &&
+      opt.group == tdl_app::DualOsLayout::kDisplayVpssGroup &&
+      opt.channel == tdl_app::DualOsLayout::kDisplayChannel &&
+      opt.width == tdl_app::DualOsLayout::kDisplaySourceWidth &&
+      opt.height == tdl_app::DualOsLayout::kDisplaySourceHeight) {
+    return "screen";
   }
 
   std::ostringstream oss;
@@ -357,6 +372,11 @@ tdl_app::Camera::Config makeCameraConfig(const CommonOptions &opt) {
              opt.width == tdl_app::DualOsLayout::kSubRgbWidth &&
              opt.height == tdl_app::DualOsLayout::kSubRgbHeight) {
     camera_config = tdl_app::Camera::subRgb(opt.timeout_ms);
+  } else if (opt.group == tdl_app::DualOsLayout::kDisplayVpssGroup &&
+             opt.channel == tdl_app::DualOsLayout::kDisplayChannel &&
+             opt.width == tdl_app::DualOsLayout::kDisplaySourceWidth &&
+             opt.height == tdl_app::DualOsLayout::kDisplaySourceHeight) {
+    camera_config = tdl_app::Camera::screen(opt.timeout_ms);
   } else {
     camera_config =
         tdl_app::Camera::vpss(opt.group, opt.channel, opt.width, opt.height,
@@ -659,3 +679,7 @@ void dumpCameraDiagnostics() {
 }
 
 }  // namespace camera_demo_support
+
+
+
+

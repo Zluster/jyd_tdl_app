@@ -1,5 +1,6 @@
 #pragma once
 
+#include "tdl_app/audio.hpp"
 #include "tdl_app/camera.hpp"
 #include "tdl_app/classifier.hpp"
 #include "tdl_app/display.hpp"

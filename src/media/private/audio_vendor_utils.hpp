@@ -149,6 +149,27 @@ inline void fromVendor(const AUDIO_FRAME_S &vendor_frame, AudioBitWidth bit_widt
   frame->sequence = vendor_frame.u32Seq;
   frame->bytes_per_channel = static_cast<std::uint32_t>(channel_bytes);
   frame->channels.clear();
+
+  if (sound_mode == AudioSoundMode::Stereo &&
+      vendor_frame.u64VirAddr[0] != nullptr &&
+      vendor_frame.u64VirAddr[1] == nullptr && channel_bytes > 0 &&
+      sample_bytes > 0) {
+    const auto *interleaved =
+        reinterpret_cast<const std::uint8_t *>(vendor_frame.u64VirAddr[0]);
+    frame->channels.assign(2, std::vector<std::uint8_t>(channel_bytes, 0));
+    const std::size_t sample_count = channel_bytes / sample_bytes;
+    for (std::size_t sample = 0; sample < sample_count; ++sample) {
+      const std::size_t src_left = (sample * 2) * sample_bytes;
+      const std::size_t src_right = src_left + sample_bytes;
+      const std::size_t dst = sample * sample_bytes;
+      std::memcpy(frame->channels[0].data() + dst, interleaved + src_left,
+                  sample_bytes);
+      std::memcpy(frame->channels[1].data() + dst, interleaved + src_right,
+                  sample_bytes);
+    }
+    return;
+  }
+
   for (int i = 0; i < 2; ++i) {
     if (!vendor_frame.u64VirAddr[i] || channel_bytes == 0) {
       continue;
