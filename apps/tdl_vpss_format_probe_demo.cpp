@@ -28,10 +28,7 @@ struct Options {
 void printUsage() {
   std::cout
       << "Usage:\n"
-      << "  tdl_vpss_format_probe_demo [--use-sensor-media] [--attach-existing]\n"
-      << "                             [--sensor-model NAME] [--sensor-profile FILE]\n"
-      << "                             [--sensor-ini FILE]\n"
-      << "                             [--device N] [--group N] [--pipe N] [--channel N]\n"
+      << "  tdl_vpss_format_probe_demo [--device N] [--group N] [--pipe N] [--channel N]\n"
       << "                             [--group N] [--channel N]\n"
       << "                             [--width N] [--height N]\n";
 }
@@ -135,18 +132,11 @@ int main(int argc, char **argv) {
       {PIXEL_FORMAT_ARGB_8888, "ARGB8888"},
   };
 
-  if (opt.camera.sensor_ini.empty() && opt.camera.sensor_model.empty() &&
-      opt.camera.sensor_profile.empty()) {
-    opt.camera.sensor_model = "cv2003";
-  }
-  opt.camera.use_sensor_media = true;
   opt.camera.group = opt.group;
   opt.camera.channel = opt.channel;
   opt.camera.width = opt.width;
   opt.camera.height = opt.height;
   opt.camera.pixel_format = PIXEL_FORMAT_NV12;
-  opt.camera.enable_preview_output = false;
-  opt.camera.enable_pip_output = false;
 
   camera_demo_support::CameraRuntime runtime;
   std::string error;

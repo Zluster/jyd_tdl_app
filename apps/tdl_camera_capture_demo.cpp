@@ -21,13 +21,9 @@ void printUsage() {
   std::cout
       << "Usage:\n"
       << "  tdl_camera_capture_demo [--source live|ai|main|subrgb|screen]\n"
-      << "                          [default: dual-os existing MMF path]\n"
+      << "                          [default: dual-os MMF frame source]\n"
       << "                          [run from packaged runtime after '. ./env.sh']\n"
-      << "                          [--use-mmf | --use-sensor-media]\n"
-      << "                          [--use-ipcamera-helper]\n"
-      << "                          [--attach-existing]\n"
-      << "                          [--sensor-ini FILE] [--frames N]\n"
-      << "                          [--ipcamera-bin FILE] [--ipcamera-ini FILE]\n"
+      << "                          [--frames N]\n"
       << "                          [debug only: --backend/--group/--channel/...]\n"
       << "                          [--timeout-ms N] [--hold-ms N]\n"
       << "                          [--output FILE]\n";
@@ -137,4 +133,3 @@ int main(int argc, char **argv) {
   camera_demo_support::closeCameraRuntime(&runtime);
   return 0;
 }
-

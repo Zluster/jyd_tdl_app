@@ -304,11 +304,6 @@ void MultiStagePipeline::setMmf(const Mmf::Config &config) {
       std::unique_ptr<PipelineBootstrap>(new MmfBootstrap(config)));
 }
 
-void MultiStagePipeline::setSensorMedia(const SensorMedia::Config &config) {
-  impl_->setBootstrap(std::unique_ptr<PipelineBootstrap>(
-      new SensorMediaBootstrap(config)));
-}
-
 void MultiStagePipeline::clearBootstrap() { impl_->clearBootstrap(); }
 
 void MultiStagePipeline::setSink(std::unique_ptr<FrameSink> sink) {

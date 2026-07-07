@@ -48,7 +48,6 @@ set(TDL_APP_FULL_ONLY_SOURCES
 )
 
 set(TDL_APP_MEDIA_SOURCES
-  third_party/vendor/ini/ini.c
   src/media/audio_decoder.cpp
   src/media/audio_encoder.cpp
   src/media/audio_input.cpp
@@ -70,11 +69,7 @@ set(TDL_APP_MEDIA_SOURCES
   src/media/osd_region.cpp
   src/media/mmf.cpp
   src/media/private/audio_runtime.cpp
-  src/media/private/sensor_media_impl.cpp
-  src/media/private/sensor_media_vi_isp.cpp
-  src/media/private/sensor_media_vpss.cpp
   src/media/region_overlay.cpp
-  src/media/sensor_media.cpp
   src/media/sys_context.cpp
   src/media/video_buffer.cpp
   src/media/vdec_channel.cpp
@@ -95,6 +90,10 @@ add_library(tdl_app_sdk STATIC
   ${TDL_APP_LIBRARY_SOURCES}
 )
 
+add_library(tdl_app_ini_compat STATIC
+  third_party/vendor/ini/ini.c
+)
+
 target_include_directories(tdl_app_sdk
   PUBLIC
     "${CMAKE_CURRENT_LIST_DIR}/include"
@@ -106,16 +105,15 @@ target_include_directories(tdl_app_sdk
 target_link_libraries(tdl_app_sdk
   PUBLIC
     ${TDL_CV184X_LIBS}
+    tdl_app_ini_compat
 )
 
 if(TDL_APP_BUILD_DEMOS)
   add_executable(tdl_audio_aio_demo apps/tdl_audio_aio_demo.cpp)
-  target_sources(tdl_audio_aio_demo PRIVATE third_party/vendor/ini/ini.c)
   target_include_directories(tdl_audio_aio_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
   target_link_libraries(tdl_audio_aio_demo PRIVATE tdl_app_sdk)
 
   add_executable(tdl_audio_stream_demo apps/tdl_audio_stream_demo.cpp)
-  target_sources(tdl_audio_stream_demo PRIVATE third_party/vendor/ini/ini.c)
   target_include_directories(tdl_audio_stream_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
   target_link_libraries(tdl_audio_stream_demo PRIVATE tdl_app_sdk)
 
@@ -123,7 +121,6 @@ if(TDL_APP_BUILD_DEMOS)
     apps/tdl_camera_capture_demo.cpp
     apps/camera_demo_support.cpp
   )
-  target_sources(tdl_camera_capture_demo PRIVATE third_party/vendor/ini/ini.c)
   target_include_directories(tdl_camera_capture_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
   target_link_libraries(tdl_camera_capture_demo PRIVATE tdl_app_sdk)
 
@@ -131,7 +128,6 @@ if(TDL_APP_BUILD_DEMOS)
     apps/sophpi_camera_demo.cpp
     apps/camera_demo_support.cpp
   )
-  target_sources(sophpi_camera_demo PRIVATE third_party/vendor/ini/ini.c)
   target_include_directories(sophpi_camera_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
   target_link_libraries(sophpi_camera_demo PRIVATE tdl_app_sdk)
 
@@ -139,22 +135,18 @@ if(TDL_APP_BUILD_DEMOS)
     apps/tdl_multi_vpss_demo.cpp
     apps/camera_demo_support.cpp
   )
-  target_sources(tdl_multi_vpss_demo PRIVATE third_party/vendor/ini/ini.c)
   target_include_directories(tdl_multi_vpss_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
   target_link_libraries(tdl_multi_vpss_demo PRIVATE tdl_app_sdk)
 
   add_executable(tdl_media_smoke_demo apps/tdl_media_smoke_demo.cpp)
-  target_sources(tdl_media_smoke_demo PRIVATE third_party/vendor/ini/ini.c)
   target_include_directories(tdl_media_smoke_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
   target_link_libraries(tdl_media_smoke_demo PRIVATE tdl_app_sdk)
 
   add_executable(tdl_osd_demo apps/tdl_osd_demo.cpp)
-  target_sources(tdl_osd_demo PRIVATE third_party/vendor/ini/ini.c)
   target_include_directories(tdl_osd_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
   target_link_libraries(tdl_osd_demo PRIVATE tdl_app_sdk)
 
   add_executable(tdl_graphic_vo_demo apps/tdl_graphic_vo_demo.cpp)
-  target_sources(tdl_graphic_vo_demo PRIVATE third_party/vendor/ini/ini.c)
   target_include_directories(tdl_graphic_vo_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
   target_link_libraries(tdl_graphic_vo_demo PRIVATE tdl_app_sdk)
 
@@ -162,51 +154,35 @@ if(TDL_APP_BUILD_DEMOS)
     apps/tdl_vpss_format_probe_demo.cpp
     apps/camera_demo_support.cpp
   )
-  target_sources(tdl_vpss_format_probe_demo PRIVATE third_party/vendor/ini/ini.c)
   target_include_directories(tdl_vpss_format_probe_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
   target_link_libraries(tdl_vpss_format_probe_demo PRIVATE tdl_app_sdk)
 
-  add_executable(tdl_sensor_profile_probe_demo
-    apps/tdl_sensor_profile_probe_demo.cpp
-    apps/camera_demo_support.cpp
-  )
-  target_sources(tdl_sensor_profile_probe_demo PRIVATE third_party/vendor/ini/ini.c)
-  target_include_directories(tdl_sensor_profile_probe_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
-  target_link_libraries(tdl_sensor_profile_probe_demo PRIVATE tdl_app_sdk)
-
   add_executable(tdl_vdec_demo apps/tdl_vdec_demo.cpp)
-  target_sources(tdl_vdec_demo PRIVATE third_party/vendor/ini/ini.c)
   target_include_directories(tdl_vdec_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
   target_link_libraries(tdl_vdec_demo PRIVATE tdl_app_sdk)
 
   if(NOT TDL_APP_MEDIA_MINIMAL)
     add_executable(tdl_detect_demo apps/tdl_detect_demo.cpp apps/demo_support.cpp)
-    target_sources(tdl_detect_demo PRIVATE third_party/vendor/ini/ini.c)
     target_include_directories(tdl_detect_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
     target_link_libraries(tdl_detect_demo PRIVATE tdl_app_sdk)
 
     add_executable(tdl_yolov5_demo apps/tdl_yolov5_demo.cpp apps/demo_support.cpp)
-    target_sources(tdl_yolov5_demo PRIVATE third_party/vendor/ini/ini.c)
     target_include_directories(tdl_yolov5_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
     target_link_libraries(tdl_yolov5_demo PRIVATE tdl_app_sdk)
 
     add_executable(tdl_yolov8_demo apps/tdl_yolov8_demo.cpp apps/demo_support.cpp)
-    target_sources(tdl_yolov8_demo PRIVATE third_party/vendor/ini/ini.c)
     target_include_directories(tdl_yolov8_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
     target_link_libraries(tdl_yolov8_demo PRIVATE tdl_app_sdk)
 
     add_executable(tdl_classify_demo apps/tdl_classify_demo.cpp apps/demo_support.cpp)
-    target_sources(tdl_classify_demo PRIVATE third_party/vendor/ini/ini.c)
     target_include_directories(tdl_classify_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
     target_link_libraries(tdl_classify_demo PRIVATE tdl_app_sdk)
 
     add_executable(tdl_feature_demo apps/tdl_feature_demo.cpp apps/demo_support.cpp)
-    target_sources(tdl_feature_demo PRIVATE third_party/vendor/ini/ini.c)
     target_include_directories(tdl_feature_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
     target_link_libraries(tdl_feature_demo PRIVATE tdl_app_sdk)
 
     add_executable(tdl_keypoint_demo apps/tdl_keypoint_demo.cpp)
-    target_sources(tdl_keypoint_demo PRIVATE third_party/vendor/ini/ini.c)
     target_include_directories(tdl_keypoint_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
     target_link_libraries(tdl_keypoint_demo PRIVATE tdl_app_sdk)
 
@@ -214,37 +190,30 @@ if(TDL_APP_BUILD_DEMOS)
       apps/tdl_face_dense_keypoint_demo.cpp
       apps/demo_support.cpp
     )
-    target_sources(tdl_face_dense_keypoint_demo PRIVATE third_party/vendor/ini/ini.c)
     target_include_directories(tdl_face_dense_keypoint_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
     target_link_libraries(tdl_face_dense_keypoint_demo PRIVATE tdl_app_sdk)
 
     add_executable(tdl_semantic_seg_demo apps/tdl_semantic_seg_demo.cpp)
-    target_sources(tdl_semantic_seg_demo PRIVATE third_party/vendor/ini/ini.c)
     target_include_directories(tdl_semantic_seg_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
     target_link_libraries(tdl_semantic_seg_demo PRIVATE tdl_app_sdk)
 
     add_executable(tdl_instance_seg_demo apps/tdl_instance_seg_demo.cpp)
-    target_sources(tdl_instance_seg_demo PRIVATE third_party/vendor/ini/ini.c)
     target_include_directories(tdl_instance_seg_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
     target_link_libraries(tdl_instance_seg_demo PRIVATE tdl_app_sdk)
 
     add_executable(tdl_lane_demo apps/tdl_lane_demo.cpp)
-    target_sources(tdl_lane_demo PRIVATE third_party/vendor/ini/ini.c)
     target_include_directories(tdl_lane_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
     target_link_libraries(tdl_lane_demo PRIVATE tdl_app_sdk)
 
     add_executable(tdl_vad_demo apps/tdl_vad_demo.cpp)
-    target_sources(tdl_vad_demo PRIVATE third_party/vendor/ini/ini.c)
     target_include_directories(tdl_vad_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
     target_link_libraries(tdl_vad_demo PRIVATE tdl_app_sdk)
 
     add_executable(tdl_face_detect_demo apps/tdl_face_detect_demo.cpp apps/demo_support.cpp)
-    target_sources(tdl_face_detect_demo PRIVATE third_party/vendor/ini/ini.c)
     target_include_directories(tdl_face_detect_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
     target_link_libraries(tdl_face_detect_demo PRIVATE tdl_app_sdk)
 
     add_executable(tdl_face_attribute_demo apps/tdl_face_attribute_demo.cpp apps/demo_support.cpp)
-    target_sources(tdl_face_attribute_demo PRIVATE third_party/vendor/ini/ini.c)
     target_include_directories(tdl_face_attribute_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
     target_link_libraries(tdl_face_attribute_demo PRIVATE tdl_app_sdk)
 
@@ -252,12 +221,10 @@ if(TDL_APP_BUILD_DEMOS)
       apps/tdl_face_attr_pipeline_demo.cpp
       apps/demo_support.cpp
     )
-    target_sources(tdl_face_attr_pipeline_demo PRIVATE third_party/vendor/ini/ini.c)
     target_include_directories(tdl_face_attr_pipeline_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
     target_link_libraries(tdl_face_attr_pipeline_demo PRIVATE tdl_app_sdk)
 
     add_executable(tdl_plate_recognize_demo apps/tdl_plate_recognize_demo.cpp apps/demo_support.cpp)
-    target_sources(tdl_plate_recognize_demo PRIVATE third_party/vendor/ini/ini.c)
     target_include_directories(tdl_plate_recognize_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
     target_link_libraries(tdl_plate_recognize_demo PRIVATE tdl_app_sdk)
 
@@ -266,7 +233,6 @@ if(TDL_APP_BUILD_DEMOS)
       apps/demo_support.cpp
       apps/camera_demo_support.cpp
     )
-    target_sources(tdl_camera_detect_demo PRIVATE third_party/vendor/ini/ini.c)
     target_include_directories(tdl_camera_detect_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
     target_link_libraries(tdl_camera_detect_demo PRIVATE tdl_app_sdk)
 
@@ -275,7 +241,6 @@ if(TDL_APP_BUILD_DEMOS)
       apps/demo_support.cpp
       apps/camera_demo_support.cpp
     )
-    target_sources(tdl_camera_classify_demo PRIVATE third_party/vendor/ini/ini.c)
     target_include_directories(tdl_camera_classify_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
     target_link_libraries(tdl_camera_classify_demo PRIVATE tdl_app_sdk)
 
@@ -284,7 +249,6 @@ if(TDL_APP_BUILD_DEMOS)
       apps/demo_support.cpp
       apps/camera_demo_support.cpp
     )
-    target_sources(tdl_camera_feature_demo PRIVATE third_party/vendor/ini/ini.c)
     target_include_directories(tdl_camera_feature_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
     target_link_libraries(tdl_camera_feature_demo PRIVATE tdl_app_sdk)
   endif()
@@ -305,7 +269,6 @@ if(TDL_APP_BUILD_DEMOS)
     tdl_osd_demo
     tdl_graphic_vo_demo
     tdl_vpss_format_probe_demo
-    tdl_sensor_profile_probe_demo
     tdl_vdec_demo
     RUNTIME DESTINATION bin
   )
@@ -342,27 +305,3 @@ install(DIRECTORY include/
 install(DIRECTORY configs/
   DESTINATION configs
 )
-
-set(TDL_APP_CONFIG_INSTALL_FILES
-  "${CMAKE_CURRENT_LIST_DIR}/configs/sensor_cfg_cv2003.ini"
-  "${CMAKE_CURRENT_LIST_DIR}/configs/sensor_cfg_cv2003_switch_high_addr54_mclk1.ini"
-  "${CMAKE_CURRENT_LIST_DIR}/configs/sensor_cfg_cv2003_switch_high_addr54_mclk1_lane21.ini"
-  "${CMAKE_CURRENT_LIST_DIR}/configs/sensor_cfg_cv2003_switch_master_addr53_mclk1.ini"
-  "${CMAKE_CURRENT_LIST_DIR}/configs/sensor_cfg_gc2053.ini"
-  "${CMAKE_CURRENT_LIST_DIR}/configs/sensor_cfg_gc2053_1lane.ini"
-  "${CMAKE_CURRENT_LIST_DIR}/configs/sensor_cfg_gc2053_2lane.ini"
-)
-
-set(TDL_APP_CONFIG_INSTALL_EXISTING_FILES "")
-foreach(config_file IN LISTS TDL_APP_CONFIG_INSTALL_FILES)
-  if(EXISTS "${config_file}")
-    list(APPEND TDL_APP_CONFIG_INSTALL_EXISTING_FILES "${config_file}")
-  endif()
-endforeach()
-
-if(TDL_APP_CONFIG_INSTALL_EXISTING_FILES)
-  install(FILES ${TDL_APP_CONFIG_INSTALL_EXISTING_FILES}
-    DESTINATION configs
-  )
-endif()
-

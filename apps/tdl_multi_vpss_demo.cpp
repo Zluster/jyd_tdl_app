@@ -28,10 +28,7 @@ struct Options {
 void printUsage() {
   std::cout
       << "Usage:\n"
-      << "  tdl_multi_vpss_demo [--use-sensor-media] [--attach-existing]\n"
-      << "                      [--sensor-model NAME] [--sensor-profile FILE]\n"
-      << "                      [--sensor-ini FILE]\n"
-      << "                      [--device N] [--group N] [--pipe N] [--channel N]\n"
+      << "  tdl_multi_vpss_demo [--device N] [--group N] [--pipe N] [--channel N]\n"
       << "                      [--group0 N] [--channel0 N] [--width0 N] [--height0 N]\n"
       << "                      [--group1 N] [--channel1 N] [--width1 N] [--height1 N]\n"
       << "                      [--pixel-format N] [--timeout-ms N]\n"
@@ -155,31 +152,7 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  if (opt.camera.sensor_ini.empty() && opt.camera.sensor_model.empty() &&
-      opt.camera.sensor_profile.empty()) {
-    opt.camera.sensor_model = "cv2003";
-  }
-  opt.camera.use_sensor_media = true;
-  opt.camera.group = opt.group0;
-  opt.camera.channel = opt.channel0;
-  opt.camera.width = opt.width0;
-  opt.camera.height = opt.height0;
-  opt.camera.pixel_format = opt.pixel_format;
-  opt.camera.timeout_ms = opt.timeout_ms;
-  opt.camera.enable_preview_output = true;
-  opt.camera.preview_group = opt.group1;
-  opt.camera.preview_channel = opt.channel1;
-  opt.camera.preview_width = opt.width1;
-  opt.camera.preview_height = opt.height1;
-  opt.camera.preview_pixel_format = opt.pixel_format;
-
   std::string error;
-  camera_demo_support::CameraRuntime runtime;
-  if (!camera_demo_support::openCameraRuntime(opt.camera, &runtime, &error)) {
-    std::cerr << "camera runtime open failed: " << error << "\n";
-    return 2;
-  }
-
   const tdl_app::Camera::Config camera0 = makeVpssCameraConfig(
       opt.group0, opt.channel0, opt.width0, opt.height0, opt.pixel_format,
       opt.timeout_ms);
@@ -190,18 +163,15 @@ int main(int argc, char **argv) {
   if (!captureOne(camera0, opt.output0, &error)) {
     std::cerr << "capture group0 failed: " << error << "\n";
     camera_demo_support::dumpCameraDiagnostics();
-    camera_demo_support::closeCameraRuntime(&runtime);
-    return 3;
+    return 2;
   }
   if (!captureOne(camera1, opt.output1, &error)) {
     std::cerr << "capture group1 failed: " << error << "\n";
     camera_demo_support::dumpCameraDiagnostics();
-    camera_demo_support::closeCameraRuntime(&runtime);
-    return 4;
+    return 3;
   }
 
   std::cout << "saved: " << opt.output0 << "\n";
   std::cout << "saved: " << opt.output1 << "\n";
-  camera_demo_support::closeCameraRuntime(&runtime);
   return 0;
 }

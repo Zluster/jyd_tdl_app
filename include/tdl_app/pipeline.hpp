@@ -7,7 +7,6 @@
 #include "tdl_app/camera.hpp"
 #include "tdl_app/frame_sink.hpp"
 #include "tdl_app/mmf.hpp"
-#include "tdl_app/sensor_media.hpp"
 
 namespace tdl_app {
 
@@ -39,7 +38,6 @@ class Pipeline {
   void setFeatureExtractor(const FeatureExtractor &feature_extractor);
   void setPlateRecognizer(const PlateRecognizer &recognizer);
   void setMmf(const Mmf::Config &config);
-  void setSensorMedia(const SensorMedia::Config &config);
   void clearBootstrap();
   void setSink(std::unique_ptr<FrameSink> sink);
   void setNullSink();

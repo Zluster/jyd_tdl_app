@@ -16,22 +16,6 @@
 namespace camera_demo_support {
 namespace {
 
-std::string trim(const std::string &value) {
-  std::size_t begin = 0;
-  while (begin < value.size() &&
-         (value[begin] == ' ' || value[begin] == '\t' ||
-          value[begin] == '\r' || value[begin] == '\n')) {
-    ++begin;
-  }
-  std::size_t end = value.size();
-  while (end > begin &&
-         (value[end - 1] == ' ' || value[end - 1] == '\t' ||
-          value[end - 1] == '\r' || value[end - 1] == '\n')) {
-    --end;
-  }
-  return value.substr(begin, end - begin);
-}
-
 std::string toLower(std::string value) {
   for (char &ch : value) {
     if (ch >= 'A' && ch <= 'Z') {
@@ -174,38 +158,6 @@ bool parseCommonArgs(int argc, char **argv, int *index, CommonOptions *opt,
     const char *v = valueForArg(argc, argv, index, "--backend", error);
     if (!v) return false;
     opt->backend = v;
-  } else if (arg == "--use-mmf") {
-    opt->use_mmf = true;
-    opt->use_sensor_media = false;
-  } else if (arg == "--use-sensor-media") {
-    opt->use_sensor_media = true;
-    opt->use_mmf = false;
-  } else if (arg == "--use-ipcamera-helper") {
-    opt->use_sensor_media = true;
-    opt->use_mmf = false;
-    opt->use_ipcamera_helper = true;
-  } else if (arg == "--attach-existing") {
-    opt->attach_existing = true;
-  } else if (arg == "--sensor-ini") {
-    const char *v = valueForArg(argc, argv, index, "--sensor-ini", error);
-    if (!v) return false;
-    opt->sensor_ini = v;
-  } else if (arg == "--sensor-model") {
-    const char *v = valueForArg(argc, argv, index, "--sensor-model", error);
-    if (!v) return false;
-    opt->sensor_model = v;
-  } else if (arg == "--sensor-profile") {
-    const char *v = valueForArg(argc, argv, index, "--sensor-profile", error);
-    if (!v) return false;
-    opt->sensor_profile = v;
-  } else if (arg == "--ipcamera-bin") {
-    const char *v = valueForArg(argc, argv, index, "--ipcamera-bin", error);
-    if (!v) return false;
-    opt->ipcamera_binary = v;
-  } else if (arg == "--ipcamera-ini") {
-    const char *v = valueForArg(argc, argv, index, "--ipcamera-ini", error);
-    if (!v) return false;
-    opt->ipcamera_ini = v;
   } else if (arg == "--frames") {
     const char *v = valueForArg(argc, argv, index, "--frames", error);
     if (!v) return false;
@@ -251,99 +203,6 @@ bool parseCommonArgs(int argc, char **argv, int *index, CommonOptions *opt,
   }
 
   return true;
-}
-
-std::vector<tdl_app::SensorMedia::SensorProfile> supportedSensorProfiles() {
-  std::vector<tdl_app::SensorMedia::SensorProfile> profiles;
-  profiles.push_back(tdl_app::SensorMedia::cv2003Profile());
-  profiles.push_back(tdl_app::SensorMedia::cv2003OneLaneProfile());
-  profiles.push_back(tdl_app::SensorMedia::gc2053Profile());
-  profiles.push_back(tdl_app::SensorMedia::gc2053TwoLaneProfile());
-  profiles.push_back(tdl_app::SensorMedia::gc2053OneLaneProfile());
-  profiles.push_back(tdl_app::SensorMedia::gc2093Profile());
-  return profiles;
-}
-
-const char *sensorProfileForModel(const std::string &model) {
-  const std::string lower = toLower(model);
-  if (lower == "cv2003" || lower == "cv2003_2lane") {
-    return "sensor_cfg_cv2003.ini";
-  }
-  if (lower == "cv2003_1lane" || lower == "cv2003_1l") {
-    return "sensor_cfg_cv2003_1lane.ini";
-  }
-  if (lower == "gc2053") {
-    return "sensor_cfg_gc2053.ini";
-  }
-  if (lower == "gc2053_2lane") {
-    return "sensor_cfg_gc2053_2lane.ini";
-  }
-  if (lower == "gc2053_1lane" || lower == "gc2053_1l" ||
-      lower == "gc2053_slave") {
-    return "sensor_cfg_gc2053_1lane.ini";
-  }
-  if (lower == "gc2093") {
-    return "sensor_cfg_gc2093.ini";
-  }
-  return nullptr;
-}
-
-bool resolveSensorIni(CommonOptions *opt, std::string *error) {
-  if (!opt) {
-    if (error) {
-      *error = "resolveSensorIni received null options";
-    }
-    return false;
-  }
-
-  if (!opt->sensor_ini.empty()) {
-    return true;
-  }
-
-  if (opt->sensor_profile.empty() && !opt->sensor_model.empty()) {
-    const char *inferred = sensorProfileForModel(opt->sensor_model);
-    if (inferred != nullptr) {
-      opt->sensor_profile = inferred;
-    }
-  }
-
-  if (!opt->sensor_profile.empty()) {
-    opt->sensor_ini = opt->sensor_profile;
-    return true;
-  }
-
-  if (!opt->sensor_model.empty()) {
-    const char *profile = sensorProfileForModel(opt->sensor_model);
-    if (profile == nullptr) {
-      if (error) {
-        *error = "unknown sensor_model: " + opt->sensor_model;
-      }
-      return false;
-    }
-    opt->sensor_profile = profile;
-    opt->sensor_ini = opt->sensor_profile;
-    return true;
-  }
-
-  opt->sensor_model = "cv2003";
-  opt->sensor_profile = "sensor_cfg_cv2003.ini";
-  opt->sensor_ini = opt->sensor_profile;
-  if (error) {
-    error->clear();
-  }
-  return true;
-}
-
-std::string describeSensorSelection(const CommonOptions &opt) {
-  std::ostringstream oss;
-  oss << "sensor_ini=" << opt.sensor_ini;
-  if (!opt.sensor_model.empty()) {
-    oss << " sensor_model=" << opt.sensor_model;
-  }
-  if (!opt.sensor_profile.empty()) {
-    oss << " sensor_profile=" << opt.sensor_profile;
-  }
-  return oss.str();
 }
 
 tdl_app::Camera::Config makeCameraConfig(const CommonOptions &opt) {
@@ -395,106 +254,7 @@ bool openCameraRuntime(const CommonOptions &opt, CameraRuntime *runtime,
     return false;
   }
 
-  runtime->mmf.reset();
-  runtime->sensor_media.reset();
-
-  CommonOptions resolved = opt;
-
-  if (resolved.use_sensor_media) {
-    if (!resolveSensorIni(&resolved, error)) {
-      return false;
-    }
-
-    std::cerr << "camera runtime: " << describeSensorSelection(resolved) << "\n";
-    if (!resolved.sensor_model.empty() &&
-        (toLower(resolved.sensor_model) == "gc2053" ||
-         toLower(resolved.sensor_model) == "gc2053_2lane" ||
-         toLower(resolved.sensor_model) == "gc2053_1lane" ||
-         toLower(resolved.sensor_model) == "gc2053_1l" ||
-         toLower(resolved.sensor_model) == "gc2053_slave")) {
-      std::cerr
-          << "camera runtime: gc2053 selected; make sure libsns_gc2053.so is "
-             "built and packaged into the runtime image\n";
-    }
-
-    const bool use_vpss_backend = resolved.backend != "vi";
-    tdl_app::SensorMedia::Config sensor_config =
-        resolved.use_ipcamera_helper
-            ? tdl_app::SensorMedia::ipcameraHelper(
-                  resolved.sensor_ini, resolved.ipcamera_binary,
-                  resolved.ipcamera_ini, use_vpss_backend, resolved.device,
-                  resolved.pipe, resolved.channel, resolved.group,
-                  resolved.channel, resolved.width, resolved.height,
-                  resolved.pixel_format)
-            : (resolved.attach_existing
-                   ? tdl_app::SensorMedia::attachExisting(
-                         resolved.sensor_ini, use_vpss_backend,
-                         resolved.device, resolved.pipe, resolved.channel,
-                         resolved.group, resolved.channel, resolved.width,
-                         resolved.height, resolved.pixel_format)
-                   : tdl_app::SensorMedia::fullStackSensor(
-                         resolved.sensor_ini, use_vpss_backend,
-                         resolved.device, resolved.pipe, resolved.channel,
-                         resolved.group, resolved.channel, resolved.width,
-                         resolved.height, resolved.pixel_format));
-    if (resolved.enable_preview_output &&
-        resolved.preview_width > 0 &&
-        resolved.preview_height > 0) {
-      sensor_config.vpss_outputs.push_back(tdl_app::SensorMedia::vpssOutput(
-          resolved.preview_group, resolved.preview_channel,
-          resolved.preview_width, resolved.preview_height,
-          resolved.preview_pixel_format, false));
-    }
-    if (resolved.enable_pip_output &&
-        resolved.pip_width > 0 &&
-        resolved.pip_height > 0) {
-      sensor_config.vpss_outputs.push_back(tdl_app::SensorMedia::vpssOutput(
-          resolved.pip_group, resolved.pip_channel, resolved.pip_width,
-          resolved.pip_height, resolved.pip_pixel_format, false));
-    }
-    runtime->sensor_media.reset(new tdl_app::SensorMedia(sensor_config));
-    if (!runtime->sensor_media->open(error)) {
-      return false;
-    }
-
-    tdl_app::Camera::Config camera_config = makeCameraConfig(resolved);
-    if (!resolved.use_ipcamera_helper && !resolved.attach_existing &&
-        resolved.backend == "vi") {
-      std::cerr
-          << "camera runtime: sensor-media full-stack uses online VPSS; "
-             "reading frames from VPSS grp="
-          << resolved.group << " ch=" << resolved.channel << "\n";
-      camera_config =
-          tdl_app::Camera::vpss(resolved.group, resolved.channel,
-                                resolved.width, resolved.height,
-                                resolved.pixel_format, resolved.timeout_ms);
-      camera_config.device = resolved.device;
-    }
-    runtime->camera = tdl_app::Camera(camera_config);
-    return runtime->camera.open(error);
-  } else if (resolved.use_mmf) {
-    tdl_app::Mmf::Config mmf_config;
-    mmf_config.pool.width = resolved.width;
-    mmf_config.pool.height = resolved.height;
-    mmf_config.pool.pixel_format = resolved.pixel_format;
-    mmf_config.vpss.enable = true;
-    mmf_config.vpss.group = resolved.group;
-    mmf_config.vpss.channel = resolved.channel;
-    mmf_config.vpss.input_width = resolved.width;
-    mmf_config.vpss.input_height = resolved.height;
-    mmf_config.vpss.output_width = resolved.width;
-    mmf_config.vpss.output_height = resolved.height;
-    mmf_config.vpss.pixel_format = resolved.pixel_format;
-    mmf_config.bind =
-        tdl_app::Mmf::viToVpss(resolved.pipe, resolved.channel,
-                               resolved.group, resolved.channel);
-    runtime->mmf.reset(new tdl_app::Mmf(mmf_config));
-    if (!runtime->mmf->open(error)) {
-      return false;
-    }
-  }
-
-  runtime->camera = tdl_app::Camera(makeCameraConfig(resolved));
+  runtime->camera = tdl_app::Camera(makeCameraConfig(opt));
   return runtime->camera.open(error);
 }
 
@@ -503,19 +263,11 @@ void closeCameraRuntime(CameraRuntime *runtime) {
     return;
   }
   runtime->camera.close();
-  if (runtime->sensor_media) {
-    runtime->sensor_media->close();
-  }
-  if (runtime->mmf) {
-    runtime->mmf->close();
-  }
 }
 
 tdl_app::MediaChannel previewChannel(const CommonOptions &opt,
                                      const tdl_app::Camera::Config &camera_config) {
-  if (opt.enable_preview_output && opt.preview_width > 0 && opt.preview_height > 0) {
-    return tdl_app::MediaChannel::vpss(opt.preview_group, opt.preview_channel);
-  }
+  (void)opt;
   return camera_config.backend == tdl_app::Camera::Backend::Vi
              ? tdl_app::MediaChannel::vi(camera_config.pipe, camera_config.channel)
              : tdl_app::MediaChannel::vpss(camera_config.group, camera_config.channel);
@@ -679,7 +431,6 @@ void dumpCameraDiagnostics() {
 }
 
 }  // namespace camera_demo_support
-
 
 
 

@@ -19,7 +19,6 @@
 #include "tdl_app/mmf.hpp"
 #include "tdl_app/osd_region.hpp"
 #include "tdl_app/region_overlay.hpp"
-#include "tdl_app/sensor_media.hpp"
 #include "tdl_app/sys_context.hpp"
 #include "tdl_app/vdec_channel.hpp"
 #include "tdl_app/venc_channel.hpp"
