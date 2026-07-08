@@ -38,6 +38,8 @@ class PlateRecognizer {
   bool run(const std::string &image_path, const Box &roi,
            const InferOptions &options, AlgorithmResult *result,
            std::string *error = nullptr);
+  bool runFrame(const Frame &frame, const InferOptions &options,
+                AlgorithmResult *result, std::string *error = nullptr);
   bool recognize(const std::string &image_path, const InferOptions &options,
                  AlgorithmResult *result, std::string *error = nullptr);
   bool recognizeCrop(const std::string &image_path, const Box &roi,

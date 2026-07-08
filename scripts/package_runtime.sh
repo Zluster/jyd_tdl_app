@@ -62,7 +62,20 @@ cp -a "${RESOLVED_INSTALL_DIR}/bin/." "${RESOLVED_PKG_DIR}/bin/" 2>/dev/null || 
 cp -a "${RESOLVED_INSTALL_DIR}/lib/." "${RESOLVED_PKG_DIR}/lib/" 2>/dev/null || true
 cp -a "${RESOLVED_INSTALL_DIR}/configs/." "${RESOLVED_PKG_DIR}/configs/" 2>/dev/null || true
 cp -a "${THIRD_PARTY_DIR}/lib/." "${RESOLVED_PKG_DIR}/lib/"
-cp -a "${THIRD_PARTY_DIR}/models/." "${RESOLVED_PKG_DIR}/models/"
+# 复制 OpenCV 库（如果存在独立的 opencv 目录）
+if [ -d "${THIRD_PARTY_DIR}/opencv/lib" ]; then
+  cp -a "${THIRD_PARTY_DIR}/opencv/lib/." "${RESOLVED_PKG_DIR}/lib/"
+fi
+#cp -a "${THIRD_PARTY_DIR}/models/." "${RESOLVED_PKG_DIR}/models/"
+# 复制模型文件
+# MODELS_DIR="${PROJECT_ROOT}/third_party/cv184x/models"
+# if [ -d "${MODELS_DIR}" ]; then
+#   mkdir -p "${RESOLVED_PKG_DIR}/third_party/cv184x/models"
+#   cp -a "${MODELS_DIR}/." "${RESOLVED_PKG_DIR}/third_party/cv184x/models/"
+#   echo "Copied models from ${MODELS_DIR}"
+# else
+#   echo "Warning: Models directory not found: ${MODELS_DIR}" >&2
+# fi
 cp -a "${THIRD_PARTY_DIR}/firmware/." "${RESOLVED_PKG_DIR}/firmware/" 2>/dev/null || true
 cp -a "${PROJECT_ROOT}/assets/." "${RESOLVED_PKG_DIR}/assets/" 2>/dev/null || true
 
@@ -184,6 +197,15 @@ exec "${DIR}/bin/tdl_camera_detect_demo" "$@"
 EOF
 chmod +x "${RESOLVED_PKG_DIR}/run_camera_detect_demo.sh"
 
+cat > "${RESOLVED_PKG_DIR}/run_sophpi_ai_osd_demo.sh" <<'EOF'
+#!/bin/sh
+set -eu
+DIR=$(cd "$(dirname "$0")" && pwd)
+. "${DIR}/env.sh"
+exec "${DIR}/bin/sophpi_ai_osd_demo" "$@"
+EOF
+chmod +x "${RESOLVED_PKG_DIR}/run_sophpi_ai_osd_demo.sh"
+
 cat > "${RESOLVED_PKG_DIR}/run_camera_classify_demo.sh" <<'EOF'
 #!/bin/sh
 set -eu
@@ -246,6 +268,15 @@ DIR=$(cd "$(dirname "$0")" && pwd)
 exec "${DIR}/bin/tdl_pp_ocr_demo" "$@"
 EOF
 chmod +x "${RESOLVED_PKG_DIR}/run_pp_ocr_demo.sh"
+
+# 更新模型配置文件中的路径
+# for mud_file in "${RESOLVED_PKG_DIR}/configs/model_specs/"*.mud; do
+#   if [ -f "$mud_file" ]; then
+#     # 将 ../../models/ 替换为 ../../third_party/cv184x/models/
+#     sed -i 's|model = \.\./\.\./models/|model = ../../../third_party/cv184x/models/|g' "$mud_file"
+#   fi
+# done
+# echo "Updated model paths in .mud files"
 
 tar cf - -C "$(dirname "${RESOLVED_PKG_DIR}")" "$(basename "${RESOLVED_PKG_DIR}")" | gzip -9 > "${RESOLVED_PKG_DIR}.tar.gz"
 echo "TDL_APP_PROFILE=${TDL_APP_PROFILE}"

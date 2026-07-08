@@ -287,6 +287,14 @@ if(TDL_APP_BUILD_DEMOS)
     target_sources(tdl_camera_feature_demo PRIVATE third_party/vendor/ini/ini.c)
     target_include_directories(tdl_camera_feature_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
     target_link_libraries(tdl_camera_feature_demo PRIVATE tdl_app_sdk)
+
+    add_executable(sophpi_ai_osd_demo
+      apps/sophpi_ai_osd_demo.cpp
+      apps/camera_demo_support.cpp
+    )
+    target_sources(sophpi_ai_osd_demo PRIVATE third_party/vendor/ini/ini.c)
+    target_include_directories(sophpi_ai_osd_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
+    target_link_libraries(sophpi_ai_osd_demo PRIVATE tdl_app_sdk)
   endif()
 endif()
 
@@ -330,6 +338,7 @@ if(TDL_APP_BUILD_DEMOS)
       tdl_camera_detect_demo
       tdl_camera_classify_demo
       tdl_camera_feature_demo
+      sophpi_ai_osd_demo
       RUNTIME DESTINATION bin
     )
   endif()
