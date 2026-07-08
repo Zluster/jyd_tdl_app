@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <csignal>
 #include <cstdint>
@@ -22,6 +23,7 @@
 #include "cvi_sys.h"
 #include "tdl_app/media_link.hpp"
 #include "tdl_app/osd_region.hpp"
+#include "tdl_app/tdl_app.hpp"
 #include "tdl_app/vo_output.hpp"
 
 namespace {
@@ -49,6 +51,7 @@ struct Options {
   std::string model_spec;
   std::string firmware;
   float threshold = 0.25f;
+  int top_k = 5;
   std::string logo_path = "/root/logo.png";
   int vo_dev = 0;
   int layer = 0;
@@ -64,13 +67,103 @@ struct TerminalGuard {
   termios old_attr {};
 };
 
+// Which algorithm family a model-spec maps to. Drives both which algorithm
+// object is loaded and how its result is rendered onto the OSD overlay.
+enum class Family {
+  Detection,
+  Classification,
+  Keypoint,
+  InstanceSeg,
+  Ocr,
+};
+
+std::string toUpperCopy(std::string value) {
+  std::transform(value.begin(), value.end(), value.begin(),
+                 [](unsigned char c) {
+                   return static_cast<char>(std::toupper(c));
+                 });
+  return value;
+}
+
+const char *familyName(Family family) {
+  switch (family) {
+    case Family::Detection:
+      return "detection";
+    case Family::Classification:
+      return "classification";
+    case Family::Keypoint:
+      return "keypoint";
+    case Family::InstanceSeg:
+      return "instance-seg";
+    case Family::Ocr:
+      return "ocr";
+  }
+  return "detection";
+}
+
+// Prefer the model-spec's task field; fall back to model_type prefixes; default
+// to detection when nothing matches.
+Family detectFamily(const std::string &model_spec) {
+  tdl_app::ModelDescriptor descriptor;
+  std::string ignored_error;
+  if (!tdl_app::loadModelDescriptor(model_spec, &descriptor, &ignored_error)) {
+    return Family::Detection;
+  }
+
+  const std::string task = toUpperCopy(descriptor.task_name);
+  if (task == "CLASSIFY" || task == "CLASSIFICATION") {
+    return Family::Classification;
+  }
+  if (task == "KEYPOINT" || task == "LANDMARK") {
+    return Family::Keypoint;
+  }
+  if (task == "SEGMENTATION" || task == "INSTANCE_SEGMENTATION") {
+    return Family::InstanceSeg;
+  }
+  if (task == "OCR") {
+    return Family::Ocr;
+  }
+  if (task == "DETECT" || task == "DETECTION") {
+    return Family::Detection;
+  }
+
+  const std::string model_type = toUpperCopy(descriptor.model_type);
+  if (model_type.compare(0, 6, "PP_OCR") == 0 ||
+      model_type.compare(0, 6, "PLATE_") == 0 ||
+      model_type.compare(0, 3, "LPR") == 0) {
+    return Family::Ocr;
+  }
+  if (model_type.find("SEG") != std::string::npos) {
+    return Family::InstanceSeg;
+  }
+  if (model_type.compare(0, 8, "KEYPOINT") == 0 ||
+      model_type.find("POSE") != std::string::npos) {
+    return Family::Keypoint;
+  }
+  if (model_type.compare(0, 3, "CLS") == 0 ||
+      model_type.find("CLASSIFIER") != std::string::npos) {
+    return Family::Classification;
+  }
+  return Family::Detection;
+}
+
+// 17-keypoint COCO pose skeleton (used when a keypoint model returns 17 points).
+constexpr int kPose17Skeleton[][2] = {
+    {0, 1},  {0, 2},   {1, 3},   {2, 4},   {5, 6},   {5, 7},
+    {7, 9},  {6, 8},   {8, 10},  {5, 11},  {6, 12},  {11, 12},
+    {11, 13}, {13, 15}, {12, 14}, {14, 16}};
+
 void printUsage() {
   std::cout
       << "Usage:\n"
       << "  sophpi_ai_osd_demo --model-spec FILE\n"
       << "                     [--firmware FILE] [--threshold 0.25]\n"
+      << "                     [--top-k 5]\n"
       << "                     [--logo /root/logo.png]\n"
-      << "                     [--screen-width N] [--screen-height N]\n";
+      << "                     [--screen-width N] [--screen-height N]\n"
+      << "\n"
+      << "  Model family is auto-detected from the model-spec (task field):\n"
+      << "  detection / classification / keypoint / instance-seg / ocr.\n";
 }
 
 bool parseArgs(int argc, char **argv, Options *opt) {
@@ -105,6 +198,10 @@ bool parseArgs(int argc, char **argv, Options *opt) {
       const char *v = value("--threshold");
       if (!v) return false;
       opt->threshold = static_cast<float>(std::atof(v));
+    } else if (arg == "--top-k") {
+      const char *v = value("--top-k");
+      if (!v) return false;
+      opt->top_k = std::atoi(v);
     } else if (arg == "--logo") {
       const char *v = value("--logo");
       if (!v) return false;
@@ -236,90 +333,6 @@ cv::Mat loadLogoBgra(const std::string &path, int max_w, int max_h) {
   return bgra;
 }
 
-// Convert the ai-channel frame into a BGR cv::Mat so it can be drawn as the
-// top-left picture-in-picture "ai data source" preview.
-bool frameToBgr(const tdl_app::Frame &frame, cv::Mat *out, std::string *error) {
-  if (!out) {
-    if (error) *error = "output image is null";
-    return false;
-  }
-  if (!frame.native) {
-    if (error) *error = "frame has no native buffer";
-    return false;
-  }
-  auto *video = static_cast<VIDEO_FRAME_INFO_S *>(frame.native);
-  const auto &vf = video->stVFrame;
-  const int width = static_cast<int>(vf.u32Width);
-  const int height = static_cast<int>(vf.u32Height);
-  const int format = static_cast<int>(vf.enPixelFormat);
-  std::size_t map_size = 0;
-  for (int i = 0; i < 3; ++i) {
-    map_size += vf.u32Length[i];
-  }
-  if (width <= 0 || height <= 0 || map_size == 0) {
-    if (error) *error = "invalid ai frame";
-    return false;
-  }
-  auto *mapped =
-      static_cast<unsigned char *>(CVI_SYS_Mmap(vf.u64PhyAddr[0], map_size));
-  if (!mapped) {
-    if (error) *error = "CVI_SYS_Mmap failed";
-    return false;
-  }
-  CVI_SYS_IonInvalidateCache(vf.u64PhyAddr[0], mapped, map_size);
-
-  bool ok = true;
-  if (format == PIXEL_FORMAT_RGB_888_PLANAR ||
-      format == PIXEL_FORMAT_BGR_888_PLANAR) {
-    cv::Mat p0(height, width, CV_8UC1);
-    cv::Mat p1(height, width, CV_8UC1);
-    cv::Mat p2(height, width, CV_8UC1);
-    unsigned char *b0 = mapped;
-    unsigned char *b1 = mapped + vf.u32Length[0];
-    unsigned char *b2 = mapped + vf.u32Length[0] + vf.u32Length[1];
-    for (int y = 0; y < height; ++y) {
-      std::memcpy(p0.ptr(y), b0 + y * vf.u32Stride[0], width);
-      std::memcpy(p1.ptr(y), b1 + y * vf.u32Stride[1], width);
-      std::memcpy(p2.ptr(y), b2 + y * vf.u32Stride[2], width);
-    }
-    if (format == PIXEL_FORMAT_RGB_888_PLANAR) {
-      cv::merge(std::vector<cv::Mat>{p2, p1, p0}, *out);
-    } else {
-      cv::merge(std::vector<cv::Mat>{p0, p1, p2}, *out);
-    }
-  } else if (format == PIXEL_FORMAT_RGB_888 || format == PIXEL_FORMAT_BGR_888) {
-    cv::Mat packed(height, width, CV_8UC3, mapped,
-                   static_cast<std::size_t>(vf.u32Stride[0]));
-    if (format == PIXEL_FORMAT_RGB_888) {
-      cv::cvtColor(packed, *out, cv::COLOR_RGB2BGR);
-    } else {
-      packed.copyTo(*out);
-    }
-  } else if (format == PIXEL_FORMAT_NV12 || format == PIXEL_FORMAT_NV21) {
-    cv::Mat y_plane(height, width, CV_8UC1, mapped,
-                    static_cast<std::size_t>(vf.u32Stride[0]));
-    cv::Mat uv_plane(height / 2, width / 2, CV_8UC2, mapped + vf.u32Length[0],
-                     static_cast<std::size_t>(vf.u32Stride[1]));
-    const int code = format == PIXEL_FORMAT_NV21 ? cv::COLOR_YUV2BGR_NV21
-                                                 : cv::COLOR_YUV2BGR_NV12;
-    cv::cvtColorTwoPlane(y_plane, uv_plane, *out, code);
-  } else if (format == PIXEL_FORMAT_YUV_400) {
-    cv::Mat gray(height, width, CV_8UC1);
-    for (int y = 0; y < height; ++y) {
-      std::memcpy(gray.ptr(y), mapped + y * vf.u32Stride[0], width);
-    }
-    cv::cvtColor(gray, *out, cv::COLOR_GRAY2BGR);
-  } else {
-    ok = false;
-    if (error) {
-      *error = "unsupported ai frame format: " + std::to_string(format);
-    }
-  }
-
-  CVI_SYS_Munmap(mapped, map_size);
-  return ok && !out->empty();
-}
-
 void putLabel(cv::Mat &img, const std::string &text, cv::Point org,
               double scale, const cv::Scalar &color) {
   cv::putText(img, text, org, cv::FONT_HERSHEY_SIMPLEX, scale,
@@ -335,62 +348,40 @@ std::string labelFor(const std::vector<std::string> &labels, int class_id) {
   return std::to_string(class_id);
 }
 
-// Compose the whole overlay directly in the OSD canvas's native landscape
-// orientation (same as the live VPSS channel, before VO). VO already applies
-// a hardware rotation (CVI_VO_SetChnRotation) to this channel's whole
-// composited output (video + attached OSD region), so there is no need to
-// pre-rotate the overlay in software: the hardware rotation handles both the
-// live video and this overlay together.
-void renderOverlay(cv::Mat *overlay, const Options & /*opt*/,
-                   const std::vector<tdl_app::Box> &boxes,
-                   const std::vector<std::string> &labels, int frame_w,
-                   int frame_h, const cv::Mat &logo, const cv::Mat &ai_image,
-                   double fps) {
+cv::Scalar paletteColor(int index) {
+  static const cv::Scalar kPalette[] = {
+      cv::Scalar(56, 56, 255, 255),   cv::Scalar(151, 157, 255, 255),
+      cv::Scalar(31, 112, 255, 255),  cv::Scalar(29, 178, 255, 255),
+      cv::Scalar(49, 210, 207, 255),  cv::Scalar(10, 249, 72, 255),
+      cv::Scalar(23, 204, 146, 255),  cv::Scalar(134, 219, 61, 255),
+      cv::Scalar(52, 147, 26, 255),   cv::Scalar(187, 212, 0, 255),
+      cv::Scalar(168, 153, 44, 255),  cv::Scalar(255, 194, 0, 255),
+      cv::Scalar(147, 69, 52, 255),   cv::Scalar(255, 115, 100, 255),
+      cv::Scalar(236, 24, 0, 255),    cv::Scalar(255, 56, 132, 255),
+      cv::Scalar(133, 0, 82, 255),    cv::Scalar(255, 56, 203, 255)};
+  const int count = static_cast<int>(sizeof(kPalette) / sizeof(kPalette[0]));
+  return kPalette[((index % count) + count) % count];
+}
+
+// Create a fresh transparent overlay in the OSD canvas's native landscape
+// orientation. VO applies a hardware rotation to the whole composited output
+// (video + attached OSD region), so no software pre-rotation is needed here.
+void beginOverlay(cv::Mat *overlay) {
   const int cw = tdl_app::DualOsLayout::kLiveWidth;   // 1280
   const int ch = tdl_app::DualOsLayout::kLiveHeight;  // 720
   overlay->create(ch, cw, CV_8UC4);
   overlay->setTo(cv::Scalar(0, 0, 0, 0));
+}
 
-  const cv::Scalar green(0, 255, 0, 255);
+// Logo (bottom-right, alpha-aware), screen-edge borders and the merged
+// capture+infer+render FPS. Shared by every family after its own drawing.
+void finishOverlay(cv::Mat *overlay, const cv::Mat &logo, double fps) {
+  const int cw = tdl_app::DualOsLayout::kLiveWidth;
+  const int ch = tdl_app::DualOsLayout::kLiveHeight;
   const cv::Scalar blue(255, 0, 0, 255);
   const cv::Scalar red(0, 0, 255, 255);
   const cv::Scalar white(255, 255, 255, 255);
 
-  const double scale_x =
-      static_cast<double>(cw) / std::max(1, frame_w);
-  const double scale_y =
-      static_cast<double>(ch) / std::max(1, frame_h);
-
-  // Detection boxes + class + confidence.
-  // Commented out for a performance test (perf: how much does box/text
-  // drawing cost per frame).
-  for (const auto &box : boxes) {
-    const float lx1 = static_cast<float>(box.x1 * scale_x);
-    const float ly1 = static_cast<float>(box.y1 * scale_y);
-    const float lx2 = static_cast<float>(box.x2 * scale_x);
-    const float ly2 = static_cast<float>(box.y2 * scale_y);
-    cv::Point p1(static_cast<int>(std::min(lx1, lx2)),
-                 static_cast<int>(std::min(ly1, ly2)));
-    cv::Point p2(static_cast<int>(std::max(lx1, lx2)),
-                 static_cast<int>(std::max(ly1, ly2)));
-    cv::rectangle(*overlay, p1, p2, green, 2, cv::LINE_AA);
-  
-    const std::string text =
-        labelFor(labels, box.class_id) + " " + cv::format("%.2f", box.score);
-    int baseline = 0;
-    const cv::Size ts =
-        cv::getTextSize(text, cv::FONT_HERSHEY_SIMPLEX, 0.5, 1, &baseline);
-    const int top = std::max(0, p1.y - ts.height - 6);
-    cv::rectangle(*overlay, cv::Point(p1.x, top),
-                  cv::Point(p1.x + ts.width + 6, top + ts.height + baseline + 6),
-                  green, cv::FILLED);
-    cv::putText(*overlay, text, cv::Point(p1.x + 3, top + ts.height + 1),
-                cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0, 255), 1,
-                cv::LINE_AA);
-  }
-
-  // Logo bottom-right (respects its own alpha), drawn before borders so the
-  // border stays visible over the logo edge.
   if (!logo.empty()) {
     const int margin = 20;
     const int lw = std::min(logo.cols, cw - 2 * margin);
@@ -407,33 +398,174 @@ void renderOverlay(cv::Mat *overlay, const Options & /*opt*/,
     }
   }
 
-  // Screen-edge borders: thick blue first, thin red on top of it.
   const cv::Rect frame_rect(4, 4, cw - 8, ch - 8);
   cv::rectangle(*overlay, frame_rect, blue, 8);
   cv::rectangle(*overlay, frame_rect, red, 2);
 
-  // Top-left: the ai data source itself, drawn as a small preview, plus a
-  // label. No rotation needed here either: VO rotates this whole overlay
-  // together with the video, so the thumbnail is drawn as-is.
-  const int margin = 24;
-  int text_y = margin + 24;
-  // if (!ai_image.empty()) {
-  //   const int side = ch / 3;
-  //   cv::Mat thumb;
-  //   cv::resize(ai_image, thumb, cv::Size(side, side), 0, 0, cv::INTER_AREA);
-  //   cv::Mat thumb_bgra;
-  //   cv::cvtColor(thumb, thumb_bgra, cv::COLOR_BGR2BGRA);
-  //   const cv::Rect roi(margin, margin, side, side);
-  //   thumb_bgra.copyTo((*overlay)(roi));
-  //   cv::rectangle(*overlay, roi, green, 2);
-  //   putLabel(*overlay, "AI SRC", cv::Point(margin + 4, margin + side + 22), 0.6,
-  //            white);
-  //   text_y = margin + side + 52;
-  // }
+  putLabel(*overlay, "FPS: " + cv::format("%.1f", fps), cv::Point(24, 48), 0.6,
+           white);
+}
 
-  // Frame rate of the merged capture+infer+render loop.
-  putLabel(*overlay, "FPS: " + cv::format("%.1f", fps),
-           cv::Point(margin, text_y), 0.6, white);
+// Detection: boxes + class label + confidence.
+void drawDetection(cv::Mat *overlay, const std::vector<tdl_app::Box> &boxes,
+                   const std::vector<std::string> &labels, double scale_x,
+                   double scale_y) {
+  const cv::Scalar green(0, 255, 0, 255);
+  for (const auto &box : boxes) {
+    const float lx1 = static_cast<float>(box.x1 * scale_x);
+    const float ly1 = static_cast<float>(box.y1 * scale_y);
+    const float lx2 = static_cast<float>(box.x2 * scale_x);
+    const float ly2 = static_cast<float>(box.y2 * scale_y);
+    cv::Point p1(static_cast<int>(std::min(lx1, lx2)),
+                 static_cast<int>(std::min(ly1, ly2)));
+    cv::Point p2(static_cast<int>(std::max(lx1, lx2)),
+                 static_cast<int>(std::max(ly1, ly2)));
+    cv::rectangle(*overlay, p1, p2, green, 2, cv::LINE_AA);
+
+    const std::string text =
+        labelFor(labels, box.class_id) + " " + cv::format("%.2f", box.score);
+    int baseline = 0;
+    const cv::Size ts =
+        cv::getTextSize(text, cv::FONT_HERSHEY_SIMPLEX, 0.5, 1, &baseline);
+    const int top = std::max(0, p1.y - ts.height - 6);
+    cv::rectangle(*overlay, cv::Point(p1.x, top),
+                  cv::Point(p1.x + ts.width + 6, top + ts.height + baseline + 6),
+                  green, cv::FILLED);
+    cv::putText(*overlay, text, cv::Point(p1.x + 3, top + ts.height + 1),
+                cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0, 255), 1,
+                cv::LINE_AA);
+  }
+}
+
+// Classification: a top-k text panel in the top-left corner.
+void drawClassification(cv::Mat *overlay, const tdl_app::AlgorithmResult &result,
+                        int top_k) {
+  const cv::Scalar white(255, 255, 255, 255);
+  const cv::Scalar yellow(0, 255, 255, 255);
+  const int limit = std::min(static_cast<int>(result.classes.size()),
+                             std::max(1, top_k));
+  int y = 90;
+  for (int i = 0; i < limit; ++i) {
+    const auto &item = result.classes[i];
+    const std::string name = labelFor(result.labels, item.class_id);
+    const std::string text = cv::format("%d. %s  %.1f%%", i + 1, name.c_str(),
+                                        item.score * 100.0f);
+    putLabel(*overlay, text, cv::Point(24, y), 0.7, i == 0 ? yellow : white);
+    y += 34;
+  }
+}
+
+// Keypoint / pose: points + skeleton (skeleton drawn when 17 points present).
+void drawKeypoint(cv::Mat *overlay, const tdl_app::KeypointResult &result,
+                  double scale_x, double scale_y) {
+  const cv::Scalar skeleton(0, 255, 255, 255);
+  auto mapped = [&](const tdl_app::Point &pt) {
+    return cv::Point(static_cast<int>(pt.x * scale_x),
+                     static_cast<int>(pt.y * scale_y));
+  };
+
+  if (result.pointCount() == 17) {
+    for (const auto &edge : kPose17Skeleton) {
+      const auto &a = result.points[edge[0]];
+      const auto &b = result.points[edge[1]];
+      if (a.score <= 0.05f || b.score <= 0.05f) {
+        continue;
+      }
+      cv::line(*overlay, mapped(a), mapped(b), skeleton, 2, cv::LINE_AA);
+    }
+  }
+
+  for (std::size_t i = 0; i < result.points.size(); ++i) {
+    const auto &pt = result.points[i];
+    const cv::Scalar color = pt.score > 0.5f ? cv::Scalar(0, 0, 255, 255)
+                                             : cv::Scalar(255, 0, 0, 255);
+    cv::circle(*overlay, mapped(pt), 4, color, cv::FILLED, cv::LINE_AA);
+  }
+}
+
+// Instance segmentation: box + polygon outline per instance. Per-pixel mask
+// blending is too costly for the live loop, so it is only drawn when
+// TDL_APP_SEG_DEBUG is set.
+void drawInstanceSeg(cv::Mat *overlay,
+                     const tdl_app::InstanceSegmentationResult &result,
+                     double scale_x, double scale_y, bool draw_mask) {
+  for (std::size_t i = 0; i < result.instances.size(); ++i) {
+    const auto &instance = result.instances[i];
+    const cv::Scalar color = paletteColor(
+        instance.box.class_id >= 0 ? instance.box.class_id
+                                   : static_cast<int>(i));
+
+    if (draw_mask && !instance.outline.empty()) {
+      std::vector<cv::Point> poly;
+      poly.reserve(instance.outline.size());
+      for (const auto &pt : instance.outline) {
+        poly.emplace_back(static_cast<int>(pt.x * scale_x),
+                          static_cast<int>(pt.y * scale_y));
+      }
+      const std::vector<std::vector<cv::Point>> polys{poly};
+      cv::fillPoly(*overlay, polys, color, cv::LINE_AA);
+    }
+
+    if (!instance.outline.empty()) {
+      std::vector<cv::Point> poly;
+      poly.reserve(instance.outline.size());
+      for (const auto &pt : instance.outline) {
+        poly.emplace_back(static_cast<int>(pt.x * scale_x),
+                          static_cast<int>(pt.y * scale_y));
+      }
+      const std::vector<std::vector<cv::Point>> polys{poly};
+      cv::polylines(*overlay, polys, true, color, 2, cv::LINE_AA);
+    }
+
+    cv::Point p1(static_cast<int>(instance.box.x1 * scale_x),
+                 static_cast<int>(instance.box.y1 * scale_y));
+    cv::Point p2(static_cast<int>(instance.box.x2 * scale_x),
+                 static_cast<int>(instance.box.y2 * scale_y));
+    cv::rectangle(*overlay, p1, p2, color, 2, cv::LINE_AA);
+
+    const std::string text = std::to_string(instance.box.class_id) + " " +
+                             cv::format("%.2f", instance.box.score);
+    int baseline = 0;
+    const cv::Size ts =
+        cv::getTextSize(text, cv::FONT_HERSHEY_SIMPLEX, 0.5, 1, &baseline);
+    const int top = std::max(0, p1.y - ts.height - 6);
+    cv::rectangle(*overlay, cv::Point(p1.x, top),
+                  cv::Point(p1.x + ts.width + 6, top + ts.height + baseline + 6),
+                  color, cv::FILLED);
+    cv::putText(*overlay, text, cv::Point(p1.x + 3, top + ts.height + 1),
+                cv::FONT_HERSHEY_SIMPLEX, 0.5, cv::Scalar(0, 0, 0, 255), 1,
+                cv::LINE_AA);
+  }
+}
+
+// OCR: detected text boxes plus the recognized string above each box. The
+// per-box text is carried in result.attributes as "ocr_text:<text>".
+void drawOcr(cv::Mat *overlay, const tdl_app::AlgorithmResult &result,
+             double scale_x, double scale_y) {
+  const cv::Scalar green(0, 255, 0, 255);
+  const cv::Scalar white(255, 255, 255, 255);
+  const std::string prefix = "ocr_text:";
+  for (std::size_t i = 0; i < result.boxes.size(); ++i) {
+    const auto &box = result.boxes[i];
+    cv::Point p1(static_cast<int>(box.x1 * scale_x),
+                 static_cast<int>(box.y1 * scale_y));
+    cv::Point p2(static_cast<int>(box.x2 * scale_x),
+                 static_cast<int>(box.y2 * scale_y));
+    cv::rectangle(*overlay, p1, p2, green, 2, cv::LINE_AA);
+
+    std::string text;
+    if (i < result.attributes.size() &&
+        result.attributes[i].name.compare(0, prefix.size(), prefix) == 0) {
+      text = result.attributes[i].name.substr(prefix.size());
+    }
+    if (!text.empty()) {
+      putLabel(*overlay, text, cv::Point(p1.x, std::max(20, p1.y - 6)), 0.6,
+               white);
+    }
+  }
+  if (result.boxes.empty() && !result.text.empty()) {
+    putLabel(*overlay, result.text, cv::Point(24, 90), 0.7, white);
+  }
 }
 
 // No software rotation here: the overlay is already composed in the canvas's
@@ -493,16 +625,43 @@ int main(int argc, char **argv) {
     return 2;
   }
 
-  tdl_app::Detector::Config det_config;
-  det_config.model_spec = opt.model_spec;
-  det_config.firmware = opt.firmware;
-  tdl_app::Detector detector(det_config, &error);
-  if (!detector.initialized()) {
-    std::cerr << "detector load failed: " << error << "\n";
+  const Family family = detectFamily(opt.model_spec);
+  std::cerr << "model family=" << familyName(family) << "\n";
+
+  const tdl_app::ModelSessionConfig session_config =
+      tdl_app::ModelSessionConfig::fromSpec(opt.model_spec, opt.firmware);
+
+  tdl_app::Detector detector;
+  tdl_app::Classifier classifier;
+  tdl_app::KeypointDetector keypoint;
+  tdl_app::InstanceSegmenter segmenter;
+  tdl_app::PlateRecognizer plate;
+
+  bool load_ok = false;
+  switch (family) {
+    case Family::Detection:
+      load_ok = detector.load(session_config, &error);
+      break;
+    case Family::Classification:
+      load_ok = classifier.load(session_config, &error);
+      break;
+    case Family::Keypoint:
+      load_ok = keypoint.load(session_config, &error);
+      break;
+    case Family::InstanceSeg:
+      load_ok = segmenter.load(session_config, &error);
+      break;
+    case Family::Ocr:
+      load_ok = plate.load(session_config, &error);
+      break;
+  }
+  if (!load_ok) {
+    std::cerr << "model load failed: " << error << "\n";
     camera_demo_support::closeCameraRuntime(&runtime);
     return 3;
   }
-  std::cerr << "detector loaded model_type=" << detector.modelType() << "\n";
+
+  const bool seg_draw_mask = std::getenv("TDL_APP_SEG_DEBUG") != nullptr;
 
   tdl_app::VoOutput vo(makeVoConfig(opt));
   if (!vo.open(&error)) {
@@ -567,15 +726,20 @@ int main(int argc, char **argv) {
 
   tdl_app::InferOptions infer_options;
   infer_options.threshold = opt.threshold;
+  infer_options.top_k = opt.top_k;
+
+  const int cw = tdl_app::DualOsLayout::kLiveWidth;
+  const int ch = tdl_app::DualOsLayout::kLiveHeight;
 
   bool visible = false;
   cv::Mat overlay;
   double fps = 0.0;
   auto last = std::chrono::steady_clock::now();
 
-  // Single loop: read the ai-channel frame, run detection, render the OSD
-  // overlay straight from the result, and push it to the canvas. No separate
-  // inference thread; the OSD refresh rate is simply the detector throughput.
+  // Single loop: read the ai-channel frame, run the family's inference, render
+  // the OSD overlay straight from the result, and push it to the canvas. No
+  // separate inference thread; the OSD refresh rate is simply the model
+  // throughput (capture + inference + render, all in one loop).
   while (g_running.load()) {
     tdl_app::Frame frame;
     if (!runtime.camera.read(&frame, &error)) {
@@ -587,23 +751,38 @@ int main(int argc, char **argv) {
     if (!video) {
       continue;
     }
-    tdl_app::AlgorithmResult result;
-    const auto detect_start = std::chrono::steady_clock::now();
-    const bool detect_ok = detector(*video, infer_options, &result, &error);
-    const double detect_ms =
-        std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - detect_start)
-            .count();
-    std::cerr << "detect took " << cv::format("%.2f", detect_ms) << " ms\n";
-    if (!detect_ok) {
-      std::cerr << "detector run failed: " << error << "\n";
-      continue;
-    }
 
-    cv::Mat ai_bgr;
-    std::string convert_error;
-    if (!frameToBgr(frame, &ai_bgr, &convert_error)) {
-      ai_bgr.release();
+    tdl_app::AlgorithmResult result;
+    tdl_app::KeypointResult kp_result;
+    tdl_app::InstanceSegmentationResult seg_result;
+
+    const auto infer_start = std::chrono::steady_clock::now();
+    bool infer_ok = false;
+    switch (family) {
+      case Family::Detection:
+        infer_ok = detector.run(*video, infer_options, &result, &error);
+        break;
+      case Family::Classification:
+        infer_ok = classifier.runFrame(frame, infer_options, &result, &error);
+        break;
+      case Family::Keypoint:
+        infer_ok = keypoint.runFrame(frame, &kp_result, &error);
+        break;
+      case Family::InstanceSeg:
+        infer_ok = segmenter.runFrame(frame, &seg_result, &error);
+        break;
+      case Family::Ocr:
+        infer_ok = plate.runFrame(frame, infer_options, &result, &error);
+        break;
+    }
+    const double infer_ms =
+        std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - infer_start)
+            .count();
+    std::cerr << "infer took " << cv::format("%.2f", infer_ms) << " ms\n";
+    if (!infer_ok) {
+      std::cerr << "inference failed: " << error << "\n";
+      continue;
     }
 
     const auto now = std::chrono::steady_clock::now();
@@ -614,10 +793,28 @@ int main(int argc, char **argv) {
       fps = fps <= 0.0 ? inst : fps * 0.8 + inst * 0.2;
     }
 
-    renderOverlay(&overlay, opt, result.boxes, result.labels, frame.width,
-                  frame.height, logo, cv::Mat(), fps);
-    // renderOverlay(&overlay, opt, result.boxes, result.labels, frame.width,
-    //                 frame.height, logo, ai_bgr, fps);
+    const double scale_x = static_cast<double>(cw) / std::max(1, frame.width);
+    const double scale_y = static_cast<double>(ch) / std::max(1, frame.height);
+    beginOverlay(&overlay);
+    switch (family) {
+      case Family::Detection:
+        drawDetection(&overlay, result.boxes, result.labels, scale_x, scale_y);
+        break;
+      case Family::Classification:
+        drawClassification(&overlay, result, opt.top_k);
+        break;
+      case Family::Keypoint:
+        drawKeypoint(&overlay, kp_result, scale_x, scale_y);
+        break;
+      case Family::InstanceSeg:
+        drawInstanceSeg(&overlay, seg_result, scale_x, scale_y, seg_draw_mask);
+        break;
+      case Family::Ocr:
+        drawOcr(&overlay, result, scale_x, scale_y);
+        break;
+    }
+    finishOverlay(&overlay, logo, fps);
+
     if (!pushToCanvas(&region, overlay, &visible, &error)) {
       std::cerr << "osd push failed: " << error << "\n";
     }

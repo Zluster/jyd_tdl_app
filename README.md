@@ -51,6 +51,7 @@ jyd_tdl_app/
 
 ```sh
 cd /home/jyd/zwz/sophpi/jyd_tdl_app
+ssh-keygen -f '/home/aixtr/.ssh/known_hosts' -R '10.0.1.1'
 export TDL_APP_PROFILE=dual_os
 export TDL_APP_THIRD_PARTY_DIR=/home/aixtr/jyd/jyd_tdl_app/third_party/cv184x/dual_os
 export TOOLCHAIN_ROOT=/home/aixtr/jyd/sophpi/host-tools/gcc/arm-gnu-toolchain-11.3.rel1-x86_64-arm-none-linux-musleabihf

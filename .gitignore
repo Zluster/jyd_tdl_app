@@ -22,3 +22,4 @@ tdl_yolov5_demo.cpp
 tdl_yolov8_demo.cpp
 firmware
 third_party/cv184x/dual_os/
+.vscode/
