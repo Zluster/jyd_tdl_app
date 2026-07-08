@@ -14,7 +14,6 @@ build_native/
 install_native/
 package_native/
 .git_backup_from_tdl_app_sdk_*/
-third_party/cv184x/models/
 third_party/cv184x/opencv/
 configs/model_tool
 ALGORITHMS.md
