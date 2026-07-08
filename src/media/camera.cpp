@@ -200,6 +200,12 @@ bool Camera::read(Frame *frame, std::string *error) {
   return source_->read(frame, error);
 }
 
+void Camera::releaseFrame() {
+  if (source_) {
+    source_->releaseFrame();
+  }
+}
+
 bool Camera::readInfo(CameraFrameInfo *info, std::string *error) {
   if (!info) {
     setError(error, "camera frame info is null");
@@ -364,5 +370,4 @@ std::unique_ptr<FrameSource> Camera::createSource() const {
 }
 
 }  // namespace tdl_app
-
 

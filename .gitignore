@@ -9,7 +9,6 @@ host-tools/
 *.log
 validation_out/
 compile_commands.json
-models/
 firmware/
 build_native/
 install_native/
@@ -22,6 +21,5 @@ ALGORITHMS.md
 tdl_mmf_vpss_probe_demo.cpp
 tdl_yolov5_demo.cpp
 tdl_yolov8_demo.cpp
-models
 firmware
 third_party/cv184x/dual_os/

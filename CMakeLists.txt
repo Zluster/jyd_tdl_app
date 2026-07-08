@@ -8,6 +8,7 @@ set(CMAKE_SKIP_RPATH ON)
 
 option(TDL_APP_BUILD_DEMOS "Build command line demo applications" ON)
 option(TDL_APP_MEDIA_MINIMAL "Build only media/audio targets and skip algorithm sources/demos" OFF)
+option(TDL_APP_BUILD_MMF_MINIMAL "Build standalone C MMF API wrapper" ON)
 set(TDL_APP_PROFILE "dual_os" CACHE STRING "Build profile")
 
 if(NOT TDL_APP_PROFILE STREQUAL "dual_os")
@@ -107,6 +108,10 @@ target_link_libraries(tdl_app_sdk
     ${TDL_CV184X_LIBS}
     tdl_app_ini_compat
 )
+
+if(TDL_APP_BUILD_MMF_MINIMAL)
+  add_subdirectory(jyd_tdl_mmf_minimal)
+endif()
 
 if(TDL_APP_BUILD_DEMOS)
   add_executable(tdl_audio_aio_demo apps/tdl_audio_aio_demo.cpp)

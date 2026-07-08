@@ -73,6 +73,8 @@ bool ImageFileSource::read(Frame *frame, std::string *error) {
   return true;
 }
 
+void ImageFileSource::releaseFrame() {}
+
 void ImageFileSource::close() { consumed_ = true; }
 
 class CameraSource::Impl {
@@ -124,6 +126,8 @@ class CameraSource::Impl {
     return true;
   }
 
+  void releaseFrame() { releaseCurrentFrame(); }
+
   void close() { releaseCurrentFrame(); }
 
  private:
@@ -157,6 +161,8 @@ bool CameraSource::open(std::string *error) { return impl_->open(error); }
 bool CameraSource::read(Frame *frame, std::string *error) {
   return impl_->read(frame, error);
 }
+
+void CameraSource::releaseFrame() { impl_->releaseFrame(); }
 
 void CameraSource::close() { impl_->close(); }
 

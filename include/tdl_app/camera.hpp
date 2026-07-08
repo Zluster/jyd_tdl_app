@@ -44,6 +44,7 @@ class Camera {
   bool open(std::string *error = nullptr);
   bool open(CameraSourceId source, std::string *error = nullptr);
   bool read(Frame *frame, std::string *error = nullptr);
+  void releaseFrame();
   bool readInfo(CameraFrameInfo *info, std::string *error = nullptr);
   bool snapshot(const std::string &path, std::string *error = nullptr);
   bool dumpFrame(const std::string &path, CameraFrameInfo *info = nullptr,
@@ -126,4 +127,3 @@ class Camera {
 };
 
 }  // namespace tdl_app
-

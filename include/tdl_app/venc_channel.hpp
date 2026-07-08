@@ -25,6 +25,7 @@ class VencChannel {
     int dst_fps = 25;
     int bitrate_kbps = 1024;
     int gop = 25;
+    int qfactor = 80;
   };
 
   static Config h264(int channel = 0, int width = 1920, int height = 1080,
@@ -53,10 +54,11 @@ class VencChannel {
 
   static Config mjpeg(int channel = 0, int width = 1920, int height = 1080,
                       int bitrate_kbps = 4096, int src_fps = 25,
-                      int dst_fps = 25) {
+                      int dst_fps = 25, int qfactor = 80) {
     Config config = h264(channel, width, height, bitrate_kbps, src_fps,
                          dst_fps, 1);
     config.codec = Codec::Mjpeg;
+    config.qfactor = qfactor;
     return config;
   }
 
