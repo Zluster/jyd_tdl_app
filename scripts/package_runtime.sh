@@ -270,13 +270,13 @@ EOF
 chmod +x "${RESOLVED_PKG_DIR}/run_pp_ocr_demo.sh"
 
 # 更新模型配置文件中的路径
-# for mud_file in "${RESOLVED_PKG_DIR}/configs/model_specs/"*.mud; do
-#   if [ -f "$mud_file" ]; then
-#     # 将 ../../models/ 替换为 ../../third_party/cv184x/models/
-#     sed -i 's|model = \.\./\.\./models/|model = ../../../third_party/cv184x/models/|g' "$mud_file"
-#   fi
-# done
-# echo "Updated model paths in .mud files"
+for mud_file in "${RESOLVED_PKG_DIR}/configs/model_specs/"*.mud; do
+  if [ -f "$mud_file" ]; then
+    # 将 ../../models/ 替换为 ../../third_party/cv184x/models/
+    sed -i 's|model = \.\./\.\./models/|model = ../../../third_party/cv184x/models/|g' "$mud_file"
+  fi
+done
+echo "Updated model paths in .mud files"
 
 tar cf - -C "$(dirname "${RESOLVED_PKG_DIR}")" "$(basename "${RESOLVED_PKG_DIR}")" | gzip -9 > "${RESOLVED_PKG_DIR}.tar.gz"
 echo "TDL_APP_PROFILE=${TDL_APP_PROFILE}"

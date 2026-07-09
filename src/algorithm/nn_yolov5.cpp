@@ -24,6 +24,8 @@
 #include "cvi_comm_video.h"
 #include "cvi_sys.h"
 
+#include "algorithm/private/frame_convert.hpp"
+
 namespace tdl_app {
 namespace {
 
@@ -61,135 +63,6 @@ std::string toUpper(std::string value) {
 bool startsWith(const std::string &value, const std::string &prefix) {
   return value.size() >= prefix.size() &&
          value.compare(0, prefix.size(), prefix) == 0;
-}
-
-bool copyPackedRgbToBgr(const VIDEO_FRAME_S &vf, unsigned char *mapped,
-                        int width, int height, bool input_is_bgr,
-                        cv::Mat *image) {
-  cv::Mat output(height, width, CV_8UC3);
-  for (int y = 0; y < height; ++y) {
-    const unsigned char *src = mapped + y * vf.u32Stride[0];
-    unsigned char *dst = output.ptr<unsigned char>(y);
-    if (input_is_bgr) {
-      std::memcpy(dst, src, static_cast<size_t>(width) * 3);
-    } else {
-      for (int x = 0; x < width; ++x) {
-        dst[x * 3 + 0] = src[x * 3 + 2];
-        dst[x * 3 + 1] = src[x * 3 + 1];
-        dst[x * 3 + 2] = src[x * 3 + 0];
-      }
-    }
-  }
-  *image = std::move(output);
-  return true;
-}
-
-bool copyPlanarRgbToBgr(const VIDEO_FRAME_S &vf, unsigned char *mapped,
-                        int width, int height, bool input_is_bgr,
-                        cv::Mat *image) {
-  const unsigned char *plane0 = mapped;
-  const unsigned char *plane1 = mapped + vf.u32Length[0];
-  const unsigned char *plane2 = plane1 + vf.u32Length[1];
-  cv::Mat output(height, width, CV_8UC3);
-  for (int y = 0; y < height; ++y) {
-    const unsigned char *src0 = plane0 + y * vf.u32Stride[0];
-    const unsigned char *src1 = plane1 + y * vf.u32Stride[1];
-    const unsigned char *src2 = plane2 + y * vf.u32Stride[2];
-    cv::Vec3b *dst = output.ptr<cv::Vec3b>(y);
-    for (int x = 0; x < width; ++x) {
-      if (input_is_bgr) {
-        dst[x] = cv::Vec3b(src0[x], src1[x], src2[x]);
-      } else {
-        dst[x] = cv::Vec3b(src2[x], src1[x], src0[x]);
-      }
-    }
-  }
-  *image = std::move(output);
-  return true;
-}
-
-bool videoFrameToBgrMat(const VIDEO_FRAME_INFO_S &video_frame, cv::Mat *image,
-                        std::string *error) {
-  if (!image) {
-    setError(error, "output image pointer is null");
-    return false;
-  }
-  const auto &vf = video_frame.stVFrame;
-  const int width = static_cast<int>(vf.u32Width);
-  const int height = static_cast<int>(vf.u32Height);
-  const int format = static_cast<int>(vf.enPixelFormat);
-  if (width <= 0 || height <= 0) {
-    setError(error, "invalid frame size");
-    return false;
-  }
-
-  std::size_t map_size = 0;
-  for (int i = 0; i < 3; ++i) {
-    map_size += vf.u32Length[i];
-  }
-  if (map_size == 0) {
-    setError(error, "frame buffer length is zero");
-    return false;
-  }
-
-  auto *mapped =
-      static_cast<unsigned char *>(CVI_SYS_Mmap(vf.u64PhyAddr[0], map_size));
-  if (!mapped) {
-    setError(error, "CVI_SYS_Mmap failed");
-    return false;
-  }
-  CVI_SYS_IonInvalidateCache(vf.u64PhyAddr[0], mapped, map_size);
-
-  bool ok = true;
-  if (format == PIXEL_FORMAT_BGR_888) {
-    ok = copyPackedRgbToBgr(vf, mapped, width, height, true, image);
-  } else if (format == PIXEL_FORMAT_RGB_888) {
-    ok = copyPackedRgbToBgr(vf, mapped, width, height, false, image);
-  } else if (format == PIXEL_FORMAT_BGR_888_PLANAR) {
-    ok = copyPlanarRgbToBgr(vf, mapped, width, height, true, image);
-  } else if (format == PIXEL_FORMAT_RGB_888_PLANAR) {
-    ok = copyPlanarRgbToBgr(vf, mapped, width, height, false, image);
-  } else if (format == PIXEL_FORMAT_YUV_400) {
-    cv::Mat gray(height, width, CV_8UC1);
-    for (int y = 0; y < height; ++y) {
-      std::memcpy(gray.ptr(y), mapped + y * vf.u32Stride[0], width);
-    }
-    cv::cvtColor(gray, *image, cv::COLOR_GRAY2BGR);
-  } else if (format == PIXEL_FORMAT_NV12 || format == PIXEL_FORMAT_NV21) {
-    cv::Mat yuv(height + height / 2, width, CV_8UC1);
-    unsigned char *y_base = mapped;
-    unsigned char *uv_base = mapped + vf.u32Length[0];
-    for (int y = 0; y < height; ++y) {
-      std::memcpy(yuv.ptr(y), y_base + y * vf.u32Stride[0], width);
-    }
-    for (int y = 0; y < height / 2; ++y) {
-      std::memcpy(yuv.ptr(height + y), uv_base + y * vf.u32Stride[1], width);
-    }
-    const int code = format == PIXEL_FORMAT_NV21
-                         ? cv::COLOR_YUV2BGR_NV21
-                         : cv::COLOR_YUV2BGR_NV12;
-    cv::cvtColor(yuv, *image, code);
-  } else {
-    ok = false;
-    setError(error,
-             "custom YOLOv5 runtime only supports RGB/BGR/NV12/NV21/YUV400 frame input");
-  }
-
-  CVI_SYS_Munmap(mapped, map_size);
-  if (!ok || image->empty()) {
-    setError(error, "failed to convert frame to BGR image");
-    return false;
-  }
-  return true;
-}
-
-bool frameToBgrMat(const Frame &frame, cv::Mat *image, std::string *error) {
-  if (!frame.native) {
-    setError(error, "frame has no native VIDEO_FRAME_INFO_S buffer");
-    return false;
-  }
-  auto *video = static_cast<VIDEO_FRAME_INFO_S *>(frame.native);
-  return videoFrameToBgrMat(*video, image, error);
 }
 
 float sigmoid(float value) {
@@ -945,7 +818,7 @@ bool NnYolov5::predictFrame(const Frame &frame, const InferOptions &options,
     return custom_runtime_->inferImage(frame.image_path, options, result, error);
   }
   cv::Mat image;
-  if (!frameToBgrMat(frame, &image, error)) {
+  if (!frame_convert::frameToBgrMat(frame, &image, error)) {
     return false;
   }
   return custom_runtime_->inferMat(image, options, result, error);

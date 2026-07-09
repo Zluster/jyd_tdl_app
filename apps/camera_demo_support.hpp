@@ -2,6 +2,9 @@
 
 #include <cstdlib>
 #include <string>
+
+#include <opencv2/core.hpp>
+
 #include "tdl_app/advanced.hpp"
 
 namespace camera_demo_support {
@@ -38,6 +41,11 @@ tdl_app::MediaChannel previewChannel(const CommonOptions &opt,
                                      const tdl_app::Camera::Config &camera_config);
 
 std::string frameOutputPath(const std::string &output, int index);
+// Maps the frame's native VIDEO_FRAME_INFO_S buffer and converts it to a BGR
+// cv::Mat. Supports NV21/NV12/YUV400/RGB888/BGR888/RGB888_PLANAR/BGR888_PLANAR,
+// the same set saveFrameAsImage() supports (it is built on top of this).
+bool frameToBgrMat(const tdl_app::Frame &frame, cv::Mat *out_bgr,
+                   std::string *error = nullptr);
 bool saveFrameAsImage(const tdl_app::Frame &frame, const std::string &output_path,
                       std::string *error = nullptr);
 void dumpCameraDiagnostics();

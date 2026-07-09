@@ -19,6 +19,10 @@
 
 #include "bmlib_runtime.h"
 #include "bmruntime_interface.h"
+#include "cvi_comm_video.h"
+#include "cvi_sys.h"
+
+#include "algorithm/private/frame_convert.hpp"
 
 namespace tdl_app {
 namespace {
@@ -213,6 +217,16 @@ class NnClassifier::CustomRuntime {
 
   bool inferImage(const std::string &image_path, const InferOptions &options,
                   AlgorithmResult *result, std::string *error) {
+    cv::Mat image = cv::imread(image_path, cv::IMREAD_COLOR);
+    if (image.empty()) {
+      setError(error, "failed to read image: " + image_path);
+      return false;
+    }
+    return inferMat(image, options, result, error);
+  }
+
+  bool inferMat(const cv::Mat &image, const InferOptions &options,
+                AlgorithmResult *result, std::string *error) {
     if (!opened_) {
       setError(error, "classifier runtime is not initialized");
       return false;
@@ -221,10 +235,8 @@ class NnClassifier::CustomRuntime {
       setError(error, "result pointer is null");
       return false;
     }
-
-    cv::Mat image = cv::imread(image_path, cv::IMREAD_COLOR);
     if (image.empty()) {
-      setError(error, "failed to read image: " + image_path);
+      setError(error, "input image is empty");
       return false;
     }
 
@@ -537,11 +549,15 @@ bool NnClassifier::predictFrame(const Frame &frame, const InferOptions &options,
     setError(error, "model is not initialized");
     return false;
   }
-  if (frame.image_path.empty()) {
-    setError(error, "classifier runtime currently supports image_path only");
+  if (!frame.image_path.empty()) {
+    return custom_runtime_->inferImage(frame.image_path, options, result,
+                                       error);
+  }
+  cv::Mat image;
+  if (!frame_convert::frameToBgrMat(frame, &image, error)) {
     return false;
   }
-  return custom_runtime_->inferImage(frame.image_path, options, result, error);
+  return custom_runtime_->inferMat(image, options, result, error);
 }
 
 }  // namespace tdl_app

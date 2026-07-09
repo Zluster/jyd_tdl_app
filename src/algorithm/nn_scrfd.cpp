@@ -11,6 +11,7 @@
 #include <opencv2/imgproc.hpp>
 
 #include "algorithm/private/bmrt_utils.hpp"
+#include "algorithm/private/frame_convert.hpp"
 
 namespace tdl_app {
 namespace {
@@ -90,14 +91,18 @@ class NnScrfd::CustomRuntime {
 
   bool inferImage(const std::string &image_path, const InferOptions &options,
                   AlgorithmResult *result, std::string *error) {
-    if (!result) {
-      bmrt_runtime::setError(error, "result pointer is null");
-      return false;
-    }
-
     cv::Mat image = cv::imread(image_path, cv::IMREAD_COLOR);
     if (image.empty()) {
       bmrt_runtime::setError(error, "failed to read image: " + image_path);
+      return false;
+    }
+    return inferMat(image, options, result, error);
+  }
+
+  bool inferMat(const cv::Mat &image, const InferOptions &options,
+                AlgorithmResult *result, std::string *error) {
+    if (!result) {
+      bmrt_runtime::setError(error, "result pointer is null");
       return false;
     }
 
@@ -350,11 +355,15 @@ bool NnScrfd::predictFrame(const Frame &frame, const InferOptions &options,
     bmrt_runtime::setError(error, "model is not initialized");
     return false;
   }
-  if (frame.image_path.empty()) {
-    bmrt_runtime::setError(error, "SCRFD runtime currently supports image_path only");
+  if (!frame.image_path.empty()) {
+    return custom_runtime_->inferImage(frame.image_path, options, result,
+                                       error);
+  }
+  cv::Mat image;
+  if (!frame_convert::frameToBgrMat(frame, &image, error)) {
     return false;
   }
-  return custom_runtime_->inferImage(frame.image_path, options, result, error);
+  return custom_runtime_->inferMat(image, options, result, error);
 }
 
 }  // namespace tdl_app

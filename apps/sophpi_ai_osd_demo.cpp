@@ -12,6 +12,11 @@
 #include <thread>
 #include <vector>
 
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <ifaddrs.h>
+#include <netinet/in.h>
+#include <sys/stat.h>
 #include <termios.h>
 #include <unistd.h>
 
@@ -21,9 +26,12 @@
 #include "camera_demo_support.hpp"
 #include "cvi_comm_video.h"
 #include "cvi_sys.h"
+#include "mjpeg_server.hpp"
+#include "tdl_app/audio.hpp"
 #include "tdl_app/media_link.hpp"
 #include "tdl_app/osd_region.hpp"
 #include "tdl_app/tdl_app.hpp"
+#include "tdl_app/venc_channel.hpp"
 #include "tdl_app/vo_output.hpp"
 
 namespace {
@@ -60,6 +68,8 @@ struct Options {
   int screen_height = 1280;
   int interface_type = tdl_app::VoInterfaceType::Mipi;
   int interface_sync = tdl_app::VoInterfaceSync::P720_1280_60;
+  int stream_port = 8080;
+  std::string control_pipe = "/tmp/sophpi_ai_osd.ctrl";
 };
 
 struct TerminalGuard {
@@ -161,9 +171,23 @@ void printUsage() {
       << "                     [--top-k 5]\n"
       << "                     [--logo /root/logo.png]\n"
       << "                     [--screen-width N] [--screen-height N]\n"
+      << "                     [--stream-port 8080]\n"
+      << "                     [--control-pipe /tmp/sophpi_ai_osd.ctrl]\n"
       << "\n"
       << "  Model family is auto-detected from the model-spec (task field):\n"
-      << "  detection / classification / keypoint / instance-seg / ocr.\n";
+      << "  detection / classification / keypoint / instance-seg / ocr.\n"
+      << "\n"
+      << "Runtime keys:\n"
+      << "  m  enter a new model-spec path to switch model on the fly\n"
+      << "  t  toggle the MJPEG http stream (default off)\n"
+      << "  a  toggle mic->speaker audio loopback (default off)\n"
+      << "  q  quit\n"
+      << "\n"
+      << "Control pipe (same commands, for scripting / background runs):\n"
+      << "  echo t > /tmp/sophpi_ai_osd.ctrl\n"
+      << "  echo a > /tmp/sophpi_ai_osd.ctrl\n"
+      << "  echo \"m /path/to/model.mud\" > /tmp/sophpi_ai_osd.ctrl\n"
+      << "  echo q > /tmp/sophpi_ai_osd.ctrl\n";
 }
 
 bool parseArgs(int argc, char **argv, Options *opt) {
@@ -214,6 +238,14 @@ bool parseArgs(int argc, char **argv, Options *opt) {
       const char *v = value("--screen-height");
       if (!v) return false;
       opt->screen_height = std::atoi(v);
+    } else if (arg == "--stream-port") {
+      const char *v = value("--stream-port");
+      if (!v) return false;
+      opt->stream_port = std::atoi(v);
+    } else if (arg == "--control-pipe") {
+      const char *v = value("--control-pipe");
+      if (!v) return false;
+      opt->control_pipe = v;
     } else if (arg == "-h" || arg == "--help") {
       printUsage();
       std::exit(0);
@@ -258,6 +290,328 @@ int readKey() {
   const int n = static_cast<int>(::read(STDIN_FILENO, &ch, 1));
   return n == 1 ? static_cast<int>(ch) : -1;
 }
+
+std::string trimCopy(const std::string &value) {
+  const auto begin = value.find_first_not_of(" \t\r\n");
+  if (begin == std::string::npos) {
+    return std::string();
+  }
+  const auto end = value.find_last_not_of(" \t\r\n");
+  return value.substr(begin, end - begin + 1);
+}
+
+// Non-loopback IPv4 addresses of the board, used to print reachable stream
+// URLs when the MJPEG server is switched on.
+std::vector<std::string> listIpv4Addresses() {
+  std::vector<std::string> result;
+  ifaddrs *ifaces = nullptr;
+  if (getifaddrs(&ifaces) != 0) {
+    return result;
+  }
+  for (const ifaddrs *iface = ifaces; iface; iface = iface->ifa_next) {
+    if (!iface->ifa_addr || iface->ifa_addr->sa_family != AF_INET) {
+      continue;
+    }
+    const auto *addr = reinterpret_cast<const sockaddr_in *>(iface->ifa_addr);
+    char text[INET_ADDRSTRLEN] = {0};
+    if (!inet_ntop(AF_INET, &addr->sin_addr, text, sizeof(text))) {
+      continue;
+    }
+    if (std::strcmp(text, "127.0.0.1") == 0) {
+      continue;
+    }
+    result.push_back(text);
+  }
+  freeifaddrs(ifaces);
+  return result;
+}
+
+// All algorithm objects in one place; only the object matching the active
+// family holds a loaded model at any given time.
+struct AlgorithmSet {
+  tdl_app::Detector detector;
+  tdl_app::Classifier classifier;
+  tdl_app::KeypointDetector keypoint;
+  tdl_app::InstanceSegmenter segmenter;
+  tdl_app::PlateRecognizer plate;
+
+  bool load(Family family, const tdl_app::ModelSessionConfig &config,
+            std::string *error) {
+    switch (family) {
+      case Family::Detection:
+        return detector.load(config, error);
+      case Family::Classification:
+        return classifier.load(config, error);
+      case Family::Keypoint:
+        return keypoint.load(config, error);
+      case Family::InstanceSeg:
+        return segmenter.load(config, error);
+      case Family::Ocr:
+        return plate.load(config, error);
+    }
+    return false;
+  }
+
+  void reset(Family family) {
+    switch (family) {
+      case Family::Detection:
+        detector.reset();
+        break;
+      case Family::Classification:
+        classifier.reset();
+        break;
+      case Family::Keypoint:
+        keypoint.reset();
+        break;
+      case Family::InstanceSeg:
+        segmenter.reset();
+        break;
+      case Family::Ocr:
+        plate.reset();
+        break;
+    }
+  }
+};
+
+// Background model loader. The switch policy is unload-first: the caller
+// resets the old model on the main thread, then start() loads the new spec on
+// a worker thread while the main loop keeps the live view and OSD running.
+// The worker only touches the (currently unloaded) target algorithm object,
+// and the main loop skips inference until take() reports the result, so no
+// extra locking is needed.
+class ModelLoader {
+ public:
+  ~ModelLoader() { join(); }
+
+  void start(AlgorithmSet *algorithms, Family family,
+             const tdl_app::ModelSessionConfig &config) {
+    join();
+    done_.store(false);
+    active_ = true;
+    family_ = family;
+    spec_ = config.model_spec;
+    worker_ = std::thread([this, algorithms, family, config]() {
+      success_ = algorithms->load(family, config, &error_);
+      done_.store(true);
+    });
+  }
+
+  bool active() const { return active_; }
+  bool finished() const { return active_ && done_.load(); }
+  Family family() const { return family_; }
+  const std::string &spec() const { return spec_; }
+
+  // Call once finished() is true; joins the worker and reports the result.
+  bool take(std::string *error) {
+    join();
+    active_ = false;
+    if (!success_ && error) {
+      *error = error_;
+    }
+    return success_;
+  }
+
+  void join() {
+    if (worker_.joinable()) {
+      worker_.join();
+    }
+  }
+
+ private:
+  std::thread worker_;
+  std::atomic<bool> done_{false};
+  bool active_ = false;
+  bool success_ = false;
+  std::string error_;
+  Family family_ = Family::Detection;
+  std::string spec_;
+};
+
+// Minimal line editor for typing a model-spec path while the terminal is in
+// raw mode (characters are echoed manually).
+struct CommandInput {
+  bool active = false;
+  std::string buffer;
+
+  void begin() {
+    active = true;
+    buffer.clear();
+    std::cout << "\nmodel-spec> " << std::flush;
+  }
+
+  // Returns true when a full line was submitted (stored in *line).
+  bool feed(int key, std::string *line) {
+    if (key == '\r' || key == '\n') {
+      std::cout << "\n" << std::flush;
+      *line = buffer;
+      active = false;
+      buffer.clear();
+      return true;
+    }
+    if (key == 27) {  // ESC cancels
+      active = false;
+      buffer.clear();
+      std::cout << " (cancelled)\n" << std::flush;
+      return false;
+    }
+    if (key == 127 || key == 8) {  // backspace
+      if (!buffer.empty()) {
+        buffer.pop_back();
+        std::cout << "\b \b" << std::flush;
+      }
+      return false;
+    }
+    if (key >= 32 && key < 127) {
+      buffer.push_back(static_cast<char>(key));
+      std::cout << static_cast<char>(key) << std::flush;
+    }
+    return false;
+  }
+};
+
+// Line-oriented control FIFO so the demo can also be driven from scripts or
+// while running in the background: `echo t > /tmp/sophpi_ai_osd.ctrl`.
+// Commands mirror the interactive keys: t / a / q / "m <model-spec-path>".
+class ControlPipe {
+ public:
+  ~ControlPipe() { close(); }
+
+  bool open(const std::string &path, std::string *error) {
+    struct stat st;
+    if (::stat(path.c_str(), &st) == 0) {
+      if (!S_ISFIFO(st.st_mode)) {
+        if (error) {
+          *error = "control pipe path exists and is not a FIFO: " + path;
+        }
+        return false;
+      }
+    } else if (::mkfifo(path.c_str(), 0666) != 0) {
+      if (error) {
+        *error = "mkfifo failed: " + path;
+      }
+      return false;
+    }
+    // O_RDWR keeps this process registered as a writer, so read() reports
+    // EAGAIN instead of a permanent EOF whenever external writers disconnect.
+    fd_ = ::open(path.c_str(), O_RDWR | O_NONBLOCK);
+    if (fd_ < 0) {
+      if (error) {
+        *error = "failed to open control pipe: " + path;
+      }
+      return false;
+    }
+    return true;
+  }
+
+  void close() {
+    if (fd_ >= 0) {
+      ::close(fd_);
+      fd_ = -1;
+    }
+  }
+
+  // Appends every complete (newline-terminated) command line to *lines.
+  void readLines(std::vector<std::string> *lines) {
+    if (fd_ < 0) {
+      return;
+    }
+    char buf[256];
+    while (true) {
+      const ssize_t n = ::read(fd_, buf, sizeof(buf));
+      if (n <= 0) {
+        break;
+      }
+      pending_.append(buf, static_cast<std::size_t>(n));
+    }
+    std::size_t pos;
+    while ((pos = pending_.find('\n')) != std::string::npos) {
+      lines->push_back(pending_.substr(0, pos));
+      pending_.erase(0, pos + 1);
+    }
+  }
+
+ private:
+  int fd_ = -1;
+  std::string pending_;
+};
+
+// Mic -> speaker audio loopback (same as `tdl_audio_stream_demo --mode
+// loopback`, but toggleable instead of fixed-duration). A worker thread pumps
+// PCM chunks from the input stream straight to the output stream; the SDK's
+// blocking Audio::loopback(seconds) cannot be stopped midway, so the pump is
+// built from the standalone stream APIs instead.
+class AudioLoopback {
+ public:
+  ~AudioLoopback() { stop(); }
+
+  bool start(std::string *error) {
+    if (opened_) {
+      return true;
+    }
+    const tdl_app::AudioInputStreamConfig config;  // SDK defaults: 16k/1ch/16bit
+    if (!audio_.openInputStream(config, error)) {
+      return false;
+    }
+    if (!audio_.openOutputStream(config.io, error)) {
+      audio_.closeInputStream();
+      return false;
+    }
+    opened_ = true;
+    stop_requested_.store(false);
+    running_.store(true);
+    worker_ = std::thread([this]() { pump(); });
+    return true;
+  }
+
+  void stop() {
+    stop_requested_.store(true);
+    if (worker_.joinable()) {
+      worker_.join();
+    }
+    if (opened_) {
+      audio_.closeInputStream();
+      audio_.closeOutputStream();
+      opened_ = false;
+    }
+    running_.store(false);
+  }
+
+  bool running() const { return running_.load(); }
+
+  // Called from the main loop: if the pump thread died on its own (device
+  // errors), finish the teardown so the next toggle starts from a clean state.
+  void poll() {
+    if (opened_ && !running_.load()) {
+      stop();
+      std::cout << "audio loopback stopped\n";
+    }
+  }
+
+ private:
+  void pump() {
+    std::string error;
+    int fail_count = 0;
+    while (!stop_requested_.load()) {
+      tdl_app::AudioPcmChunk chunk;
+      if (!audio_.readInputChunk(&chunk, &error) ||
+          !audio_.writeOutputChunk(chunk, &error)) {
+        if (++fail_count >= 5) {
+          std::cerr << "audio loopback failed: " << error << "\n";
+          break;
+        }
+        continue;
+      }
+      fail_count = 0;
+    }
+    running_.store(false);
+  }
+
+  tdl_app::Audio audio_;
+  std::thread worker_;
+  std::atomic<bool> stop_requested_{false};
+  std::atomic<bool> running_{false};
+  bool opened_ = false;
+};
 
 tdl_app::VoOutput::Config makeVoConfig(const Options &opt) {
   tdl_app::VoOutput::Config config;
@@ -406,16 +760,73 @@ void finishOverlay(cv::Mat *overlay, const cv::Mat &logo, double fps) {
            white);
 }
 
+// AI-channel preview (picture-in-picture): the raw 640x640 frame fed to the
+// detector, shown as a small opaque thumbnail in the top-left corner so the
+// operator can see exactly what the model is looking at, independent of the
+// live background channel. Drawn before the family-specific overlay so
+// detection boxes / classification text still render on top of it.
+void drawAiPreview(cv::Mat *overlay, const tdl_app::Frame &frame) {
+  cv::Mat bgr;
+  std::string error;
+  if (!camera_demo_support::frameToBgrMat(frame, &bgr, &error)) {
+    return;
+  }
+  cv::Mat bgra;
+  cv::cvtColor(bgr, bgra, cv::COLOR_BGR2BGRA);
+
+  const int ch = tdl_app::DualOsLayout::kLiveHeight;
+  const int side = ch / 4;
+  cv::resize(bgra, bgra, cv::Size(side, side), 0, 0, cv::INTER_AREA);
+
+  const int margin = 20;
+  const cv::Rect roi(margin, margin, side, side);
+  bgra.copyTo((*overlay)(roi));
+  cv::rectangle(*overlay, roi, cv::Scalar(255, 255, 255, 255), 2, cv::LINE_AA);
+}
+
+// Maps model-result coordinates (in the ai frame, including its letterbox
+// black bars) onto the live/OSD canvas. The ai channel is produced by VPSS
+// ASPECT_RATIO_AUTO: the live picture is fit into the ai frame with black
+// padding, so mapping must subtract the padding offset before scaling.
+struct CoordMap {
+  double scale_x = 1.0;
+  double scale_y = 1.0;
+  double offset_x = 0.0;
+  double offset_y = 0.0;
+
+  double mapX(double x) const { return (x - offset_x) * scale_x; }
+  double mapY(double y) const { return (y - offset_y) * scale_y; }
+  cv::Point map(double x, double y) const {
+    return cv::Point(static_cast<int>(mapX(x)), static_cast<int>(mapY(y)));
+  }
+};
+
+CoordMap makeAiToLiveMap(int frame_w, int frame_h, int live_w, int live_h) {
+  CoordMap map;
+  frame_w = std::max(1, frame_w);
+  frame_h = std::max(1, frame_h);
+  // Content rect: the live-aspect picture fit inside the ai frame, centered.
+  const double fit = std::min(static_cast<double>(frame_w) / live_w,
+                              static_cast<double>(frame_h) / live_h);
+  const double content_w = live_w * fit;
+  const double content_h = live_h * fit;
+  map.offset_x = (frame_w - content_w) / 2.0;
+  map.offset_y = (frame_h - content_h) / 2.0;
+  map.scale_x = live_w / content_w;
+  map.scale_y = live_h / content_h;
+  return map;
+}
+
 // Detection: boxes + class label + confidence.
 void drawDetection(cv::Mat *overlay, const std::vector<tdl_app::Box> &boxes,
-                   const std::vector<std::string> &labels, double scale_x,
-                   double scale_y) {
+                   const std::vector<std::string> &labels,
+                   const CoordMap &map) {
   const cv::Scalar green(0, 255, 0, 255);
   for (const auto &box : boxes) {
-    const float lx1 = static_cast<float>(box.x1 * scale_x);
-    const float ly1 = static_cast<float>(box.y1 * scale_y);
-    const float lx2 = static_cast<float>(box.x2 * scale_x);
-    const float ly2 = static_cast<float>(box.y2 * scale_y);
+    const float lx1 = static_cast<float>(map.mapX(box.x1));
+    const float ly1 = static_cast<float>(map.mapY(box.y1));
+    const float lx2 = static_cast<float>(map.mapX(box.x2));
+    const float ly2 = static_cast<float>(map.mapY(box.y2));
     cv::Point p1(static_cast<int>(std::min(lx1, lx2)),
                  static_cast<int>(std::min(ly1, ly2)));
     cv::Point p2(static_cast<int>(std::max(lx1, lx2)),
@@ -457,12 +868,9 @@ void drawClassification(cv::Mat *overlay, const tdl_app::AlgorithmResult &result
 
 // Keypoint / pose: points + skeleton (skeleton drawn when 17 points present).
 void drawKeypoint(cv::Mat *overlay, const tdl_app::KeypointResult &result,
-                  double scale_x, double scale_y) {
+                  const CoordMap &map) {
   const cv::Scalar skeleton(0, 255, 255, 255);
-  auto mapped = [&](const tdl_app::Point &pt) {
-    return cv::Point(static_cast<int>(pt.x * scale_x),
-                     static_cast<int>(pt.y * scale_y));
-  };
+  auto mapped = [&](const tdl_app::Point &pt) { return map.map(pt.x, pt.y); };
 
   if (result.pointCount() == 17) {
     for (const auto &edge : kPose17Skeleton) {
@@ -488,7 +896,7 @@ void drawKeypoint(cv::Mat *overlay, const tdl_app::KeypointResult &result,
 // TDL_APP_SEG_DEBUG is set.
 void drawInstanceSeg(cv::Mat *overlay,
                      const tdl_app::InstanceSegmentationResult &result,
-                     double scale_x, double scale_y, bool draw_mask) {
+                     const CoordMap &map, bool draw_mask) {
   for (std::size_t i = 0; i < result.instances.size(); ++i) {
     const auto &instance = result.instances[i];
     const cv::Scalar color = paletteColor(
@@ -499,8 +907,7 @@ void drawInstanceSeg(cv::Mat *overlay,
       std::vector<cv::Point> poly;
       poly.reserve(instance.outline.size());
       for (const auto &pt : instance.outline) {
-        poly.emplace_back(static_cast<int>(pt.x * scale_x),
-                          static_cast<int>(pt.y * scale_y));
+        poly.push_back(map.map(pt.x, pt.y));
       }
       const std::vector<std::vector<cv::Point>> polys{poly};
       cv::fillPoly(*overlay, polys, color, cv::LINE_AA);
@@ -510,17 +917,14 @@ void drawInstanceSeg(cv::Mat *overlay,
       std::vector<cv::Point> poly;
       poly.reserve(instance.outline.size());
       for (const auto &pt : instance.outline) {
-        poly.emplace_back(static_cast<int>(pt.x * scale_x),
-                          static_cast<int>(pt.y * scale_y));
+        poly.push_back(map.map(pt.x, pt.y));
       }
       const std::vector<std::vector<cv::Point>> polys{poly};
       cv::polylines(*overlay, polys, true, color, 2, cv::LINE_AA);
     }
 
-    cv::Point p1(static_cast<int>(instance.box.x1 * scale_x),
-                 static_cast<int>(instance.box.y1 * scale_y));
-    cv::Point p2(static_cast<int>(instance.box.x2 * scale_x),
-                 static_cast<int>(instance.box.y2 * scale_y));
+    cv::Point p1 = map.map(instance.box.x1, instance.box.y1);
+    cv::Point p2 = map.map(instance.box.x2, instance.box.y2);
     cv::rectangle(*overlay, p1, p2, color, 2, cv::LINE_AA);
 
     const std::string text = std::to_string(instance.box.class_id) + " " +
@@ -541,16 +945,14 @@ void drawInstanceSeg(cv::Mat *overlay,
 // OCR: detected text boxes plus the recognized string above each box. The
 // per-box text is carried in result.attributes as "ocr_text:<text>".
 void drawOcr(cv::Mat *overlay, const tdl_app::AlgorithmResult &result,
-             double scale_x, double scale_y) {
+             const CoordMap &map) {
   const cv::Scalar green(0, 255, 0, 255);
   const cv::Scalar white(255, 255, 255, 255);
   const std::string prefix = "ocr_text:";
   for (std::size_t i = 0; i < result.boxes.size(); ++i) {
     const auto &box = result.boxes[i];
-    cv::Point p1(static_cast<int>(box.x1 * scale_x),
-                 static_cast<int>(box.y1 * scale_y));
-    cv::Point p2(static_cast<int>(box.x2 * scale_x),
-                 static_cast<int>(box.y2 * scale_y));
+    cv::Point p1 = map.map(box.x1, box.y1);
+    cv::Point p2 = map.map(box.x2, box.y2);
     cv::rectangle(*overlay, p1, p2, green, 2, cv::LINE_AA);
 
     std::string text;
@@ -625,41 +1027,21 @@ int main(int argc, char **argv) {
     return 2;
   }
 
-  const Family family = detectFamily(opt.model_spec);
+  Family family = detectFamily(opt.model_spec);
   std::cerr << "model family=" << familyName(family) << "\n";
 
-  const tdl_app::ModelSessionConfig session_config =
-      tdl_app::ModelSessionConfig::fromSpec(opt.model_spec, opt.firmware);
-
-  tdl_app::Detector detector;
-  tdl_app::Classifier classifier;
-  tdl_app::KeypointDetector keypoint;
-  tdl_app::InstanceSegmenter segmenter;
-  tdl_app::PlateRecognizer plate;
-
-  bool load_ok = false;
-  switch (family) {
-    case Family::Detection:
-      load_ok = detector.load(session_config, &error);
-      break;
-    case Family::Classification:
-      load_ok = classifier.load(session_config, &error);
-      break;
-    case Family::Keypoint:
-      load_ok = keypoint.load(session_config, &error);
-      break;
-    case Family::InstanceSeg:
-      load_ok = segmenter.load(session_config, &error);
-      break;
-    case Family::Ocr:
-      load_ok = plate.load(session_config, &error);
-      break;
-  }
-  if (!load_ok) {
+  AlgorithmSet algorithms;
+  if (!algorithms.load(
+          family,
+          tdl_app::ModelSessionConfig::fromSpec(opt.model_spec, opt.firmware),
+          &error)) {
     std::cerr << "model load failed: " << error << "\n";
     camera_demo_support::closeCameraRuntime(&runtime);
     return 3;
   }
+  // Declared after `algorithms` so the loader thread is joined before the
+  // algorithm objects are destroyed.
+  ModelLoader loader;
 
   const bool seg_draw_mask = std::getenv("TDL_APP_SEG_DEBUG") != nullptr;
 
@@ -711,8 +1093,12 @@ int main(int argc, char **argv) {
   std::signal(SIGINT, handleSignal);
   std::signal(SIGTERM, handleSignal);
 
+  // Interactive keyboard control only makes sense on a real terminal. When
+  // stdin is not a tty (nohup / backgrounded / redirected), skip the raw-mode
+  // setup and rely on the control pipe alone.
   TerminalGuard terminal;
-  if (!prepareTerminal(&terminal, &error)) {
+  const bool stdin_is_tty = ::isatty(STDIN_FILENO) == 1;
+  if (stdin_is_tty && !prepareTerminal(&terminal, &error)) {
     std::cerr << error << "\n";
     region.detach();
     region.destroy();
@@ -722,7 +1108,20 @@ int main(int argc, char **argv) {
     return 8;
   }
 
-  std::cout << "sophpi_ai_osd_demo running (press q to quit)\n";
+  ControlPipe control_pipe;
+  if (!control_pipe.open(opt.control_pipe, &error)) {
+    std::cerr << "control pipe disabled: " << error << "\n";
+  } else {
+    std::cout << "control pipe: " << opt.control_pipe << "\n"
+              << "  echo t > " << opt.control_pipe << "    # toggle stream\n"
+              << "  echo a > " << opt.control_pipe << "    # toggle audio\n"
+              << "  echo \"m /path/to/model.mud\" > " << opt.control_pipe
+              << "    # switch model\n"
+              << "  echo q > " << opt.control_pipe << "    # quit\n";
+  }
+
+  std::cout << "sophpi_ai_osd_demo running "
+            << "(press m to switch model, q to quit)\n";
 
   tdl_app::InferOptions infer_options;
   infer_options.threshold = opt.threshold;
@@ -736,11 +1135,200 @@ int main(int argc, char **argv) {
   double fps = 0.0;
   auto last = std::chrono::steady_clock::now();
 
+  // Runtime model switching state. `model_ready` is false between the old
+  // model being unloaded and the new one finishing its background load; the
+  // loop keeps running (live video + OSD status) but skips inference.
+  bool model_ready = true;
+  std::string status_text;
+  CommandInput command;
+
+  // Validate the typed spec first (a typo must not kill the current model),
+  // then unload the old model and load the new one on the worker thread.
+  auto requestModelSwitch = [&](const std::string &line) {
+    const std::string spec = trimCopy(line);
+    if (spec.empty()) {
+      return;
+    }
+    tdl_app::ModelDescriptor descriptor;
+    std::string desc_error;
+    if (!tdl_app::loadModelDescriptor(spec, &descriptor, &desc_error)) {
+      std::cout << "invalid model-spec: " << desc_error << "\n";
+      return;
+    }
+    const Family next = detectFamily(spec);
+    if (model_ready) {
+      algorithms.reset(family);
+      model_ready = false;
+    }
+    std::cout << "loading " << spec << " (family=" << familyName(next)
+              << ")...\n";
+    loader.start(&algorithms, next,
+                 tdl_app::ModelSessionConfig::fromSpec(spec, opt.firmware));
+    status_text = "Loading model...";
+  };
+
+  // MJPEG streaming state ('t' toggles, default off). The stream is fed from
+  // the idle subrgb channel (grp0/ch3, NV21): the hardware MJPEG encoder only
+  // handles YUV input, so the ai channel's RGB planar frames cannot be sent
+  // to it directly (they get misinterpreted as YUV: green cast + purple bars).
+  mjpeg_server::MjpegServer stream_server;
+  tdl_app::Camera stream_camera(tdl_app::Camera::subRgb(500));
+  tdl_app::VencChannel stream_venc(tdl_app::VencChannel::mjpeg(
+      0, tdl_app::DualOsLayout::kSubRgbWidth,
+      tdl_app::DualOsLayout::kSubRgbHeight));
+  bool stream_on = false;
+  int stream_fail_count = 0;
+  std::vector<std::uint8_t> stream_jpeg;
+
+  auto stopStream = [&]() {
+    if (!stream_on) {
+      return;
+    }
+    stream_server.stop();
+    stream_venc.close();
+    stream_camera.close();
+    stream_on = false;
+    std::cout << "stream off\n";
+  };
+
+  auto startStream = [&]() {
+    std::string stream_error;
+    if (!stream_camera.open(&stream_error)) {
+      std::cout << "stream camera open failed: " << stream_error << "\n";
+      return;
+    }
+    if (!stream_venc.open(&stream_error)) {
+      std::cout << "stream venc open failed: " << stream_error << "\n";
+      stream_camera.close();
+      return;
+    }
+    if (!stream_server.start(opt.stream_port, &stream_error)) {
+      std::cout << "stream server start failed: " << stream_error << "\n";
+      stream_venc.close();
+      stream_camera.close();
+      return;
+    }
+    stream_on = true;
+    stream_fail_count = 0;
+    const auto addresses = listIpv4Addresses();
+    if (addresses.empty()) {
+      std::cout << "stream on: http://<board-ip>:" << opt.stream_port << "\n";
+    } else {
+      for (const auto &address : addresses) {
+        std::cout << "stream on: http://" << address << ":" << opt.stream_port
+                  << "\n";
+      }
+    }
+  };
+
+  // Mic -> speaker loopback ('a' toggles, default off).
+  AudioLoopback audio_loopback;
+
+  auto toggleStream = [&]() {
+    if (stream_on) {
+      stopStream();
+    } else {
+      startStream();
+    }
+  };
+
+  auto toggleAudio = [&]() {
+    if (audio_loopback.running()) {
+      audio_loopback.stop();
+      std::cout << "audio loopback off\n";
+    } else {
+      std::string audio_error;
+      if (audio_loopback.start(&audio_error)) {
+        std::cout << "audio loopback on (mic -> speaker)\n";
+      } else {
+        std::cout << "audio loopback start failed: " << audio_error << "\n";
+      }
+    }
+  };
+
+  // One control-pipe line = one command; mirrors the interactive keys.
+  auto handleControlLine = [&](const std::string &raw) {
+    const std::string line = trimCopy(raw);
+    if (line.empty()) {
+      return;
+    }
+    if (line == "q") {
+      g_running.store(false);
+    } else if (line == "t") {
+      toggleStream();
+    } else if (line == "a") {
+      toggleAudio();
+    } else if (line.compare(0, 2, "m ") == 0) {
+      if (loader.active()) {
+        std::cout << "model is still loading, please wait\n";
+      } else {
+        requestModelSwitch(line.substr(2));
+      }
+    } else {
+      std::cout << "unknown control command: " << line << "\n";
+    }
+  };
+
   // Single loop: read the ai-channel frame, run the family's inference, render
   // the OSD overlay straight from the result, and push it to the canvas. No
   // separate inference thread; the OSD refresh rate is simply the model
   // throughput (capture + inference + render, all in one loop).
   while (g_running.load()) {
+    // Drain every pending keystroke so typing a path stays responsive even
+    // though this loop only iterates once per frame.
+    for (int key = readKey(); key != -1; key = readKey()) {
+      if (command.active) {
+        std::string line;
+        if (command.feed(key, &line)) {
+          requestModelSwitch(line);
+        }
+        continue;
+      }
+      if (key == 'q') {
+        g_running.store(false);
+      } else if (key == 'm') {
+        if (loader.active()) {
+          std::cout << "\nmodel is still loading, please wait\n";
+        } else {
+          command.begin();
+        }
+      } else if (key == 't') {
+        toggleStream();
+      } else if (key == 'a') {
+        toggleAudio();
+      }
+    }
+
+    // Commands arriving over the control FIFO (echo t > /tmp/...).
+    std::vector<std::string> control_lines;
+    control_pipe.readLines(&control_lines);
+    for (const auto &line : control_lines) {
+      handleControlLine(line);
+    }
+
+    if (!g_running.load()) {
+      break;
+    }
+
+    audio_loopback.poll();
+
+    if (loader.finished()) {
+      const Family next = loader.family();
+      const std::string spec = loader.spec();
+      std::string load_error;
+      if (loader.take(&load_error)) {
+        family = next;
+        model_ready = true;
+        status_text.clear();
+        std::cout << "model switched: " << spec << " (family="
+                  << familyName(family) << ")\n";
+      } else {
+        status_text = "Model load failed (press m to retry)";
+        std::cout << "model load failed: " << load_error << "\n"
+                  << "press m to enter another model-spec\n";
+      }
+    }
+
     tdl_app::Frame frame;
     if (!runtime.camera.read(&frame, &error)) {
       std::cerr << "camera read failed: " << error << "\n";
@@ -752,79 +1340,120 @@ int main(int argc, char **argv) {
       continue;
     }
 
+    if (stream_on) {
+      tdl_app::Frame stream_frame;
+      tdl_app::VencChannel::EncodedPacket packet;
+      bool stream_ok = stream_camera.read(&stream_frame, &error);
+      if (stream_ok) {
+        stream_ok = stream_venc.encode(stream_frame, &packet, &error);
+      }
+      if (!stream_ok) {
+        std::cerr << "stream frame failed: " << error << "\n";
+        if (++stream_fail_count >= 5) {
+          std::cout << "stream disabled after repeated failures\n";
+          stopStream();
+        }
+      } else if (!packet.blocks.empty()) {
+        stream_fail_count = 0;
+        stream_jpeg.clear();
+        for (const auto &block : packet.blocks) {
+          stream_jpeg.insert(stream_jpeg.end(), block.begin(), block.end());
+        }
+        stream_server.publish(stream_jpeg.data(), stream_jpeg.size());
+      }
+    }
+
     tdl_app::AlgorithmResult result;
     tdl_app::KeypointResult kp_result;
     tdl_app::InstanceSegmentationResult seg_result;
 
-    const auto infer_start = std::chrono::steady_clock::now();
-    bool infer_ok = false;
-    switch (family) {
-      case Family::Detection:
-        infer_ok = detector.run(*video, infer_options, &result, &error);
-        break;
-      case Family::Classification:
-        infer_ok = classifier.runFrame(frame, infer_options, &result, &error);
-        break;
-      case Family::Keypoint:
-        infer_ok = keypoint.runFrame(frame, &kp_result, &error);
-        break;
-      case Family::InstanceSeg:
-        infer_ok = segmenter.runFrame(frame, &seg_result, &error);
-        break;
-      case Family::Ocr:
-        infer_ok = plate.runFrame(frame, infer_options, &result, &error);
-        break;
-    }
-    const double infer_ms =
-        std::chrono::duration<double, std::milli>(
-            std::chrono::steady_clock::now() - infer_start)
-            .count();
-    std::cerr << "infer took " << cv::format("%.2f", infer_ms) << " ms\n";
-    if (!infer_ok) {
-      std::cerr << "inference failed: " << error << "\n";
-      continue;
+    if (model_ready) {
+      const auto infer_start = std::chrono::steady_clock::now();
+      bool infer_ok = false;
+      switch (family) {
+        case Family::Detection:
+          infer_ok =
+              algorithms.detector.run(*video, infer_options, &result, &error);
+          break;
+        case Family::Classification:
+          infer_ok = algorithms.classifier.runFrame(frame, infer_options,
+                                                    &result, &error);
+          break;
+        case Family::Keypoint:
+          infer_ok = algorithms.keypoint.runFrame(frame, &kp_result, &error);
+          break;
+        case Family::InstanceSeg:
+          infer_ok = algorithms.segmenter.runFrame(frame, &seg_result, &error);
+          break;
+        case Family::Ocr:
+          infer_ok =
+              algorithms.plate.runFrame(frame, infer_options, &result, &error);
+          break;
+      }
+      const double infer_ms =
+          std::chrono::duration<double, std::milli>(
+              std::chrono::steady_clock::now() - infer_start)
+              .count();
+      // std::cerr << "infer took " << cv::format("%.2f", infer_ms) << " ms\n";
+      if (!infer_ok) {
+        std::cerr << "inference failed: " << error << "\n";
+        continue;
+      }
+
+      const auto now = std::chrono::steady_clock::now();
+      const double dt = std::chrono::duration<double>(now - last).count();
+      last = now;
+      if (dt > 0.0) {
+        const double inst = 1.0 / dt;
+        fps = fps <= 0.0 ? inst : fps * 0.8 + inst * 0.2;
+      }
+    } else {
+      // No model loaded (background switch in progress or last load failed):
+      // keep the FPS estimate frozen and let the loop idle a little.
+      last = std::chrono::steady_clock::now();
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
 
-    const auto now = std::chrono::steady_clock::now();
-    const double dt = std::chrono::duration<double>(now - last).count();
-    last = now;
-    if (dt > 0.0) {
-      const double inst = 1.0 / dt;
-      fps = fps <= 0.0 ? inst : fps * 0.8 + inst * 0.2;
-    }
-
-    const double scale_x = static_cast<double>(cw) / std::max(1, frame.width);
-    const double scale_y = static_cast<double>(ch) / std::max(1, frame.height);
+    const CoordMap coord_map =
+        makeAiToLiveMap(frame.width, frame.height, cw, ch);
     beginOverlay(&overlay);
-    switch (family) {
-      case Family::Detection:
-        drawDetection(&overlay, result.boxes, result.labels, scale_x, scale_y);
-        break;
-      case Family::Classification:
-        drawClassification(&overlay, result, opt.top_k);
-        break;
-      case Family::Keypoint:
-        drawKeypoint(&overlay, kp_result, scale_x, scale_y);
-        break;
-      case Family::InstanceSeg:
-        drawInstanceSeg(&overlay, seg_result, scale_x, scale_y, seg_draw_mask);
-        break;
-      case Family::Ocr:
-        drawOcr(&overlay, result, scale_x, scale_y);
-        break;
+    // drawAiPreview(&overlay, frame);
+    if (model_ready) {
+      switch (family) {
+        case Family::Detection:
+          drawDetection(&overlay, result.boxes, result.labels, coord_map);
+          break;
+        case Family::Classification:
+          drawClassification(&overlay, result, opt.top_k);
+          break;
+        case Family::Keypoint:
+          drawKeypoint(&overlay, kp_result, coord_map);
+          break;
+        case Family::InstanceSeg:
+          drawInstanceSeg(&overlay, seg_result, coord_map, seg_draw_mask);
+          break;
+        case Family::Ocr:
+          drawOcr(&overlay, result, coord_map);
+          break;
+      }
+    }
+    if (!status_text.empty()) {
+      putLabel(overlay, status_text, cv::Point(24, 90), 0.8,
+               cv::Scalar(0, 255, 255, 255));
     }
     finishOverlay(&overlay, logo, fps);
 
     if (!pushToCanvas(&region, overlay, &visible, &error)) {
       std::cerr << "osd push failed: " << error << "\n";
     }
-
-    const int key = readKey();
-    if (key == 'q') {
-      g_running.store(false);
-      break;
-    }
   }
+
+  audio_loopback.stop();
+  stopStream();
+
+  // Make sure a still-running background load finishes before the media
+  // pipeline below is torn down.
+  loader.join();
 
   restoreTerminal(&terminal);
   region.detach();

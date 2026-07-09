@@ -18,116 +18,12 @@
 #include <opencv2/imgproc.hpp>
 
 #include "algorithm/private/bmrt_utils.hpp"
+#include "algorithm/private/frame_convert.hpp"
 #include "cvi_comm_video.h"
 #include "cvi_sys.h"
 
 namespace tdl_app {
 namespace {
-
-bool frameToBgrMat(const Frame &frame, cv::Mat *image, std::string *error) {
-  if (!frame.native) {
-    bmrt_runtime::setError(error,
-                           "frame has no native VIDEO_FRAME_INFO_S buffer");
-    return false;
-  }
-
-  const auto *video = static_cast<VIDEO_FRAME_INFO_S *>(frame.native);
-  const auto &vf = video->stVFrame;
-  const int width = static_cast<int>(vf.u32Width);
-  const int height = static_cast<int>(vf.u32Height);
-  const int format = static_cast<int>(vf.enPixelFormat);
-  if (width <= 0 || height <= 0) {
-    bmrt_runtime::setError(error, "invalid frame size");
-    return false;
-  }
-
-  std::size_t map_size = 0;
-  for (int i = 0; i < 3; ++i) {
-    map_size += vf.u32Length[i];
-  }
-  if (map_size == 0) {
-    bmrt_runtime::setError(error, "frame buffer length is zero");
-    return false;
-  }
-
-  auto *mapped =
-      static_cast<unsigned char *>(CVI_SYS_Mmap(vf.u64PhyAddr[0], map_size));
-  if (!mapped) {
-    bmrt_runtime::setError(error, "CVI_SYS_Mmap failed");
-    return false;
-  }
-  CVI_SYS_IonInvalidateCache(vf.u64PhyAddr[0], mapped, map_size);
-
-  bool ok = true;
-  if (format == PIXEL_FORMAT_BGR_888 || format == PIXEL_FORMAT_RGB_888) {
-    cv::Mat output(height, width, CV_8UC3);
-    for (int y = 0; y < height; ++y) {
-      const unsigned char *src = mapped + y * vf.u32Stride[0];
-      unsigned char *dst = output.ptr<unsigned char>(y);
-      if (format == PIXEL_FORMAT_BGR_888) {
-        std::memcpy(dst, src, static_cast<size_t>(width) * 3);
-      } else {
-        for (int x = 0; x < width; ++x) {
-          dst[x * 3 + 0] = src[x * 3 + 2];
-          dst[x * 3 + 1] = src[x * 3 + 1];
-          dst[x * 3 + 2] = src[x * 3 + 0];
-        }
-      }
-    }
-    *image = std::move(output);
-  } else if (format == PIXEL_FORMAT_BGR_888_PLANAR ||
-             format == PIXEL_FORMAT_RGB_888_PLANAR) {
-    const unsigned char *plane0 = mapped;
-    const unsigned char *plane1 = mapped + vf.u32Length[0];
-    const unsigned char *plane2 = plane1 + vf.u32Length[1];
-    cv::Mat output(height, width, CV_8UC3);
-    for (int y = 0; y < height; ++y) {
-      const unsigned char *src0 = plane0 + y * vf.u32Stride[0];
-      const unsigned char *src1 = plane1 + y * vf.u32Stride[1];
-      const unsigned char *src2 = plane2 + y * vf.u32Stride[2];
-      cv::Vec3b *dst = output.ptr<cv::Vec3b>(y);
-      for (int x = 0; x < width; ++x) {
-        if (format == PIXEL_FORMAT_BGR_888_PLANAR) {
-          dst[x] = cv::Vec3b(src0[x], src1[x], src2[x]);
-        } else {
-          dst[x] = cv::Vec3b(src2[x], src1[x], src0[x]);
-        }
-      }
-    }
-    *image = std::move(output);
-  } else if (format == PIXEL_FORMAT_YUV_400) {
-    cv::Mat gray(height, width, CV_8UC1);
-    for (int y = 0; y < height; ++y) {
-      std::memcpy(gray.ptr(y), mapped + y * vf.u32Stride[0], width);
-    }
-    cv::cvtColor(gray, *image, cv::COLOR_GRAY2BGR);
-  } else if (format == PIXEL_FORMAT_NV12 || format == PIXEL_FORMAT_NV21) {
-    cv::Mat yuv(height + height / 2, width, CV_8UC1);
-    unsigned char *y_base = mapped;
-    unsigned char *uv_base = mapped + vf.u32Length[0];
-    for (int y = 0; y < height; ++y) {
-      std::memcpy(yuv.ptr(y), y_base + y * vf.u32Stride[0], width);
-    }
-    for (int y = 0; y < height / 2; ++y) {
-      std::memcpy(yuv.ptr(height + y), uv_base + y * vf.u32Stride[1], width);
-    }
-    const int code = format == PIXEL_FORMAT_NV21 ? cv::COLOR_YUV2BGR_NV21
-                                                 : cv::COLOR_YUV2BGR_NV12;
-    cv::cvtColor(yuv, *image, code);
-  } else {
-    ok = false;
-    bmrt_runtime::setError(
-        error,
-        "plate recognizer only supports RGB/BGR/NV12/NV21/YUV400 frame input");
-  }
-
-  CVI_SYS_Munmap(mapped, map_size);
-  if (!ok || image->empty()) {
-    bmrt_runtime::setError(error, "failed to convert frame to BGR image");
-    return false;
-  }
-  return true;
-}
 
 const std::vector<std::string> kLegacyPlateChars = {
     "浜?", "娌?", "娲?", "娓?", "鍐€", "鏅?", "钂?", "杈?", "鍚?", "榛?",
@@ -979,7 +875,7 @@ bool NnPlateRecognizer::predictFrame(const Frame &frame,
                                        error);
   }
   cv::Mat image;
-  if (!frameToBgrMat(frame, &image, error)) {
+  if (!frame_convert::frameToBgrMat(frame, &image, error)) {
     return false;
   }
   return custom_runtime_->inferMat(image, nullptr, result, error);

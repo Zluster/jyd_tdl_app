@@ -16,7 +16,10 @@
 #include "c_apis/tdl_sdk.h"
 #include "c_apis/tdl_utils.h"
 #include "algorithm/private/bmrt_utils.hpp"
+#include "algorithm/private/frame_convert.hpp"
 #include "algorithm/private/tdl_sdk_utils.hpp"
+#include "cvi_comm_video.h"
+#include "cvi_sys.h"
 
 namespace tdl_app {
 namespace {
@@ -177,12 +180,14 @@ class YoloV8SegRuntime : public InstanceSegRuntime {
 
   bool runFrame(const Frame &frame, InstanceSegmentationResult *result,
                 std::string *error) override {
-    if (frame.image_path.empty()) {
-      private_tdl_sdk::setError(
-          error, "custom instance segmentation runtime currently supports image_path only");
+    if (!frame.image_path.empty()) {
+      return run(frame.image_path, result, error);
+    }
+    cv::Mat image;
+    if (!frame_convert::frameToBgrMat(frame, &image, error)) {
       return false;
     }
-    return run(frame.image_path, result, error);
+    return infer(image, result, error);
   }
 
   void reset() override { session_.close(); }

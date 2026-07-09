@@ -284,8 +284,14 @@ std::string frameOutputPath(const std::string &output, int index) {
   return output.substr(0, dot) + "_" + std::to_string(index) + output.substr(dot);
 }
 
-bool saveFrameAsImage(const tdl_app::Frame &frame, const std::string &output_path,
-                      std::string *error) {
+bool frameToBgrMat(const tdl_app::Frame &frame, cv::Mat *out_bgr,
+                   std::string *error) {
+  if (!out_bgr) {
+    if (error) {
+      *error = "out_bgr is null";
+    }
+    return false;
+  }
   if (!frame.native) {
     if (error) {
       *error = "frame has no native VIDEO_FRAME_INFO_S buffer";
@@ -343,7 +349,6 @@ bool saveFrameAsImage(const tdl_app::Frame &frame, const std::string &output_pat
   }
   CVI_SYS_IonInvalidateCache(vf.u64PhyAddr[0], mapped, map_size);
 
-  bool ok = false;
   cv::Mat image;
   do {
     if (format == PIXEL_FORMAT_RGB_888 || format == PIXEL_FORMAT_BGR_888) {
@@ -407,15 +412,31 @@ bool saveFrameAsImage(const tdl_app::Frame &frame, const std::string &output_pat
     cv::cvtColor(yuv, image, code);
   } while (false);
 
-  if (!image.empty()) {
-    ok = cv::imwrite(output_path, image);
-  }
   CVI_SYS_Munmap(mapped, map_size);
 
-  if (!ok && error) {
-    *error = "failed to write image: " + output_path;
+  if (image.empty()) {
+    if (error) {
+      *error = "frame conversion produced an empty image";
+    }
+    return false;
   }
-  return ok;
+  *out_bgr = std::move(image);
+  return true;
+}
+
+bool saveFrameAsImage(const tdl_app::Frame &frame, const std::string &output_path,
+                      std::string *error) {
+  cv::Mat image;
+  if (!frameToBgrMat(frame, &image, error)) {
+    return false;
+  }
+  if (!cv::imwrite(output_path, image)) {
+    if (error) {
+      *error = "failed to write image: " + output_path;
+    }
+    return false;
+  }
+  return true;
 }
 
 void dumpCameraDiagnostics() {

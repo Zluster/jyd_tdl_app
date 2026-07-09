@@ -260,6 +260,7 @@ if(TDL_APP_BUILD_DEMOS)
     add_executable(sophpi_ai_osd_demo
       apps/sophpi_ai_osd_demo.cpp
       apps/camera_demo_support.cpp
+      apps/mjpeg_server.cpp
     )
     target_sources(sophpi_ai_osd_demo PRIVATE third_party/vendor/ini/ini.c)
     target_include_directories(sophpi_ai_osd_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
