@@ -361,6 +361,24 @@ static void stream_client(mmf_jpg_http_server_t* server, int fd) {
   server->client_count.fetch_sub(1);
 }
 
+static void send_index_response(int fd, const char* stream_path) {
+  const std::string body =
+      "<!doctype html><html><head><meta charset=\"utf-8\">"
+      "<title>MJPEG stream</title><style>"
+      "body{margin:0;background:#111;display:flex;min-height:100vh;"
+      "align-items:center;justify-content:center}"
+      "img{max-width:100vw;max-height:100vh}</style></head><body><img src=\"" +
+      std::string(stream_path) + "\" alt=\"stream\"></body></html>";
+  const std::string header =
+      "HTTP/1.1 200 OK\r\n"
+      "Content-Type: text/html; charset=utf-8\r\n"
+      "Cache-Control: no-store\r\n"
+      "Connection: close\r\n"
+      "Content-Length: " + std::to_string(body.size()) + "\r\n\r\n";
+  write_string(fd, header);
+  write_string(fd, body);
+}
+
 static void handle_http_client(mmf_jpg_http_server_t* server, int fd) {
   timeval tv;
   tv.tv_sec = 3;
@@ -382,7 +400,13 @@ static void handle_http_client(mmf_jpg_http_server_t* server, int fd) {
   const char* stream_path =
       server->config.stream_path ? server->config.stream_path : "/stream.mjpg";
 
-  if (path == snapshot_path || path == "/") {
+  if (path == "/" || path == "/index.html") {
+    send_index_response(fd, stream_path);
+    close_fd(&fd);
+    server->client_count.fetch_sub(1);
+    return;
+  }
+  if (path == snapshot_path) {
     send_snapshot_response(server, fd);
     close_fd(&fd);
     server->client_count.fetch_sub(1);
