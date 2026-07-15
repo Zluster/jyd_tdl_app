@@ -86,6 +86,16 @@ if [ -d "${PROJECT_MODELS_DIR}" ]; then
 fi
 cp -a "${THIRD_PARTY_DIR}/firmware/." "${RESOLVED_PKG_DIR}/firmware/" 2>/dev/null || true
 cp -a "${PROJECT_ROOT}/assets/." "${RESOLVED_PKG_DIR}/assets/" 2>/dev/null || true
+
+# Do not repackage retired experimental self-learning components merely because
+# an incremental install directory or the vendor model bundle still contains
+# their old artifacts.
+rm -f "${RESOLVED_PKG_DIR}/bin/tdl_self_learning_detector_demo" \
+  "${RESOLVED_PKG_DIR}/bin/tdl_self_learning_classifier_camera_demo" \
+  "${RESOLVED_PKG_DIR}/models/cv184x/feature_mobileclip2_B_img_224_224_INT8_cv184x.bmodel" \
+  "${RESOLVED_PKG_DIR}/models/cv184x/feature_mobileclip2_B_text_1_77_INT8_cv184x.bmodel"
+rm -rf "${RESOLVED_PKG_DIR}/source"
+
 cp "${PROJECT_ROOT}/docs/ALGORITHM_TESTING_GUIDE_CN.md" \
   "${RESOLVED_PKG_DIR}/docs/" 2>/dev/null || true
 cp "${PROJECT_ROOT}/docs/VISUAL_ALGORITHM_TEST_MATRIX_CN.md" \
