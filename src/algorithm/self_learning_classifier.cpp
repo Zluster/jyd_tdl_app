@@ -1,6 +1,7 @@
 #include "tdl_app/self_learning_classifier.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdlib>
 #include <cmath>
 #include <fstream>
@@ -170,6 +171,46 @@ bool SelfLearningClassifier::classify(
   if (!extractFeature(&extractor_, image_path, &feature, error)) {
     return false;
   }
+  return classifyFeature(std::move(feature), top_k, result, error);
+}
+
+bool SelfLearningClassifier::classifyFrame(
+    const Frame &frame, int top_k, SelfLearningClassificationResult *result,
+    SelfLearningClassificationProfile *profile, std::string *error) {
+  if (!initialized() || !result || samples_.empty()) {
+    setError(error, !initialized() ? "self learning classifier is not initialized"
+                                   : (!result ? "classification result pointer is null"
+                                              : "feature bank is empty"));
+    return false;
+  }
+  const auto total_begin = std::chrono::steady_clock::now();
+  const auto feature_begin = total_begin;
+  AlgorithmResult feature_result;
+  InferOptions options;
+  if (!extractor_.runFrame(frame, options, &feature_result, error) ||
+      feature_result.feature.empty()) {
+    if (error && error->empty()) *error = "feature extractor returned empty embedding";
+    return false;
+  }
+  std::vector<float> feature = std::move(feature_result.feature);
+  l2Normalize(&feature);
+  const auto match_begin = std::chrono::steady_clock::now();
+  if (profile) {
+    profile->feature_ms = std::chrono::duration<double, std::milli>(
+                              match_begin - feature_begin).count();
+  }
+  const bool ok = classifyFeature(std::move(feature), top_k, result, error);
+  const auto end = std::chrono::steady_clock::now();
+  if (profile) {
+    profile->match_ms = std::chrono::duration<double, std::milli>(end - match_begin).count();
+    profile->total_ms = std::chrono::duration<double, std::milli>(end - total_begin).count();
+  }
+  return ok;
+}
+
+bool SelfLearningClassifier::classifyFeature(
+    std::vector<float> feature, int top_k,
+    SelfLearningClassificationResult *result, std::string *error) const {
   if (feature.size() != samples_.front().feature.size()) {
     setError(error, "feature dimension mismatch with bank");
     return false;

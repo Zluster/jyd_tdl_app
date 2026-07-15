@@ -18,6 +18,7 @@
 #include "tdl_app/multi_stage_pipeline.hpp"
 #include "tdl_app/pipeline.hpp"
 #include "tdl_app/plate_recognizer.hpp"
+#include "tdl_app/pose_classifier.hpp"
 #include "tdl_app/semantic_segmenter.hpp"
 #include "tdl_app/self_learning_classifier.hpp"
 #include "tdl_app/single_object_tracker.hpp"

@@ -10,6 +10,20 @@ namespace tdl_app {
 
 class NnScrfd final : public NnBase {
  public:
+  struct Profile {
+    double source_prepare_ms = 0.0;
+    double preprocess_ms = 0.0;
+    double launch_ms = 0.0;
+    double decode_ms = 0.0;
+    double total_ms = 0.0;
+    int source_width = 0;
+    int source_height = 0;
+    int source_format = 0;
+    int input_width = 0;
+    int input_height = 0;
+    int boxes = 0;
+  };
+
   explicit NnScrfd(std::string model_type = "SCRFD");
   ~NnScrfd() override;
 
@@ -23,6 +37,7 @@ class NnScrfd final : public NnBase {
   bool predictFrame(const Frame &frame, const InferOptions &options,
                     AlgorithmResult *result,
                     std::string *error = nullptr) override;
+  const Profile &lastProfile() const;
 
  private:
   class CustomRuntime;

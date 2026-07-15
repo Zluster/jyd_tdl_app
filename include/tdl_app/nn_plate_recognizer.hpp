@@ -5,6 +5,7 @@
 
 #include "tdl_app/model_descriptor.hpp"
 #include "tdl_app/nn_base.hpp"
+#include "tdl_app/plate_recognizer.hpp"
 
 namespace tdl_app {
 
@@ -23,6 +24,12 @@ class NnPlateRecognizer final : public NnBase {
   bool predictFrame(const Frame &frame, const InferOptions &options,
                     AlgorithmResult *result,
                     std::string *error = nullptr) override;
+  bool predictFrameProfiled(const Frame &frame, const InferOptions &options,
+                            AlgorithmResult *result, OcrProfile *profile,
+                            std::string *error = nullptr);
+  bool predictFrameCrop(const Frame &frame, const Box &roi,
+                        const InferOptions &options, AlgorithmResult *result,
+                        std::string *error = nullptr);
   bool predictCrop(const std::string &image_path, const Box &roi,
                    const InferOptions &options, AlgorithmResult *result,
                    std::string *error = nullptr);

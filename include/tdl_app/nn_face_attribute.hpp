@@ -23,6 +23,9 @@ class NnFaceAttribute final : public NnBase {
   bool predictFrame(const Frame &frame, const InferOptions &options,
                     AlgorithmResult *result,
                     std::string *error = nullptr) override;
+  bool predictFrameCrop(const Frame &frame, const Box &roi,
+                        const InferOptions &options, AlgorithmResult *result,
+                        std::string *error = nullptr);
   bool predictCrop(const std::string &image_path, const Box &roi,
                    const InferOptions &options, AlgorithmResult *result,
                    std::string *error = nullptr);

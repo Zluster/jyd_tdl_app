@@ -12,7 +12,7 @@ void printUsage() {
       << "  tdl_benchmark_demo [--module cv|display|npu|all] [--list]\n"
       << "                     [--repeat N] [--loops N]\n"
       << "                     [--warmup N] [--iters N]\n"
-      << "                     [--image PATH]\n"
+      << "                     [--image PATH] [--task NAME] [--profile]\n"
       << "                     [--vo-dev N] [--layer N] [--vo-chn N]\n"
       << "                     [--screen-width N] [--screen-height N]\n"
       << "                     [--interface-type N] [--interface-sync N]\n"
@@ -21,7 +21,9 @@ void printUsage() {
       << "Notes:\n"
       << "  --module all  run every registered module in order\n"
       << "  --repeat N    reload(load->loop->exit) N times (leak/reentry check)\n"
-      << "  --loops N     call loop() N times per load\n";
+      << "  --loops N     call loop() N times per load\n"
+      << "  --task NAME   run one NPU task, e.g. scrfd_face or yolov8_pose\n"
+      << "  --profile     print supported per-stage timing details\n";
 }
 
 struct Args {
@@ -67,6 +69,12 @@ bool parseArgs(int argc, char **argv, Args *args) {
       const char *v = value("--image");
       if (!v) return false;
       args->config.image = v;
+    } else if (arg == "--task") {
+      const char *v = value("--task");
+      if (!v) return false;
+      args->config.task = v;
+    } else if (arg == "--profile") {
+      args->config.profile = true;
     } else if (arg == "--vo-dev") {
       const char *v = value("--vo-dev");
       if (!v) return false;
@@ -132,6 +140,9 @@ int main(int argc, char **argv) {
   }
 
   tdl_bench::BenchmarkContext ctx;
+  if (args.config.profile) {
+    setenv("TDL_BENCH_PROFILE", "1", 1);
+  }
   ctx.setConfig(args.config);
 
   std::string error;

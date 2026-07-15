@@ -39,6 +39,8 @@ class FaceDetector {
            AlgorithmResult *result, std::string *error = nullptr);
   bool detect(const std::string &image_path, const InferOptions &options,
               AlgorithmResult *result, std::string *error = nullptr);
+  bool detectFrame(const Frame &frame, const InferOptions &options,
+                   AlgorithmResult *result, std::string *error = nullptr);
 
   bool initialized() const;
   std::string modelType() const;

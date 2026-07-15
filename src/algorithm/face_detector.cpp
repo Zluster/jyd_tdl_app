@@ -100,6 +100,17 @@ bool FaceDetector::detect(const std::string &image_path,
   return model_->predict(image_path, options, result, error);
 }
 
+bool FaceDetector::detectFrame(const Frame &frame, const InferOptions &options,
+                               AlgorithmResult *result, std::string *error) {
+  if (!model_) {
+    if (error) {
+      *error = "face detector is not initialized";
+    }
+    return false;
+  }
+  return model_->predictFrame(frame, options, result, error);
+}
+
 bool FaceDetector::initialized() const {
   return model_ && model_->initialized();
 }

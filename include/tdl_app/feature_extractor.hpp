@@ -44,6 +44,9 @@ class FeatureExtractor {
                AlgorithmResult *result, std::string *error = nullptr);
   bool extractFrame(const Frame &frame, const InferOptions &options,
                     AlgorithmResult *result, std::string *error = nullptr);
+  bool extractFrameCrop(const Frame &frame, const Box &roi,
+                        const InferOptions &options, AlgorithmResult *result,
+                        std::string *error = nullptr);
 
   bool initialized() const;
   std::string modelType() const;

@@ -108,6 +108,8 @@ class FrameReaderImpl {
     return true;
   }
 
+  void releaseFrame() { releaseCurrentFrame(); }
+
   void close() {
     releaseCurrentFrame();
     opened_ = false;
@@ -157,6 +159,8 @@ bool FrameReader::open(std::string *error) { return impl_->open(error); }
 bool FrameReader::read(Frame *frame, std::string *error) {
   return impl_->read(frame, error);
 }
+
+void FrameReader::releaseFrame() { impl_->releaseFrame(); }
 
 void FrameReader::close() { impl_->close(); }
 

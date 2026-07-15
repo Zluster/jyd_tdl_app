@@ -25,6 +25,9 @@ class NnFeature final : public NnBase {
   bool predictFrame(const Frame &frame, const InferOptions &options,
                     AlgorithmResult *result,
                     std::string *error = nullptr) override;
+  bool predictFrameCrop(const Frame &frame, const Box &roi,
+                        const InferOptions &options, AlgorithmResult *result,
+                        std::string *error = nullptr);
 
  private:
   class CustomRuntime;

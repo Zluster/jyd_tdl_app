@@ -360,6 +360,7 @@ std::unique_ptr<FrameSource> Camera::createSource() const {
     bool read(Frame *frame, std::string *error) override {
       return reader_.read(frame, error);
     }
+    void releaseFrame() override { reader_.releaseFrame(); }
     void close() override { reader_.close(); }
 
    private:
@@ -370,4 +371,3 @@ std::unique_ptr<FrameSource> Camera::createSource() const {
 }
 
 }  // namespace tdl_app
-

@@ -1,3 +1,4 @@
+#include <chrono>
 #include <cstdlib>
 #include <iostream>
 #include <string>
@@ -6,6 +7,7 @@
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
+#include "camera_demo_support.hpp"
 #include "tdl_app/tdl_app.hpp"
 
 namespace {
@@ -16,6 +18,13 @@ struct Options {
   std::string firmware;
   std::string model_dir;
   std::string output;
+  std::string dump_frame;
+  std::string dump_overlay;
+  bool camera = false;
+  int group = 0;
+  int channel = 1;
+  int timeout_ms = 1000;
+  int frames = 1;
 };
 
 constexpr int kPose17Skeleton[][2] = {
@@ -23,11 +32,18 @@ constexpr int kPose17Skeleton[][2] = {
     {6, 8},  {8, 10}, {5, 11}, {6, 12}, {11, 12}, {11, 13}, {13, 15},
     {12, 14}, {14, 16}};
 
+constexpr int kHand21Skeleton[][2] = {
+    {0, 1}, {1, 2}, {2, 3}, {3, 4}, {0, 5}, {5, 6}, {6, 7}, {7, 8},
+    {0, 9}, {9, 10}, {10, 11}, {11, 12}, {0, 13}, {13, 14}, {14, 15},
+    {15, 16}, {0, 17}, {17, 18}, {18, 19}, {19, 20}};
+
 void printUsage() {
   std::cout
       << "Usage:\n"
-      << "  tdl_keypoint_demo --image FILE --model-spec FILE\n"
-      << "                    [--firmware FILE] [--model-dir DIR] [--output FILE]\n";
+      << "  tdl_keypoint_demo (--image FILE | --camera) --model-spec FILE\n"
+      << "                    [--firmware FILE] [--model-dir DIR] [--output FILE]\n"
+      << "                    [--dump-frame FILE] [--dump-overlay FILE]\n"
+      << "                    [--group N] [--channel N] [--timeout-ms N] [--frames N]\n";
 }
 
 bool parseArgs(int argc, char **argv, Options *opt) {
@@ -45,6 +61,8 @@ bool parseArgs(int argc, char **argv, Options *opt) {
       const char *value = requireValue("--image");
       if (!value) return false;
       opt->image = value;
+    } else if (arg == "--camera") {
+      opt->camera = true;
     } else if (arg == "--model-spec") {
       const char *value = requireValue("--model-spec");
       if (!value) return false;
@@ -61,6 +79,30 @@ bool parseArgs(int argc, char **argv, Options *opt) {
       const char *value = requireValue("--output");
       if (!value) return false;
       opt->output = value;
+    } else if (arg == "--dump-frame") {
+      const char *value = requireValue("--dump-frame");
+      if (!value) return false;
+      opt->dump_frame = value;
+    } else if (arg == "--dump-overlay") {
+      const char *value = requireValue("--dump-overlay");
+      if (!value) return false;
+      opt->dump_overlay = value;
+    } else if (arg == "--group") {
+      const char *value = requireValue("--group");
+      if (!value) return false;
+      opt->group = std::atoi(value);
+    } else if (arg == "--channel") {
+      const char *value = requireValue("--channel");
+      if (!value) return false;
+      opt->channel = std::atoi(value);
+    } else if (arg == "--timeout-ms") {
+      const char *value = requireValue("--timeout-ms");
+      if (!value) return false;
+      opt->timeout_ms = std::atoi(value);
+    } else if (arg == "--frames") {
+      const char *value = requireValue("--frames");
+      if (!value) return false;
+      opt->frames = std::atoi(value);
     } else if (arg == "-h" || arg == "--help") {
       printUsage();
       std::exit(0);
@@ -69,12 +111,24 @@ bool parseArgs(int argc, char **argv, Options *opt) {
       return false;
     }
   }
-  if (opt->image.empty()) {
-    std::cerr << "image path is required\n";
+  if (!opt->camera && opt->image.empty()) {
+    std::cerr << "--image or --camera is required\n";
     return false;
   }
   if (opt->model_spec.empty()) {
     std::cerr << "model-spec is required\n";
+    return false;
+  }
+  if (opt->camera && !opt->output.empty()) {
+    std::cerr << "--output is only supported with --image; use --dump-overlay with --camera\n";
+    return false;
+  }
+  if (!opt->dump_overlay.empty() && opt->dump_frame.empty()) {
+    std::cerr << "--dump-overlay requires --dump-frame\n";
+    return false;
+  }
+  if (opt->frames <= 0) {
+    std::cerr << "--frames must be positive\n";
     return false;
   }
   return true;
@@ -103,6 +157,16 @@ bool saveAnnotatedImage(const std::string &image_path, const std::string &output
                          static_cast<int>(result.points[a].y)),
                cv::Point(static_cast<int>(result.points[b].x),
                          static_cast<int>(result.points[b].y)),
+               cv::Scalar(0, 255, 255), 2, cv::LINE_AA);
+    }
+  }
+  if (result.pointCount() == 21) {
+    for (const auto &edge : kHand21Skeleton) {
+      cv::line(image,
+               cv::Point(static_cast<int>(result.points[edge[0]].x),
+                         static_cast<int>(result.points[edge[0]].y)),
+               cv::Point(static_cast<int>(result.points[edge[1]].x),
+                         static_cast<int>(result.points[edge[1]].y)),
                cv::Scalar(0, 255, 255), 2, cv::LINE_AA);
     }
   }
@@ -149,7 +213,79 @@ int main(int argc, char **argv) {
   }
 
   tdl_app::KeypointResult result;
-  if (!detector.run(opt.image, &result, &error)) {
+  double total_read_ms = 0.0;
+  double total_infer_ms = 0.0;
+  double total_pipeline_ms = 0.0;
+  std::string saved_frame;
+  std::string saved_overlay;
+  if (opt.camera) {
+    tdl_app::Camera::Config camera_config =
+        opt.group == 0 && opt.channel == 1
+            ? tdl_app::Camera::ai(opt.timeout_ms)
+            : tdl_app::Camera::vpss(opt.group, opt.channel, 640, 640,
+                                    tdl_app::PixelFormat::RGB888_PLANAR,
+                                    opt.timeout_ms);
+    tdl_app::Camera camera(camera_config);
+    if (!camera.open(&error)) {
+      std::cerr << "camera open failed: " << error << "\n";
+      return 3;
+    }
+    for (int index = 0; index < opt.frames; ++index) {
+      tdl_app::Frame frame;
+      const auto read_begin = std::chrono::steady_clock::now();
+      if (!camera.read(&frame, &error)) {
+        std::cerr << "camera read failed: " << error << "\n";
+        camera.close();
+        return 3;
+      }
+      const auto read_end = std::chrono::steady_clock::now();
+      const auto infer_begin = std::chrono::steady_clock::now();
+      const bool ok = detector.runFrame(frame, &result, &error);
+      const auto infer_end = std::chrono::steady_clock::now();
+      if (!ok) {
+        std::cerr << "runFrame failed: " << error << "\n";
+        camera.releaseFrame();
+        camera.close();
+        return 3;
+      }
+      if (index == opt.frames - 1 && !opt.dump_frame.empty()) {
+        if (!camera_demo_support::saveFrameAsImage(frame, opt.dump_frame,
+                                                   &error)) {
+          std::cerr << "failed to save frame: " << error << "\n";
+          camera.releaseFrame();
+          camera.close();
+          return 4;
+        }
+        saved_frame = opt.dump_frame;
+        if (!opt.dump_overlay.empty() &&
+            !saveAnnotatedImage(saved_frame, opt.dump_overlay, result, &error)) {
+          std::cerr << "failed to save overlay: " << error << "\n";
+          camera.releaseFrame();
+          camera.close();
+          return 4;
+        }
+        saved_overlay = opt.dump_overlay;
+      }
+      camera.releaseFrame();
+      const double read_ms =
+          std::chrono::duration<double, std::milli>(read_end - read_begin).count();
+      const double infer_ms =
+          std::chrono::duration<double, std::milli>(infer_end - infer_begin).count();
+      total_read_ms += read_ms;
+      total_infer_ms += infer_ms;
+      total_pipeline_ms += read_ms + infer_ms;
+    }
+    camera.close();
+    std::cout << "camera_frames: " << opt.frames << "\n";
+    const double avg_read_ms = total_read_ms / opt.frames;
+    const double avg_infer_ms = total_infer_ms / opt.frames;
+    const double avg_total_ms = total_pipeline_ms / opt.frames;
+    std::cout << "avg_read_ms: " << avg_read_ms << "\n";
+    std::cout << "avg_infer_ms: " << avg_infer_ms << "\n";
+    std::cout << "avg_total_ms: " << avg_total_ms << "\n";
+    std::cout << "fps: " << (avg_total_ms > 0.0 ? 1000.0 / avg_total_ms : 0.0)
+              << "\n";
+  } else if (!detector.run(opt.image, &result, &error)) {
     std::cerr << "run failed: " << error << "\n";
     return 3;
   }
@@ -167,6 +303,12 @@ int main(int argc, char **argv) {
       return 4;
     }
     std::cout << "saved: " << opt.output << "\n";
+  }
+  if (!saved_frame.empty()) {
+    std::cout << "saved_frame: " << saved_frame << "\n";
+  }
+  if (!saved_overlay.empty()) {
+    std::cout << "saved_overlay: " << saved_overlay << "\n";
   }
   return 0;
 }

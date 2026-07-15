@@ -23,6 +23,7 @@ include(cmake/cv184x_tdl.cmake)
 
 set(TDL_APP_FULL_ONLY_SOURCES
   src/algorithm/algorithm_engine.cpp
+  src/algorithm/byte_tracker.cpp
   src/algorithm/classifier.cpp
   src/algorithm/detector.cpp
   src/algorithm/face_attribute_classifier.cpp
@@ -41,7 +42,11 @@ set(TDL_APP_FULL_ONLY_SOURCES
   src/algorithm/nn_yolov5.cpp
   src/algorithm/nn_yolov8.cpp
   src/algorithm/plate_recognizer.cpp
+  src/algorithm/pose_classifier.cpp
   src/algorithm/semantic_segmenter.cpp
+  src/algorithm/self_learning_classifier.cpp
+  src/algorithm/single_object_tracker.cpp
+  src/algorithm/speech_recognizer.cpp
   src/algorithm/voice_activity_detector.cpp
   src/multi_stage_pipeline.cpp
   src/pipeline.cpp
@@ -167,6 +172,50 @@ if(TDL_APP_BUILD_DEMOS)
   target_link_libraries(tdl_vdec_demo PRIVATE tdl_app_sdk)
 
   if(NOT TDL_APP_MEDIA_MINIMAL)
+    if(DEFINED ENV{TDL_APP_FREETYPE_ROOT})
+      set(_TDL_APP_FREETYPE_ROOT_DEFAULT "$ENV{TDL_APP_FREETYPE_ROOT}")
+    else()
+      set(_TDL_APP_FREETYPE_ROOT_DEFAULT
+          "/home/jyd/zwz/sophpi/install/rootfs/usr")
+    endif()
+    set(TDL_APP_FREETYPE_ROOT "${_TDL_APP_FREETYPE_ROOT_DEFAULT}"
+        CACHE PATH "CV184X rootfs containing FreeType headers and library")
+    find_path(TDL_APP_FREETYPE_INCLUDE_DIR
+      NAMES ft2build.h
+      PATHS "${TDL_APP_FREETYPE_ROOT}/include/freetype2"
+      NO_DEFAULT_PATH
+    )
+    find_library(TDL_APP_FREETYPE_LIBRARY
+      NAMES freetype
+      PATHS "${TDL_APP_FREETYPE_ROOT}/lib"
+      NO_DEFAULT_PATH
+    )
+    find_library(TDL_APP_BZ2_LIBRARY NAMES bz2
+      PATHS "${TDL_APP_FREETYPE_ROOT}/lib" NO_DEFAULT_PATH)
+    find_library(TDL_APP_PNG_LIBRARY NAMES png16
+      PATHS "${TDL_APP_FREETYPE_ROOT}/lib" NO_DEFAULT_PATH)
+    find_library(TDL_APP_BROTLI_DEC_LIBRARY NAMES brotlidec
+      PATHS "${TDL_APP_FREETYPE_ROOT}/lib" NO_DEFAULT_PATH)
+    find_library(TDL_APP_BROTLI_COMMON_LIBRARY NAMES brotlicommon
+      PATHS "${TDL_APP_FREETYPE_ROOT}/lib" NO_DEFAULT_PATH)
+    find_library(TDL_APP_ROOTFS_Z_LIBRARY NAMES z
+      PATHS "${TDL_APP_FREETYPE_ROOT}/../lib" NO_DEFAULT_PATH)
+    if(NOT TDL_APP_FREETYPE_INCLUDE_DIR OR NOT TDL_APP_FREETYPE_LIBRARY OR
+       NOT TDL_APP_BZ2_LIBRARY OR NOT TDL_APP_PNG_LIBRARY OR
+       NOT TDL_APP_BROTLI_DEC_LIBRARY OR NOT TDL_APP_BROTLI_COMMON_LIBRARY OR
+       NOT TDL_APP_ROOTFS_Z_LIBRARY)
+      message(FATAL_ERROR
+        "FreeType and its rootfs dependencies are required for UTF-8 OCR overlays. Set TDL_APP_FREETYPE_ROOT.")
+    endif()
+    set(TDL_APP_FREETYPE_LIBRARIES
+      "${TDL_APP_FREETYPE_LIBRARY}"
+      "${TDL_APP_BZ2_LIBRARY}"
+      "${TDL_APP_PNG_LIBRARY}"
+      "${TDL_APP_BROTLI_DEC_LIBRARY}"
+      "${TDL_APP_BROTLI_COMMON_LIBRARY}"
+      "${TDL_APP_ROOTFS_Z_LIBRARY}"
+    )
+
     add_executable(tdl_detect_demo apps/tdl_detect_demo.cpp apps/demo_support.cpp)
     target_include_directories(tdl_detect_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
     target_link_libraries(tdl_detect_demo PRIVATE tdl_app_sdk)
@@ -187,28 +236,87 @@ if(TDL_APP_BUILD_DEMOS)
     target_include_directories(tdl_feature_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
     target_link_libraries(tdl_feature_demo PRIVATE tdl_app_sdk)
 
-    add_executable(tdl_keypoint_demo apps/tdl_keypoint_demo.cpp)
+    add_executable(tdl_keypoint_demo
+      apps/tdl_keypoint_demo.cpp
+      apps/camera_demo_support.cpp
+    )
     target_include_directories(tdl_keypoint_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
     target_link_libraries(tdl_keypoint_demo PRIVATE tdl_app_sdk)
+
+    add_executable(tdl_pose_classifier_demo
+      apps/tdl_pose_classifier_demo.cpp
+      apps/camera_demo_support.cpp
+    )
+    target_include_directories(tdl_pose_classifier_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
+    target_link_libraries(tdl_pose_classifier_demo PRIVATE tdl_app_sdk)
+    target_link_options(tdl_pose_classifier_demo PRIVATE -Wl,--as-needed)
+
+    add_executable(tdl_single_object_tracker_demo
+      apps/tdl_single_object_tracker_demo.cpp
+      apps/camera_demo_support.cpp
+    )
+    target_include_directories(tdl_single_object_tracker_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
+    target_link_libraries(tdl_single_object_tracker_demo PRIVATE tdl_app_sdk)
+    target_link_options(tdl_single_object_tracker_demo PRIVATE -Wl,--as-needed)
+
+    add_executable(tdl_self_learn_classify_demo
+      apps/tdl_self_learn_classify_demo.cpp
+    )
+    target_include_directories(tdl_self_learn_classify_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
+    target_link_libraries(tdl_self_learn_classify_demo PRIVATE tdl_app_sdk)
+    target_link_options(tdl_self_learn_classify_demo PRIVATE -Wl,--as-needed)
+
+    add_executable(tdl_byte_tracker_camera_demo
+      apps/tdl_byte_tracker_camera_demo.cpp
+      apps/camera_demo_support.cpp
+    )
+    target_include_directories(tdl_byte_tracker_camera_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
+    target_link_libraries(tdl_byte_tracker_camera_demo PRIVATE tdl_app_sdk)
+    target_link_options(tdl_byte_tracker_camera_demo PRIVATE -Wl,--as-needed)
+
+    add_executable(tdl_byte_tracker_sequence_demo
+      apps/tdl_byte_tracker_sequence_demo.cpp
+    )
+    target_include_directories(tdl_byte_tracker_sequence_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
+    target_link_libraries(tdl_byte_tracker_sequence_demo PRIVATE tdl_app_sdk)
+    target_link_options(tdl_byte_tracker_sequence_demo PRIVATE -Wl,--as-needed)
 
     add_executable(tdl_face_dense_keypoint_demo
       apps/tdl_face_dense_keypoint_demo.cpp
       apps/demo_support.cpp
+      apps/camera_demo_support.cpp
     )
-    target_include_directories(tdl_face_dense_keypoint_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
+    target_include_directories(tdl_face_dense_keypoint_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps" "${CMAKE_CURRENT_LIST_DIR}/src")
     target_link_libraries(tdl_face_dense_keypoint_demo PRIVATE tdl_app_sdk)
 
-    add_executable(tdl_semantic_seg_demo apps/tdl_semantic_seg_demo.cpp)
+    add_executable(tdl_semantic_seg_demo
+      apps/tdl_semantic_seg_demo.cpp
+      apps/camera_demo_support.cpp
+    )
     target_include_directories(tdl_semantic_seg_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
     target_link_libraries(tdl_semantic_seg_demo PRIVATE tdl_app_sdk)
 
-    add_executable(tdl_instance_seg_demo apps/tdl_instance_seg_demo.cpp)
+    add_executable(tdl_instance_seg_demo
+      apps/tdl_instance_seg_demo.cpp
+      apps/camera_demo_support.cpp
+    )
     target_include_directories(tdl_instance_seg_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
     target_link_libraries(tdl_instance_seg_demo PRIVATE tdl_app_sdk)
 
-    add_executable(tdl_lane_demo apps/tdl_lane_demo.cpp)
+    add_executable(tdl_lane_demo
+      apps/tdl_lane_demo.cpp
+      apps/camera_demo_support.cpp
+    )
     target_include_directories(tdl_lane_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
     target_link_libraries(tdl_lane_demo PRIVATE tdl_app_sdk)
+
+    add_executable(tdl_asr_demo apps/tdl_asr_demo.cpp)
+    target_include_directories(tdl_asr_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
+    target_link_libraries(tdl_asr_demo PRIVATE tdl_app_sdk)
+
+    add_executable(tdl_dualos_asr_demo apps/tdl_dualos_asr_demo.cpp)
+    target_include_directories(tdl_dualos_asr_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
+    target_link_libraries(tdl_dualos_asr_demo PRIVATE tdl_app_sdk)
 
     add_executable(tdl_vad_demo apps/tdl_vad_demo.cpp)
     target_include_directories(tdl_vad_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
@@ -225,13 +333,45 @@ if(TDL_APP_BUILD_DEMOS)
     add_executable(tdl_face_attr_pipeline_demo
       apps/tdl_face_attr_pipeline_demo.cpp
       apps/demo_support.cpp
+      apps/camera_demo_support.cpp
     )
     target_include_directories(tdl_face_attr_pipeline_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
     target_link_libraries(tdl_face_attr_pipeline_demo PRIVATE tdl_app_sdk)
 
-    add_executable(tdl_plate_recognize_demo apps/tdl_plate_recognize_demo.cpp apps/demo_support.cpp)
+    add_executable(tdl_face_recognition_demo apps/tdl_face_recognition_demo.cpp)
+    target_include_directories(tdl_face_recognition_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
+    target_link_libraries(tdl_face_recognition_demo PRIVATE tdl_app_sdk)
+
+    add_executable(tdl_plate_recognize_demo
+      apps/tdl_plate_recognize_demo.cpp
+      apps/demo_support.cpp
+      apps/camera_demo_support.cpp
+    )
     target_include_directories(tdl_plate_recognize_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
     target_link_libraries(tdl_plate_recognize_demo PRIVATE tdl_app_sdk)
+
+    add_executable(tdl_pp_ocr_demo
+      apps/tdl_pp_ocr_demo.cpp
+      apps/demo_support.cpp
+      apps/ocr_overlay_support.cpp
+    )
+    target_include_directories(tdl_pp_ocr_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps" "${TDL_APP_FREETYPE_INCLUDE_DIR}")
+    target_link_libraries(tdl_pp_ocr_demo PRIVATE tdl_app_sdk ${TDL_APP_FREETYPE_LIBRARIES})
+    target_link_options(tdl_pp_ocr_demo PRIVATE
+      "-Wl,-rpath-link,${TDL_APP_FREETYPE_ROOT}/lib"
+      "-Wl,-rpath-link,${TDL_APP_FREETYPE_ROOT}/../lib")
+
+    add_executable(tdl_pp_ocr_camera_demo
+      apps/tdl_pp_ocr_camera_demo.cpp
+      apps/camera_demo_support.cpp
+      apps/ocr_overlay_support.cpp
+    )
+    target_include_directories(tdl_pp_ocr_camera_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps" "${TDL_APP_FREETYPE_INCLUDE_DIR}")
+    target_link_libraries(tdl_pp_ocr_camera_demo PRIVATE tdl_app_sdk ${TDL_APP_FREETYPE_LIBRARIES})
+    target_link_options(tdl_pp_ocr_camera_demo PRIVATE
+      -Wl,--as-needed
+      "-Wl,-rpath-link,${TDL_APP_FREETYPE_ROOT}/lib"
+      "-Wl,-rpath-link,${TDL_APP_FREETYPE_ROOT}/../lib")
 
     add_executable(tdl_camera_detect_demo
       apps/tdl_camera_detect_demo.cpp
@@ -240,6 +380,27 @@ if(TDL_APP_BUILD_DEMOS)
     )
     target_include_directories(tdl_camera_detect_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
     target_link_libraries(tdl_camera_detect_demo PRIVATE tdl_app_sdk)
+
+    add_executable(tdl_camera_scrfd_benchmark_demo
+      apps/tdl_camera_scrfd_benchmark_demo.cpp
+      apps/camera_demo_support.cpp
+    )
+    target_include_directories(tdl_camera_scrfd_benchmark_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
+    target_link_libraries(tdl_camera_scrfd_benchmark_demo PRIVATE tdl_app_sdk)
+
+    add_executable(tdl_camera_tdlsdk_face_benchmark_demo
+      apps/tdl_camera_tdlsdk_face_benchmark_demo.cpp
+      apps/camera_demo_support.cpp
+    )
+    target_include_directories(tdl_camera_tdlsdk_face_benchmark_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
+    target_link_libraries(tdl_camera_tdlsdk_face_benchmark_demo PRIVATE tdl_app_sdk)
+
+    add_executable(tdl_camera_yolov8_benchmark_demo
+      apps/tdl_camera_yolov8_benchmark_demo.cpp
+      apps/camera_demo_support.cpp
+    )
+    target_include_directories(tdl_camera_yolov8_benchmark_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
+    target_link_libraries(tdl_camera_yolov8_benchmark_demo PRIVATE tdl_app_sdk)
 
     add_executable(tdl_camera_classify_demo
       apps/tdl_camera_classify_demo.cpp
@@ -265,6 +426,18 @@ if(TDL_APP_BUILD_DEMOS)
     target_sources(sophpi_ai_osd_demo PRIVATE third_party/vendor/ini/ini.c)
     target_include_directories(sophpi_ai_osd_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
     target_link_libraries(sophpi_ai_osd_demo PRIVATE tdl_app_sdk)
+
+    add_executable(tdl_benchmark_demo
+      apps/tdl_benchmark_demo.cpp
+      apps/benchmark/framework.cpp
+      apps/benchmark/benchmark_cv.cpp
+      apps/benchmark/benchmark_display.cpp
+      apps/benchmark/benchmark_npu.cpp
+      apps/benchmark/screen.cpp
+      apps/camera_demo_support.cpp
+    )
+    target_include_directories(tdl_benchmark_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
+    target_link_libraries(tdl_benchmark_demo PRIVATE tdl_app_sdk)
   endif()
 endif()
 
@@ -295,19 +468,33 @@ if(TDL_APP_BUILD_DEMOS)
       tdl_classify_demo
       tdl_feature_demo
       tdl_keypoint_demo
+      tdl_pose_classifier_demo
+      tdl_single_object_tracker_demo
+      tdl_self_learn_classify_demo
+      tdl_byte_tracker_camera_demo
+      tdl_byte_tracker_sequence_demo
       tdl_face_dense_keypoint_demo
       tdl_semantic_seg_demo
       tdl_instance_seg_demo
       tdl_lane_demo
+      tdl_asr_demo
+      tdl_dualos_asr_demo
       tdl_vad_demo
       tdl_face_detect_demo
       tdl_face_attribute_demo
       tdl_face_attr_pipeline_demo
+      tdl_face_recognition_demo
       tdl_plate_recognize_demo
+      tdl_pp_ocr_demo
+      tdl_pp_ocr_camera_demo
       tdl_camera_detect_demo
+      tdl_camera_scrfd_benchmark_demo
+      tdl_camera_tdlsdk_face_benchmark_demo
+      tdl_camera_yolov8_benchmark_demo
       tdl_camera_classify_demo
       tdl_camera_feature_demo
       sophpi_ai_osd_demo
+      tdl_benchmark_demo
       RUNTIME DESTINATION bin
     )
   endif()

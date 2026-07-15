@@ -154,7 +154,16 @@ bool parseCommonArgs(int argc, char **argv, int *index, CommonOptions *opt,
   *handled = true;
   const std::string arg = argv[*index];
 
-  if (arg == "--backend") {
+  // Dual-OS camera reads always attach to the small-core-owned MMF graph.
+  // Keep these flags so benchmark commands can state that intent explicitly.
+  if (arg == "--use-mmf" || arg == "--attach-existing") {
+    return true;
+  } else if (arg == "--use-sensor-media") {
+    if (error) {
+      *error = "--use-sensor-media is not supported by the Dual-OS benchmarks";
+    }
+    return false;
+  } else if (arg == "--backend") {
     const char *v = valueForArg(argc, argv, index, "--backend", error);
     if (!v) return false;
     opt->backend = v;
@@ -452,6 +461,5 @@ void dumpCameraDiagnostics() {
 }
 
 }  // namespace camera_demo_support
-
 
 

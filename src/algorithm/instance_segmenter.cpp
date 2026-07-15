@@ -13,19 +13,31 @@
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
-#include "c_apis/tdl_sdk.h"
-#include "c_apis/tdl_utils.h"
-#include "algorithm/private/bmrt_utils.hpp"
-#include "algorithm/private/frame_convert.hpp"
-#include "algorithm/private/tdl_sdk_utils.hpp"
-#include "cvi_comm_video.h"
-#include "cvi_sys.h"
+#include "algorithm/private/vpss_preprocessor.hpp"
 
 namespace tdl_app {
 namespace {
 
 constexpr int kRegMax = 16;
 constexpr int kBoxChannels = 4 * kRegMax;
+
+void setError(std::string *error, const std::string &message) {
+  if (error) {
+    *error = message;
+  }
+}
+
+std::string resolveModelType(const InstanceSegmenter::Config &config,
+                             const std::string &requested_model_type,
+                             std::string *error) {
+  const std::string model_type =
+      !config.model_type.empty() ? config.model_type
+      : !requested_model_type.empty() ? requested_model_type : "YOLOV8_SEG_COCO80";
+  if (model_type.empty()) {
+    setError(error, "instance segmentation model_type is empty");
+  }
+  return model_type;
+}
 
 float sigmoid(float value) {
   return 1.0f / (1.0f + std::exp(-value));
@@ -128,8 +140,8 @@ class YoloV8SegRuntime : public InstanceSegRuntime {
   bool open(const InstanceSegmenter::Config &config,
             const std::string &requested_model_type,
             std::string *resolved_model_type, std::string *error) {
-    const std::string model_type = private_tdl_sdk::resolveModelToken(
-        config, requested_model_type, "YOLOV8_SEG_COCO80", error);
+    const std::string model_type =
+        resolveModelType(config, requested_model_type, error);
     if (model_type.empty()) {
       return false;
     }
@@ -162,6 +174,32 @@ class YoloV8SegRuntime : public InstanceSegRuntime {
       return false;
     }
 
+    if (!session_.nchwLayout() ||
+        (session_.inputDtype() != BM_INT8 &&
+         session_.inputDtype() != BM_UINT8)) {
+      setError(error, "instance segmentation VPSS path requires NCHW INT8/UINT8 input");
+      session_.close();
+      return false;
+    }
+    bmrt_runtime::VpssPreprocessor::Config vpss_config;
+    vpss_config.width = session_.inputWidth();
+    vpss_config.height = session_.inputHeight();
+    vpss_config.rgb = bmrt_runtime::wantsRgbInput(descriptor_, true);
+    vpss_config.keep_aspect_ratio = true;
+    vpss_config.padding = {{114, 114, 114}};
+    vpss_config.input_dtype = session_.inputDtype();
+    vpss_config.input_scale = session_.inputScale();
+    vpss_config.input_zero_point = session_.inputZeroPoint();
+    vpss_config.mean = {{mean_[0], mean_[1], mean_[2]}};
+    vpss_config.scale = {{scale_[0], scale_[1], scale_[2]}};
+    std::unique_ptr<bmrt_runtime::VpssPreprocessor> preprocessor(
+        new bmrt_runtime::VpssPreprocessor());
+    if (!preprocessor->open(session_.handle(), vpss_config, error)) {
+      session_.close();
+      return false;
+    }
+    preprocessor_ = std::move(preprocessor);
+
     if (resolved_model_type) {
       *resolved_model_type = model_type;
     }
@@ -172,7 +210,7 @@ class YoloV8SegRuntime : public InstanceSegRuntime {
            std::string *error) override {
     cv::Mat image = cv::imread(image_path, cv::IMREAD_COLOR);
     if (image.empty()) {
-      private_tdl_sdk::setError(error, "failed to read image: " + image_path);
+      setError(error, "failed to read image: " + image_path);
       return false;
     }
     return infer(image, result, error);
@@ -183,14 +221,43 @@ class YoloV8SegRuntime : public InstanceSegRuntime {
     if (!frame.image_path.empty()) {
       return run(frame.image_path, result, error);
     }
-    cv::Mat image;
-    if (!frame_convert::frameToBgrMat(frame, &image, error)) {
+    if (!result || !frame.native) {
+      setError(error, "instance segmentation frame/result pointer is null");
       return false;
     }
-    return infer(image, result, error);
+    if (!preprocessor_) {
+      setError(error, "instance segmentation VPSS preprocessor is unavailable");
+      return false;
+    }
+    auto *video = static_cast<VIDEO_FRAME_INFO_S *>(frame.native);
+    const int source_width = static_cast<int>(video->stVFrame.u32Width);
+    const int source_height = static_cast<int>(video->stVFrame.u32Height);
+    if (source_width <= 0 || source_height <= 0) {
+      setError(error, "instance segmentation source frame dimensions are invalid");
+      return false;
+    }
+    const float ratio = std::min(
+        static_cast<float>(session_.inputHeight()) / source_height,
+        static_cast<float>(session_.inputWidth()) / source_width);
+    const int top = (session_.inputHeight() -
+                     static_cast<int>(std::round(source_height * ratio))) / 2;
+    const int left = (session_.inputWidth() -
+                      static_cast<int>(std::round(source_width * ratio))) / 2;
+    if (!preprocessor_->preprocess(video, error)) {
+      return false;
+    }
+    std::vector<bmrt_runtime::OutputTensor> outputs;
+    if (!session_.launchDevice(preprocessor_->inputMemory(), &outputs, error)) {
+      return false;
+    }
+    return decodeOutputs(outputs, source_width, source_height, ratio, top, left,
+                         result, error);
   }
 
-  void reset() override { session_.close(); }
+  void reset() override {
+    preprocessor_.reset();
+    session_.close();
+  }
   bool initialized() const override { return session_.opened(); }
 
  private:
@@ -289,7 +356,7 @@ class YoloV8SegRuntime : public InstanceSegRuntime {
       const int feat_h = shape.dims[2];
       const int feat_w = shape.dims[3];
       if (feat_h <= 0 || feat_w <= 0) {
-        private_tdl_sdk::setError(error, "invalid instance segmentation output shape");
+        setError(error, "invalid instance segmentation output shape");
         return false;
       }
 
@@ -350,7 +417,7 @@ class YoloV8SegRuntime : public InstanceSegRuntime {
     }
 
     if (proto_index_ < 0 || mask_channels_ <= 0) {
-      private_tdl_sdk::setError(error, "unable to locate segmentation prototype output");
+      setError(error, "unable to locate segmentation prototype output");
       return false;
     }
 
@@ -368,7 +435,7 @@ class YoloV8SegRuntime : public InstanceSegRuntime {
       }
     }
     if (num_classes_ <= 0) {
-      private_tdl_sdk::setError(error, "unable to infer segmentation class count");
+      setError(error, "unable to infer segmentation class count");
       return false;
     }
 
@@ -392,7 +459,7 @@ class YoloV8SegRuntime : public InstanceSegRuntime {
       }
 
       if (branch.bbox_index < 0 || branch.cls_index < 0 || branch.coeff_index < 0) {
-        private_tdl_sdk::setError(error, "incomplete segmentation output branches");
+        setError(error, "incomplete segmentation output branches");
         return false;
       }
       branches_.push_back(
@@ -411,7 +478,7 @@ class YoloV8SegRuntime : public InstanceSegRuntime {
     }
 
     if (branches_.empty()) {
-      private_tdl_sdk::setError(error, "no segmentation decode branches found");
+      setError(error, "no segmentation decode branches found");
       return false;
     }
 
@@ -534,8 +601,7 @@ class YoloV8SegRuntime : public InstanceSegRuntime {
   bool infer(const cv::Mat &image, InstanceSegmentationResult *result,
              std::string *error) {
     if (!result) {
-      private_tdl_sdk::setError(error,
-                                "instance segmentation result pointer is null");
+      setError(error, "instance segmentation result pointer is null");
       return false;
     }
 
@@ -549,13 +615,21 @@ class YoloV8SegRuntime : public InstanceSegRuntime {
     if (!session_.launch(input_tensor, &outputs, error)) {
       return false;
     }
+    return decodeOutputs(outputs, image.cols, image.rows, ratio, top, left,
+                         result, error);
+  }
+
+  bool decodeOutputs(const std::vector<bmrt_runtime::OutputTensor> &outputs,
+                     int image_width, int image_height, float ratio, int top,
+                     int left, InstanceSegmentationResult *result,
+                     std::string *error) {
     if (proto_index_ < 0 || proto_index_ >= static_cast<int>(outputs.size())) {
-      private_tdl_sdk::setError(error, "invalid proto output index");
+      setError(error, "invalid proto output index");
       return false;
     }
 
     const std::vector<Candidate> candidates =
-        decodeCandidates(outputs, image.cols, image.rows, ratio, top, left);
+        decodeCandidates(outputs, image_width, image_height, ratio, top, left);
     std::vector<Box> raw_boxes;
     raw_boxes.reserve(candidates.size());
     for (const auto &candidate : candidates) {
@@ -564,10 +638,10 @@ class YoloV8SegRuntime : public InstanceSegRuntime {
     const std::vector<int> kept = nonMaxSuppression(raw_boxes, 0.45f);
 
     result->clear();
-    result->width = image.cols;
-    result->height = image.rows;
-    result->mask_width = image.cols;
-    result->mask_height = image.rows;
+    result->width = image_width;
+    result->height = image_height;
+    result->mask_width = image_width;
+    result->mask_height = image_height;
     result->instances.reserve(kept.size());
 
     const bmrt_runtime::OutputTensor &proto =
@@ -581,8 +655,8 @@ class YoloV8SegRuntime : public InstanceSegRuntime {
                  0, 0, cv::INTER_LINEAR);
 
       cv::Rect roi(left, top,
-                   std::max(1, static_cast<int>(std::round(image.cols * ratio))),
-                   std::max(1, static_cast<int>(std::round(image.rows * ratio))));
+                   std::max(1, static_cast<int>(std::round(image_width * ratio))),
+                   std::max(1, static_cast<int>(std::round(image_height * ratio))));
       roi &= cv::Rect(0, 0, resized.cols, resized.rows);
       if (roi.width <= 0 || roi.height <= 0) {
         continue;
@@ -590,7 +664,7 @@ class YoloV8SegRuntime : public InstanceSegRuntime {
 
       cv::Mat cropped = resized(roi);
       cv::Mat full_mask;
-      cv::resize(cropped, full_mask, cv::Size(image.cols, image.rows), 0, 0,
+      cv::resize(cropped, full_mask, cv::Size(image_width, image_height), 0, 0,
                  cv::INTER_LINEAR);
 
       cv::Mat binary;
@@ -598,8 +672,8 @@ class YoloV8SegRuntime : public InstanceSegRuntime {
       binary.convertTo(binary, CV_8UC1);
 
       cv::Mat object_only(binary.size(), CV_8UC1, cv::Scalar(0));
-      const cv::Rect box_roi = bmrt_runtime::clampRoi(candidate.box, image.cols,
-                                                      image.rows);
+      const cv::Rect box_roi = bmrt_runtime::clampRoi(candidate.box, image_width,
+                                                      image_height);
       binary(box_roi).copyTo(object_only(box_roi));
 
       InstanceSegment instance;
@@ -636,112 +710,13 @@ class YoloV8SegRuntime : public InstanceSegRuntime {
   std::vector<float> mean_;
   std::vector<float> scale_;
   bmrt_runtime::Session session_;
+  std::unique_ptr<bmrt_runtime::VpssPreprocessor> preprocessor_;
   std::vector<Branch> branches_;
   int proto_index_ = -1;
   int mask_channels_ = 0;
   int proto_width_ = 0;
   int proto_height_ = 0;
   int num_classes_ = 0;
-};
-
-class LegacyInstanceSegRuntime : public InstanceSegRuntime {
- public:
-  bool load(const InstanceSegmenter::Config &config,
-            const std::string &requested_model_type,
-            std::string *resolved_model_type, std::string *error) {
-    const std::string model_type = private_tdl_sdk::resolveModelToken(
-        config, requested_model_type, "YOLOV8_SEG_COCO80", error);
-    if (model_type.empty()) {
-      return false;
-    }
-    if (!session_.open(config, model_type, error)) {
-      return false;
-    }
-    if (resolved_model_type) {
-      *resolved_model_type = model_type;
-    }
-    return true;
-  }
-
-  bool run(const std::string &image_path, InstanceSegmentationResult *result,
-           std::string *error) override {
-    private_tdl_sdk::ImageGuard image;
-    if (!image.load(image_path, error)) {
-      return false;
-    }
-    return infer(image.get(), result, error);
-  }
-
-  bool runFrame(const Frame &frame, InstanceSegmentationResult *result,
-                std::string *error) override {
-    private_tdl_sdk::ImageGuard image;
-    if (!image.wrap(frame, error)) {
-      return false;
-    }
-    return infer(image.get(), result, error);
-  }
-
-  void reset() override { session_.close(); }
-  bool initialized() const override { return session_.initialized(); }
-
- private:
-  bool infer(TDLImage image, InstanceSegmentationResult *result,
-             std::string *error) {
-    if (!session_.initialized()) {
-      private_tdl_sdk::setError(error, "instance segmenter is not initialized");
-      return false;
-    }
-    if (!result) {
-      private_tdl_sdk::setError(
-          error, "instance segmentation result pointer is null");
-      return false;
-    }
-
-    TDLInstanceSeg meta;
-    std::memset(&meta, 0, sizeof(meta));
-    const int ret = TDL_InstanceSegmentation(session_.handle(),
-                                             session_.modelId(), image, &meta);
-    if (ret != 0) {
-      private_tdl_sdk::setError(
-          error, "TDL_InstanceSegmentation failed, ret=" + std::to_string(ret));
-      return false;
-    }
-
-    result->clear();
-    result->width = static_cast<int>(meta.width);
-    result->height = static_cast<int>(meta.height);
-    result->mask_width = static_cast<int>(meta.mask_width);
-    result->mask_height = static_cast<int>(meta.mask_height);
-    result->instances.reserve(meta.size);
-    const int mask_pixels = result->mask_width * result->mask_height;
-    for (std::uint32_t i = 0; i < meta.size; ++i) {
-      InstanceSegment instance;
-      if (meta.info[i].obj_info) {
-        instance.box.x1 = meta.info[i].obj_info->box.x1;
-        instance.box.y1 = meta.info[i].obj_info->box.y1;
-        instance.box.x2 = meta.info[i].obj_info->box.x2;
-        instance.box.y2 = meta.info[i].obj_info->box.y2;
-        instance.box.score = meta.info[i].obj_info->score;
-        instance.box.class_id = meta.info[i].obj_info->class_id;
-      }
-      if (meta.info[i].mask && mask_pixels > 0) {
-        instance.mask.assign(meta.info[i].mask, meta.info[i].mask + mask_pixels);
-      }
-      instance.outline.reserve(meta.info[i].mask_point_size);
-      for (std::uint32_t j = 0; j < meta.info[i].mask_point_size; ++j) {
-        Point point;
-        point.x = meta.info[i].mask_point[2 * j];
-        point.y = meta.info[i].mask_point[2 * j + 1];
-        point.score = instance.box.score;
-        instance.outline.push_back(point);
-      }
-      result->instances.push_back(instance);
-    }
-    TDL_ReleaseInstanceSegMeta(&meta);
-    return true;
-  }
-
-  private_tdl_sdk::Session session_;
 };
 
 }  // namespace
@@ -751,8 +726,8 @@ class InstanceSegmenterImpl {
   bool load(const InstanceSegmenter::Config &config,
             const std::string &requested_model_type,
             std::string *resolved_model_type, std::string *error) {
-    const std::string model_type = private_tdl_sdk::resolveModelToken(
-        config, requested_model_type, "YOLOV8_SEG_COCO80", error);
+    const std::string model_type =
+        resolveModelType(config, requested_model_type, error);
     if (model_type.empty()) {
       return false;
     }
@@ -769,7 +744,7 @@ class InstanceSegmenterImpl {
       runtime_ = std::move(runtime);
       return true;
     }
-    private_tdl_sdk::setError(
+    setError(
         error,
         "unsupported instance segmentation model_type for custom BMRT runtime: " +
             model_type);
@@ -779,7 +754,7 @@ class InstanceSegmenterImpl {
   bool run(const std::string &image_path, InstanceSegmentationResult *result,
            std::string *error) {
     if (!runtime_) {
-      private_tdl_sdk::setError(error, "instance segmenter is not initialized");
+      setError(error, "instance segmenter is not initialized");
       return false;
     }
     return runtime_->run(image_path, result, error);
@@ -788,7 +763,7 @@ class InstanceSegmenterImpl {
   bool runFrame(const Frame &frame, InstanceSegmentationResult *result,
                 std::string *error) {
     if (!runtime_) {
-      private_tdl_sdk::setError(error, "instance segmenter is not initialized");
+      setError(error, "instance segmenter is not initialized");
       return false;
     }
     return runtime_->runFrame(frame, result, error);
@@ -885,7 +860,7 @@ bool InstanceSegmenter::runFrame(const Frame &frame,
                                  InstanceSegmentationResult *result,
                                  std::string *error) {
   if (!impl_) {
-    private_tdl_sdk::setError(error, "instance segmenter is not initialized");
+    setError(error, "instance segmenter is not initialized");
     return false;
   }
   return reinterpret_cast<InstanceSegmenterImpl *>(impl_)->runFrame(frame, result,
@@ -896,7 +871,7 @@ bool InstanceSegmenter::segment(const std::string &image_path,
                                 InstanceSegmentationResult *result,
                                 std::string *error) {
   if (!impl_) {
-    private_tdl_sdk::setError(error, "instance segmenter is not initialized");
+    setError(error, "instance segmenter is not initialized");
     return false;
   }
   return reinterpret_cast<InstanceSegmenterImpl *>(impl_)->run(image_path, result,

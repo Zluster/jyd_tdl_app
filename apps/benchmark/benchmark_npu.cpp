@@ -325,6 +325,9 @@ class NpuBenchmark : public BenchmarkModule {
 
     pending_tasks_.clear();
     for (auto &task : candidates) {
+      if (!cfg.task.empty() && cfg.task != task->name()) {
+        continue;
+      }
       const std::string image =
           cfg.image.empty() ? task->defaultImage() : cfg.image;
       const std::string spec = task->defaultSpec();
@@ -344,7 +347,12 @@ class NpuBenchmark : public BenchmarkModule {
 
     if (pending_tasks_.empty()) {
       if (error) {
-        *error = "no NPU task available; check model specs and image path";
+        if (!cfg.task.empty()) {
+          *error = "NPU task not available: " + cfg.task +
+                   "; check task name, model spec, and image path";
+        } else {
+          *error = "no NPU task available; check model specs and image path";
+        }
       }
       return false;
     }

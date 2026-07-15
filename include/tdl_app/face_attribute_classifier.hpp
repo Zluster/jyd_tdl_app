@@ -45,6 +45,9 @@ class FaceAttributeClassifier {
   bool classifyCrop(const std::string &image_path, const Box &roi,
                     const InferOptions &options, AlgorithmResult *result,
                     std::string *error = nullptr);
+  bool classifyFrameCrop(const Frame &frame, const Box &roi,
+                         const InferOptions &options, AlgorithmResult *result,
+                         std::string *error = nullptr);
 
   bool initialized() const;
   std::string modelType() const;

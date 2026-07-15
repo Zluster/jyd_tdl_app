@@ -1,9 +1,11 @@
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <iomanip>
 #include <limits>
 #include <memory>
 #include <string>
@@ -14,6 +16,8 @@
 
 #include "bmlib_runtime.h"
 #include "bmruntime_interface.h"
+#include "algorithm/private/vpss_preprocessor.hpp"
+#include "camera_demo_support.hpp"
 #include "demo_support.hpp"
 #include "tdl_app/tdl_app.hpp"
 #include "tdl_app/face_detector.hpp"
@@ -26,6 +30,14 @@ struct Options {
   std::string keypoint_model_spec;
   std::string firmware;
   std::string output;
+  std::string dump_frame;
+  std::string dump_overlay;
+  bool camera = false;
+  int group = 0;
+  int channel = 1;
+  int timeout_ms = 1000;
+  int frames = 1;
+  int warmup = 0;
   float threshold = 0.25f;
   float roi_expand_ratio = 0.0f;
   int detector_face_class_id = 0;
@@ -86,10 +98,13 @@ const char *valueForArg(int argc, char **argv, int *index, const char *name) {
 void printUsage() {
   std::cout
       << "Usage:\n"
-      << "  tdl_face_dense_keypoint_demo --image FILE\n"
+      << "  tdl_face_dense_keypoint_demo (--image FILE | --camera)\n"
       << "      --detector-model-spec FILE --keypoint-model-spec FILE\n"
       << "      [--firmware FILE] [--threshold 0.25] [--output FILE]\n"
-      << "      [--roi-expand-ratio 0.0] [--detector-face-class-id 0]\n";
+      << "      [--roi-expand-ratio 0.0] [--detector-face-class-id 0]\n"
+      << "      [--group 0] [--channel 1] [--timeout-ms 1000]\n"
+      << "      [--warmup 30] [--frames 300]\n"
+      << "      [--dump-frame FILE] [--dump-overlay FILE]\n";
 }
 
 bool parseArgs(int argc, char **argv, Options *opt) {
@@ -103,6 +118,10 @@ bool parseArgs(int argc, char **argv, Options *opt) {
       const char *value = valueForArg(argc, argv, &i, "--image");
       if (!value) return false;
       opt->image = value;
+      continue;
+    }
+    if (arg == "--camera") {
+      opt->camera = true;
       continue;
     }
     if (arg == "--detector-model-spec") {
@@ -137,6 +156,48 @@ bool parseArgs(int argc, char **argv, Options *opt) {
       opt->output = value;
       continue;
     }
+    if (arg == "--dump-frame") {
+      const char *value = valueForArg(argc, argv, &i, "--dump-frame");
+      if (!value) return false;
+      opt->dump_frame = value;
+      continue;
+    }
+    if (arg == "--dump-overlay") {
+      const char *value = valueForArg(argc, argv, &i, "--dump-overlay");
+      if (!value) return false;
+      opt->dump_overlay = value;
+      continue;
+    }
+    if (arg == "--group") {
+      const char *value = valueForArg(argc, argv, &i, "--group");
+      if (!value) return false;
+      opt->group = std::atoi(value);
+      continue;
+    }
+    if (arg == "--channel") {
+      const char *value = valueForArg(argc, argv, &i, "--channel");
+      if (!value) return false;
+      opt->channel = std::atoi(value);
+      continue;
+    }
+    if (arg == "--timeout-ms") {
+      const char *value = valueForArg(argc, argv, &i, "--timeout-ms");
+      if (!value) return false;
+      opt->timeout_ms = std::atoi(value);
+      continue;
+    }
+    if (arg == "--frames") {
+      const char *value = valueForArg(argc, argv, &i, "--frames");
+      if (!value) return false;
+      opt->frames = std::atoi(value);
+      continue;
+    }
+    if (arg == "--warmup") {
+      const char *value = valueForArg(argc, argv, &i, "--warmup");
+      if (!value) return false;
+      opt->warmup = std::atoi(value);
+      continue;
+    }
     if (arg == "--roi-expand-ratio") {
       const char *value = valueForArg(argc, argv, &i, "--roi-expand-ratio");
       if (!value) return false;
@@ -159,8 +220,8 @@ bool parseArgs(int argc, char **argv, Options *opt) {
     return false;
   }
 
-  if (opt->image.empty()) {
-    std::cerr << "image path is required\n";
+  if (!opt->camera && opt->image.empty()) {
+    std::cerr << "--image or --camera is required\n";
     return false;
   }
   if (opt->detector_model_spec.empty()) {
@@ -169,6 +230,18 @@ bool parseArgs(int argc, char **argv, Options *opt) {
   }
   if (opt->keypoint_model_spec.empty()) {
     std::cerr << "keypoint model spec is required\n";
+    return false;
+  }
+  if (opt->camera && !opt->output.empty()) {
+    std::cerr << "--output is offline-only; use --dump-overlay with --camera\n";
+    return false;
+  }
+  if (!opt->dump_overlay.empty() && opt->dump_frame.empty()) {
+    std::cerr << "--dump-overlay requires --dump-frame\n";
+    return false;
+  }
+  if (opt->frames <= 0 || opt->warmup < 0) {
+    std::cerr << "--frames must be positive and --warmup must be non-negative\n";
     return false;
   }
   return true;
@@ -359,6 +432,18 @@ bool writeTempCrop(const cv::Mat &crop, int face_index, TempFile *temp_file,
   return true;
 }
 
+struct DenseProfile {
+  double vpss_roi_ms = 0.0;
+  double bmrt_ms = 0.0;
+  double output_copy_decode_ms = 0.0;
+  double total_ms = 0.0;
+};
+
+double elapsedMs(const std::chrono::steady_clock::time_point &begin,
+                 const std::chrono::steady_clock::time_point &end) {
+  return std::chrono::duration<double, std::milli>(end - begin).count();
+}
+
 class DenseLandmarkRuntime {
  public:
   ~DenseLandmarkRuntime() { close(); }
@@ -454,6 +539,32 @@ class DenseLandmarkRuntime {
       close();
       return false;
     }
+    input_dtype_ = net_info_->input_dtypes[0];
+    if (!nchw_layout_ && input_dtype_ == BM_UINT8) {
+      tdl_app::bmrt_runtime::VpssPreprocessor::Config vpss_config;
+      vpss_config.width = input_width_;
+      vpss_config.height = input_height_;
+      vpss_config.rgb = normalizeToken(descriptor_.input_type) == "RGB";
+      vpss_config.interleaved = true;
+      vpss_config.input_dtype = input_dtype_;
+      vpss_config.input_scale =
+          net_info_->input_scales ? net_info_->input_scales[0] : 1.0f;
+      vpss_config.input_zero_point = net_info_->input_zero_point
+                                         ? net_info_->input_zero_point[0]
+                                         : 0;
+      const float mean = descriptor_.mean.empty() ? 0.0f : descriptor_.mean[0];
+      const float scale = descriptor_.scale.empty()
+                              ? 1.0f / 255.0f
+                              : descriptor_.scale[0];
+      vpss_config.mean = {{mean, mean, mean}};
+      vpss_config.scale = {{scale, scale, scale}};
+      hardware_preprocessor_.reset(new tdl_app::bmrt_runtime::VpssPreprocessor());
+      if (!hardware_preprocessor_->open(handle_, vpss_config, error) ||
+          !allocateDeviceOutputs(error)) {
+        close();
+        return false;
+      }
+    }
     return true;
   }
 
@@ -496,73 +607,68 @@ class DenseLandmarkRuntime {
       return false;
     }
 
-    std::vector<float> coords;
-    if (!decodeOutput(output_bytes[static_cast<size_t>(coord_output_index_)],
-                      output_shapes[static_cast<size_t>(coord_output_index_)],
-                      coord_output_index_, &coords, error)) {
+    return decodePoints(output_bytes, output_shapes, points, error);
+  }
+
+  bool inferFrameCrop(void *native_frame,
+                      const tdl_app::bmrt_runtime::VpssPreprocessor::Roi &roi,
+                      std::vector<tdl_app::Point> *points,
+                      DenseProfile *profile, std::string *error) {
+    if (!hardware_preprocessor_ || !native_frame || !points) {
+      if (error) *error = "dense landmark VPSS path is unavailable";
       return false;
     }
-    if (coords.size() < 3 || coords.size() % 3 != 0) {
-      if (error) {
-        *error = "unexpected dense landmark coordinate count: " +
-                 std::to_string(coords.size());
-      }
+    const auto total_begin = std::chrono::steady_clock::now();
+    const auto vpss_begin = total_begin;
+    if (!hardware_preprocessor_->preprocess(native_frame, &roi, error)) {
       return false;
     }
+    if (profile) profile->vpss_roi_ms = elapsedMs(vpss_begin, std::chrono::steady_clock::now());
 
-    if (!debug_printed_) {
-      float min_x = std::numeric_limits<float>::max();
-      float min_y = std::numeric_limits<float>::max();
-      float min_z = std::numeric_limits<float>::max();
-      float max_x = std::numeric_limits<float>::lowest();
-      float max_y = std::numeric_limits<float>::lowest();
-      float max_z = std::numeric_limits<float>::lowest();
-      for (size_t i = 0; i + 2 < coords.size(); i += 3) {
-        min_x = std::min(min_x, coords[i + 0]);
-        min_y = std::min(min_y, coords[i + 1]);
-        min_z = std::min(min_z, coords[i + 2]);
-        max_x = std::max(max_x, coords[i + 0]);
-        max_y = std::max(max_y, coords[i + 1]);
-        max_z = std::max(max_z, coords[i + 2]);
-      }
-
-      std::cout << "dense landmark debug: model=" << descriptor_.model_path
-                << " input=" << input_width_ << "x" << input_height_
-                << " layout=" << (nchw_layout_ ? "nchw" : "nhwc")
-                << " points=" << landmark_count_
-                << " coord_output_index=" << coord_output_index_
-                << " coord_extent=" << coordinate_extent_ << "\n";
-      std::cout << "dense landmark debug: xyz0=(" << coords[0] << ","
-                << coords[1] << "," << coords[2] << ") xyz1=(" << coords[3]
-                << "," << coords[4] << "," << coords[5] << ") xyz2=("
-                << coords[6] << "," << coords[7] << "," << coords[8]
-                << ")\n";
-      std::cout << "dense landmark debug: x_range=[" << min_x << "," << max_x
-                << "] y_range=[" << min_y << "," << max_y << "] z_range=["
-                << min_z << "," << max_z << "]\n";
-      if (score_output_index_ >= 0) {
-        std::vector<float> score;
-        if (decodeOutput(output_bytes[static_cast<size_t>(score_output_index_)],
-                         output_shapes[static_cast<size_t>(score_output_index_)],
-                         score_output_index_, &score, nullptr) &&
-            !score.empty()) {
-          std::cout << "dense landmark debug: score=" << score[0] << "\n";
-        }
-      }
-      debug_printed_ = true;
+    bm_tensor_t input_tensor{};
+    bmrt_tensor_with_device(&input_tensor, hardware_preprocessor_->inputMemory(),
+                            input_dtype_, net_info_->stages[0].input_shapes[0]);
+    std::vector<bm_tensor_t> output_tensors(
+        static_cast<size_t>(net_info_->output_num), bm_tensor_t{});
+    for (int i = 0; i < net_info_->output_num; ++i) {
+      bmrt_tensor_with_device(&output_tensors[static_cast<size_t>(i)],
+                              output_memories_[static_cast<size_t>(i)],
+                              net_info_->output_dtypes[i],
+                              net_info_->stages[0].output_shapes[i]);
     }
-
-    points->clear();
-    points->reserve(coords.size() / 3);
-    for (size_t i = 0; i + 2 < coords.size(); i += 3) {
-      tdl_app::Point point;
-      point.x = std::max(0.0f,
-                         std::min(static_cast<float>(crop.cols), coords[i + 0]));
-      point.y = std::max(0.0f,
-                         std::min(static_cast<float>(crop.rows), coords[i + 1]));
-      points->push_back(point);
+    const auto bmrt_begin = std::chrono::steady_clock::now();
+    if (!bmrt_launch_tensor_ex(runtime_, net_name_.c_str(), &input_tensor, 1,
+                               output_tensors.data(), net_info_->output_num,
+                               true, false) || bm_thread_sync(handle_) != BM_SUCCESS) {
+      if (error) *error = "dense landmark device launch failed";
+      return false;
     }
-    return true;
+    if (profile) profile->bmrt_ms = elapsedMs(bmrt_begin, std::chrono::steady_clock::now());
+
+    const auto copy_begin = std::chrono::steady_clock::now();
+    std::vector<std::vector<std::uint8_t>> output_bytes(
+        static_cast<size_t>(net_info_->output_num));
+    std::vector<bm_shape_t> output_shapes(static_cast<size_t>(net_info_->output_num));
+    for (int i = 0; i < net_info_->output_num; ++i) {
+      output_shapes[static_cast<size_t>(i)] = output_tensors[static_cast<size_t>(i)].shape;
+      size_t count = 1;
+      for (int d = 0; d < output_shapes[static_cast<size_t>(i)].num_dims; ++d) {
+        count *= static_cast<size_t>(output_shapes[static_cast<size_t>(i)].dims[d]);
+      }
+      output_bytes[static_cast<size_t>(i)].resize(
+          count * bmrt_data_type_size(net_info_->output_dtypes[i]));
+      if (bm_memcpy_d2s(handle_, output_bytes[static_cast<size_t>(i)].data(),
+                        output_tensors[static_cast<size_t>(i)].device_mem) != BM_SUCCESS) {
+        if (error) *error = "dense landmark output copy failed";
+        return false;
+      }
+    }
+    const bool ok = decodePoints(output_bytes, output_shapes, points, error);
+    if (profile) {
+      profile->output_copy_decode_ms = elapsedMs(copy_begin, std::chrono::steady_clock::now());
+      profile->total_ms = elapsedMs(total_begin, std::chrono::steady_clock::now());
+    }
+    return ok;
   }
 
  private:
@@ -684,6 +790,104 @@ class DenseLandmarkRuntime {
     }
   }
 
+  bool allocateDeviceOutputs(std::string *error) {
+    output_memories_.resize(static_cast<size_t>(net_info_->output_num));
+    for (int i = 0; i < net_info_->output_num; ++i) {
+      size_t bytes = net_info_->max_output_bytes[i];
+      if (bytes == 0) {
+        const bm_shape_t &shape = net_info_->stages[0].output_shapes[i];
+        size_t count = 1;
+        for (int d = 0; d < shape.num_dims; ++d) {
+          count *= static_cast<size_t>(shape.dims[d]);
+        }
+        bytes = count * bmrt_data_type_size(net_info_->output_dtypes[i]);
+      }
+      if (bytes == 0 ||
+          bm_malloc_device_byte(handle_, &output_memories_[static_cast<size_t>(i)],
+                                bytes) != BM_SUCCESS) {
+        if (error) *error = "dense landmark output allocation failed";
+        return false;
+      }
+    }
+    return true;
+  }
+
+  void releaseDeviceOutputs() {
+    if (handle_) {
+      for (bm_device_mem_t &memory : output_memories_) {
+        if (memory.size > 0) {
+          bm_free_device(handle_, memory);
+          memory = bm_device_mem_t{};
+        }
+      }
+    }
+    output_memories_.clear();
+  }
+
+  bool decodePoints(const std::vector<std::vector<std::uint8_t>> &output_bytes,
+                    const std::vector<bm_shape_t> &output_shapes,
+                    std::vector<tdl_app::Point> *points,
+                    std::string *error) const {
+    if (!points || coord_output_index_ < 0 ||
+        static_cast<size_t>(coord_output_index_) >= output_bytes.size()) {
+      if (error) *error = "dense landmark coordinate output is unavailable";
+      return false;
+    }
+    std::vector<float> coords;
+    if (!decodeOutput(output_bytes[static_cast<size_t>(coord_output_index_)],
+                      output_shapes[static_cast<size_t>(coord_output_index_)],
+                      coord_output_index_, &coords, error)) {
+      return false;
+    }
+    if (coords.size() < 3 || coords.size() % 3 != 0) {
+      if (error) *error = "unexpected dense landmark coordinate count: " +
+                           std::to_string(coords.size());
+      return false;
+    }
+    if (std::getenv("TDL_DENSE_TRACE")) {
+      float minimum = std::numeric_limits<float>::infinity();
+      float maximum = -std::numeric_limits<float>::infinity();
+      for (float value : coords) {
+        minimum = std::min(minimum, value);
+        maximum = std::max(maximum, value);
+      }
+      std::cerr << "dense landmark trace: values=" << coords.size()
+                << " min=" << minimum << " max=" << maximum
+                << " first=";
+      const size_t sample_count = std::min<size_t>(18, coords.size());
+      for (size_t i = 0; i < sample_count; ++i) {
+        std::cerr << (i == 0 ? "" : ",") << coords[i];
+      }
+      std::cerr << "\n";
+    }
+    if (!debug_printed_) {
+      std::cout << "dense landmark debug: model=" << descriptor_.model_path
+                << " input=" << input_width_ << "x" << input_height_
+                << " layout=" << (nchw_layout_ ? "nchw" : "nhwc")
+                << " points=" << landmark_count_
+                << " coord_output_index=" << coord_output_index_
+                << " coord_extent=" << coordinate_extent_ << "\n";
+      debug_printed_ = true;
+    }
+    points->clear();
+    points->reserve(coords.size() / 3);
+    const float x_scale = static_cast<float>(input_width_) /
+                          std::max(1.0f, coordinate_extent_);
+    const float y_scale = static_cast<float>(input_height_) /
+                          std::max(1.0f, coordinate_extent_);
+    for (size_t i = 0; i + 2 < coords.size(); i += 3) {
+      tdl_app::Point point;
+      point.x = std::max(0.0f,
+                         std::min(static_cast<float>(input_width_),
+                                  coords[i] * x_scale));
+      point.y = std::max(0.0f,
+                         std::min(static_cast<float>(input_height_),
+                                  coords[i + 1] * y_scale));
+      points->push_back(point);
+    }
+    return true;
+  }
+
   bool decodeOutput(const std::vector<std::uint8_t> &raw_bytes,
                     const bm_shape_t &shape, int output_index,
                     std::vector<float> *decoded, std::string *error) const {
@@ -729,6 +933,8 @@ class DenseLandmarkRuntime {
   }
 
   void close() {
+    hardware_preprocessor_.reset();
+    releaseDeviceOutputs();
     if (runtime_) {
       bmrt_destroy(runtime_);
       runtime_ = nullptr;
@@ -746,6 +952,7 @@ class DenseLandmarkRuntime {
     score_output_index_ = -1;
     landmark_count_ = 0;
     coordinate_extent_ = 0.0f;
+    input_dtype_ = BM_UINT8;
     descriptor_ = tdl_app::ModelDescriptor{};
   }
 
@@ -761,6 +968,10 @@ class DenseLandmarkRuntime {
   int score_output_index_ = -1;
   int landmark_count_ = 0;
   float coordinate_extent_ = 0.0f;
+  bm_data_type_t input_dtype_ = BM_UINT8;
+  std::unique_ptr<tdl_app::bmrt_runtime::VpssPreprocessor>
+      hardware_preprocessor_;
+  std::vector<bm_device_mem_t> output_memories_;
   mutable bool debug_printed_ = false;
 };
 
@@ -791,6 +1002,297 @@ bool isScrfdDetectorSpec(const std::string &model_spec) {
   return runtime == "SCRFD" || model_type.find("SCRFD") != std::string::npos;
 }
 
+bool makeHardwareRoi(const tdl_app::Box &box, float expand_ratio,
+                     int image_width, int image_height,
+                     tdl_app::bmrt_runtime::VpssPreprocessor::Roi *roi) {
+  if (!roi || image_width <= 0 || image_height <= 0) return false;
+  const tdl_app::Box square = makeSquareBox(box, expand_ratio);
+  const int x1 = std::max(0, std::min(image_width - 1,
+                                      static_cast<int>(std::floor(square.x1))));
+  const int y1 = std::max(0, std::min(image_height - 1,
+                                      static_cast<int>(std::floor(square.y1))));
+  const int x2 = std::max(x1 + 1, std::min(image_width,
+                                      static_cast<int>(std::ceil(square.x2))));
+  const int y2 = std::max(y1 + 1, std::min(image_height,
+                                      static_cast<int>(std::ceil(square.y2))));
+  roi->x = x1;
+  roi->y = y1;
+  roi->width = x2 - x1;
+  roi->height = y2 - y1;
+  return true;
+}
+
+int runCamera(const Options &opt, tdl_app::FaceDetector *face_detector,
+              DenseLandmarkRuntime *dense_landmark, std::string *error) {
+  if (!face_detector || !dense_landmark) {
+    if (error) *error = "camera dense landmark runtime is null";
+    return 5;
+  }
+  camera_demo_support::CommonOptions camera_options;
+  camera_options.group = opt.group;
+  camera_options.channel = opt.channel;
+  camera_options.timeout_ms = opt.timeout_ms;
+  camera_options.frames = opt.frames;
+  camera_demo_support::CameraRuntime camera;
+  if (!camera_demo_support::openCameraRuntime(camera_options, &camera, error)) {
+    return 5;
+  }
+
+  const tdl_app::InferOptions detect_options =
+      tdl_app::InferOptions::detection(opt.threshold);
+  double read_sum_ms = 0.0;
+  double detect_sum_ms = 0.0;
+  double roi_sum_ms = 0.0;
+  double bmrt_sum_ms = 0.0;
+  double output_sum_ms = 0.0;
+  double post_sum_ms = 0.0;
+  double total_sum_ms = 0.0;
+  double face_sum = 0.0;
+  std::size_t last_points = 0;
+  const int total_frames = opt.warmup + opt.frames;
+
+  for (int index = 0; index < total_frames; ++index) {
+    tdl_app::Frame frame;
+    const auto total_begin = std::chrono::steady_clock::now();
+    const auto read_begin = total_begin;
+    if (!camera.camera.read(&frame, error)) {
+      camera_demo_support::closeCameraRuntime(&camera);
+      return 6;
+    }
+    const auto read_end = std::chrono::steady_clock::now();
+    const auto detect_begin = read_end;
+    tdl_app::AlgorithmResult detections;
+    if (!face_detector->detectFrame(frame, detect_options, &detections, error)) {
+      camera.camera.releaseFrame();
+      camera_demo_support::closeCameraRuntime(&camera);
+      return 7;
+    }
+    const auto detect_end = std::chrono::steady_clock::now();
+    const auto *video = static_cast<const VIDEO_FRAME_INFO_S *>(frame.native);
+    if (!video) {
+      if (error) *error = "camera frame has no native VIDEO_FRAME_INFO_S";
+      camera.camera.releaseFrame();
+      camera_demo_support::closeCameraRuntime(&camera);
+      return 7;
+    }
+
+    tdl_app::AlgorithmResult result;
+    result.labels = detections.labels;
+    DenseProfile frame_profile;
+    const auto post_begin = std::chrono::steady_clock::now();
+    for (const tdl_app::Box &box : detections.boxes) {
+      if (box.class_id != opt.detector_face_class_id) continue;
+      tdl_app::bmrt_runtime::VpssPreprocessor::Roi roi;
+      if (!makeHardwareRoi(box, opt.roi_expand_ratio,
+                           static_cast<int>(video->stVFrame.u32Width),
+                           static_cast<int>(video->stVFrame.u32Height), &roi)) {
+        continue;
+      }
+      std::vector<tdl_app::Point> local_points;
+      DenseProfile profile;
+      if (!dense_landmark->inferFrameCrop(frame.native, roi, &local_points,
+                                          &profile, error)) {
+        camera.camera.releaseFrame();
+        camera_demo_support::closeCameraRuntime(&camera);
+        return 8;
+      }
+      frame_profile.vpss_roi_ms += profile.vpss_roi_ms;
+      frame_profile.bmrt_ms += profile.bmrt_ms;
+      frame_profile.output_copy_decode_ms += profile.output_copy_decode_ms;
+      frame_profile.total_ms += profile.total_ms;
+      result.boxes.push_back(box);
+      for (const tdl_app::Point &point : local_points) {
+        tdl_app::Point mapped;
+        mapped.x = roi.x + point.x * roi.width / dense_landmark->inputWidth();
+        mapped.y = roi.y + point.y * roi.height / dense_landmark->inputHeight();
+        mapped.score = point.score;
+        result.points.push_back(mapped);
+      }
+    }
+    const auto post_end = std::chrono::steady_clock::now();
+
+    if (index == total_frames - 1 && !opt.dump_frame.empty()) {
+      if (!camera_demo_support::saveFrameAsImage(frame, opt.dump_frame, error) ||
+          (!opt.dump_overlay.empty() &&
+           !demo_support::saveAnnotatedImage(opt.dump_frame, opt.dump_overlay,
+                                             result, error))) {
+        camera.camera.releaseFrame();
+        camera_demo_support::closeCameraRuntime(&camera);
+        return 9;
+      }
+    }
+    camera.camera.releaseFrame();
+    if (index < opt.warmup) continue;
+
+    read_sum_ms += elapsedMs(read_begin, read_end);
+    detect_sum_ms += elapsedMs(detect_begin, detect_end);
+    roi_sum_ms += frame_profile.vpss_roi_ms;
+    bmrt_sum_ms += frame_profile.bmrt_ms;
+    output_sum_ms += frame_profile.output_copy_decode_ms;
+    post_sum_ms += elapsedMs(post_begin, post_end);
+    total_sum_ms += elapsedMs(total_begin, std::chrono::steady_clock::now());
+    face_sum += result.boxes.size();
+    last_points = result.points.size();
+  }
+  camera_demo_support::closeCameraRuntime(&camera);
+  const double count = static_cast<double>(opt.frames);
+  const double average_total = total_sum_ms / count;
+  std::cout << std::fixed << std::setprecision(3)
+            << "camera_frames=" << opt.frames
+            << " avg_read_ms=" << read_sum_ms / count
+            << " avg_detect_ms=" << detect_sum_ms / count
+            << " avg_vpss_roi_ms=" << roi_sum_ms / count
+            << " avg_bmrt_ms=" << bmrt_sum_ms / count
+            << " avg_output_copy_decode_ms=" << output_sum_ms / count
+            << " avg_postprocess_ms=" << post_sum_ms / count
+            << " avg_total_ms=" << average_total
+            << " fps=" << (average_total > 0.0 ? 1000.0 / average_total : 0.0)
+            << " avg_faces=" << face_sum / count
+            << " last_dense_points=" << last_points << "\n";
+  if (!opt.dump_frame.empty()) std::cout << "saved_frame=" << opt.dump_frame << "\n";
+  if (!opt.dump_overlay.empty()) std::cout << "saved_overlay=" << opt.dump_overlay << "\n";
+  return 0;
+}
+
+int runOffline(const Options &opt, bool use_scrfd_detector,
+               bool use_custom_dense_landmark, tdl_app::Detector *detector,
+               tdl_app::FaceDetector *face_detector,
+               tdl_app::KeypointDetector *keypoint,
+               DenseLandmarkRuntime *dense_landmark, std::string *error) {
+  cv::Mat image = cv::imread(opt.image, cv::IMREAD_COLOR);
+  if (image.empty()) {
+    if (error) {
+      *error = "failed to read image: " + opt.image +
+               " (pass an existing image path or use --camera)";
+    }
+    return 2;
+  }
+
+  const tdl_app::InferOptions infer_options =
+      tdl_app::InferOptions::detection(opt.threshold);
+  const int total_runs = opt.warmup + opt.frames;
+  double detect_sum_ms = 0.0;
+  double crop_sum_ms = 0.0;
+  double dense_sum_ms = 0.0;
+  double post_sum_ms = 0.0;
+  double total_sum_ms = 0.0;
+  tdl_app::AlgorithmResult final_result;
+  std::size_t total_points = 0;
+
+  for (int run = 0; run < total_runs; ++run) {
+    const auto total_begin = std::chrono::steady_clock::now();
+    const auto detect_begin = total_begin;
+    tdl_app::AlgorithmResult detect_result;
+    const bool detect_ok =
+        use_scrfd_detector
+            ? face_detector->run(opt.image, infer_options, &detect_result, error)
+            : detector->run(opt.image, infer_options, &detect_result, error);
+    if (!detect_ok) {
+      return 5;
+    }
+    const auto detect_end = std::chrono::steady_clock::now();
+
+    tdl_app::AlgorithmResult run_result;
+    run_result.labels = detect_result.labels;
+    std::size_t run_points = 0;
+    double run_crop_ms = 0.0;
+    double run_dense_ms = 0.0;
+    const auto post_begin = detect_end;
+    for (const tdl_app::Box &box : detect_result.boxes) {
+      if (box.class_id != opt.detector_face_class_id) continue;
+      run_result.boxes.push_back(box);
+
+      std::vector<tdl_app::Point> local_points;
+      SquareCrop square_crop;
+      const auto crop_begin = std::chrono::steady_clock::now();
+      if (use_custom_dense_landmark) {
+        // KEYPOINT_FACE_V2 expects an expanded square face crop. Applying a
+        // five-point affine alignment here changes the model's input geometry.
+        const tdl_app::Box roi = makeSquareBox(box, opt.roi_expand_ratio);
+        if (!extractSquareCrop(image, roi, &square_crop, error)) {
+          continue;
+        }
+      } else {
+        const tdl_app::Box roi = makeSquareBox(box, opt.roi_expand_ratio);
+        if (!extractSquareCrop(image, roi, &square_crop, error)) {
+          continue;
+        }
+      }
+      const auto crop_end = std::chrono::steady_clock::now();
+      const auto dense_begin = crop_end;
+      if (use_custom_dense_landmark) {
+        if (!dense_landmark->infer(square_crop.image, &local_points, error)) {
+          return 7;
+        }
+      } else {
+        TempFile crop_file;
+        tdl_app::KeypointResult keypoint_result;
+        if (!writeTempCrop(square_crop.image,
+                           static_cast<int>(run_result.boxes.size() - 1),
+                           &crop_file, error) ||
+            !keypoint->run(crop_file.path, &keypoint_result, error)) {
+          if (error && error->empty()) *error = "keypoint inference failed";
+          return 7;
+        }
+        local_points = keypoint_result.points;
+      }
+      const auto dense_end = std::chrono::steady_clock::now();
+      run_crop_ms += elapsedMs(crop_begin, crop_end);
+      run_dense_ms += elapsedMs(dense_begin, dense_end);
+
+      for (const tdl_app::Point &point : local_points) {
+        tdl_app::Point mapped;
+        mapped = point;
+        mapped.x = square_crop.x + point.x * square_crop.size /
+                                     dense_landmark->inputWidth();
+        mapped.y = square_crop.y + point.y * square_crop.size /
+                                     dense_landmark->inputHeight();
+        mapped.x = std::max(0.0f,
+                            std::min(mapped.x,
+                                     static_cast<float>(image.cols - 1)));
+        mapped.y = std::max(0.0f,
+                            std::min(mapped.y,
+                                     static_cast<float>(image.rows - 1)));
+        run_result.points.push_back(mapped);
+      }
+      run_points += local_points.size();
+    }
+    run_result.text = "faces=" + std::to_string(run_result.boxes.size()) +
+                      " dense_points=" + std::to_string(run_points);
+    const auto total_end = std::chrono::steady_clock::now();
+    if (run >= opt.warmup) {
+      detect_sum_ms += elapsedMs(detect_begin, detect_end);
+      crop_sum_ms += run_crop_ms;
+      dense_sum_ms += run_dense_ms;
+      post_sum_ms += elapsedMs(post_begin, total_end) - run_crop_ms - run_dense_ms;
+      total_sum_ms += elapsedMs(total_begin, total_end);
+    }
+    final_result = std::move(run_result);
+    total_points = run_points;
+  }
+
+  if (!opt.output.empty() &&
+      !demo_support::saveAnnotatedImage(opt.image, opt.output, final_result,
+                                        error)) {
+    return 8;
+  }
+
+  const double count = static_cast<double>(opt.frames);
+  const double average_total = total_sum_ms / count;
+  std::cout << std::fixed << std::setprecision(3)
+            << "offline_runs=" << opt.frames
+            << " avg_detect_ms=" << detect_sum_ms / count
+            << " avg_crop_align_ms=" << crop_sum_ms / count
+            << " avg_dense_infer_ms=" << dense_sum_ms / count
+            << " avg_postprocess_ms=" << post_sum_ms / count
+            << " avg_total_ms=" << average_total
+            << " fps=" << (average_total > 0.0 ? 1000.0 / average_total : 0.0)
+            << " last_faces=" << final_result.boxes.size()
+            << " last_dense_points=" << total_points << "\n";
+  if (!opt.output.empty()) std::cout << "saved: " << opt.output << "\n";
+  return 0;
+}
+
 }  // namespace
 
 int main(int argc, char **argv) {
@@ -798,12 +1300,6 @@ int main(int argc, char **argv) {
   if (!parseArgs(argc, argv, &opt)) {
     printUsage();
     return 1;
-  }
-
-  cv::Mat image = cv::imread(opt.image, cv::IMREAD_COLOR);
-  if (image.empty()) {
-    std::cerr << "failed to read image: " << opt.image << "\n";
-    return 2;
   }
 
   std::string error;
@@ -848,129 +1344,23 @@ int main(int argc, char **argv) {
     }
   }
 
-  tdl_app::AlgorithmResult detect_result;
-  const tdl_app::InferOptions infer_options =
-      tdl_app::InferOptions::detection(opt.threshold);
-  const bool detect_ok = use_scrfd_detector
-                             ? face_detector.run(opt.image, infer_options,
-                                                 &detect_result, &error)
-                             : detector.run(opt.image, infer_options,
-                                            &detect_result, &error);
-  if (!detect_ok) {
-    std::cerr << "face detect failed: " << error << "\n";
-    return 5;
-  }
-
-  tdl_app::AlgorithmResult final_result;
-  final_result.labels = detect_result.labels;
-  for (const auto &box : detect_result.boxes) {
-    if (box.class_id == opt.detector_face_class_id) {
-      final_result.boxes.push_back(box);
+  if (opt.camera) {
+    if (!use_scrfd_detector || !use_custom_dense_landmark) {
+      std::cerr << "--camera requires SCRFD detection and the custom dense landmark model\n";
+      return 5;
     }
-  }
-
-  std::size_t total_points = 0;
-  for (std::size_t i = 0; i < final_result.boxes.size(); ++i) {
-    std::vector<tdl_app::Point> local_points;
-    bool used_affine_crop = false;
-    bool used_box_heuristic = false;
-    AffineCrop affine_crop;
-    SquareCrop square_crop;
-    if (use_custom_dense_landmark) {
-      if (extractAlignedFaceCrop(image, final_result.boxes[i],
-                                 dense_landmark.inputWidth(),
-                                 opt.roi_expand_ratio, &used_box_heuristic,
-                                 &affine_crop, &error)) {
-        used_affine_crop = true;
-      } else {
-        std::cerr << "aligned face crop failed for face[" << i
-                  << "]: " << error << "\n";
-        return 6;
-      }
-
-      const cv::Mat &dense_input = affine_crop.image;
-      if (!dense_landmark.infer(dense_input, &local_points, &error)) {
-        std::cerr << "dense landmark failed for face[" << i
-                  << "]: " << error << "\n";
-        return 7;
-      }
-    } else {
-      const tdl_app::Box roi =
-          makeSquareBox(final_result.boxes[i], opt.roi_expand_ratio);
-      if (!extractSquareCrop(image, roi, &square_crop, &error)) {
-        std::cerr << "skip face[" << i << "]: " << error << "\n";
-        continue;
-      }
-
-      TempFile crop_file;
-      if (!writeTempCrop(square_crop.image, static_cast<int>(i), &crop_file,
-                         &error)) {
-        std::cerr << "failed to create crop for face[" << i << "]: " << error
-                  << "\n";
-        return 6;
-      }
-
-      tdl_app::KeypointResult keypoint_result;
-      if (!keypoint.run(crop_file.path, &keypoint_result, &error)) {
-        std::cerr << "keypoint failed for face[" << i << "]: " << error
-                  << "\n";
-        return 7;
-      }
-      local_points = keypoint_result.points;
+    const int ret = runCamera(opt, &face_detector, &dense_landmark, &error);
+    if (ret != 0) {
+      std::cerr << "camera dense landmark failed: " << error << "\n";
     }
-
-    if (used_affine_crop) {
-      std::cout << "face[" << i << "] roi=(affine_aligned,"
-                << affine_crop.image.cols << "x" << affine_crop.image.rows
-                << ")";
-    } else {
-      std::cout << "face[" << i << "] roi=(" << square_crop.x << ","
-                << square_crop.y << "," << (square_crop.x + square_crop.size)
-                << "," << (square_crop.y + square_crop.size) << ")";
-    }
-    std::cout
-              << " dense_points=" << local_points.size() << "\n";
-
-    for (const auto &point : local_points) {
-      tdl_app::Point mapped;
-      if (used_affine_crop) {
-        const double x = static_cast<double>(point.x);
-        const double y = static_cast<double>(point.y);
-        mapped.x = static_cast<float>(affine_crop.inverse_transform.at<double>(0, 0) * x +
-                                      affine_crop.inverse_transform.at<double>(0, 1) * y +
-                                      affine_crop.inverse_transform.at<double>(0, 2));
-        mapped.y = static_cast<float>(affine_crop.inverse_transform.at<double>(1, 0) * x +
-                                      affine_crop.inverse_transform.at<double>(1, 1) * y +
-                                      affine_crop.inverse_transform.at<double>(1, 2));
-      } else {
-        mapped = point;
-        mapped.x += square_crop.x;
-        mapped.y += square_crop.y;
-      }
-      mapped.x = std::max(0.0f,
-                          std::min(mapped.x, static_cast<float>(image.cols - 1)));
-      mapped.y = std::max(0.0f,
-                          std::min(mapped.y, static_cast<float>(image.rows - 1)));
-      final_result.points.push_back(mapped);
-    }
-    total_points += local_points.size();
+    return ret;
   }
 
-  final_result.text = "faces=" + std::to_string(final_result.boxes.size()) +
-                      " dense_points=" + std::to_string(total_points);
-
-  if (!opt.output.empty() &&
-      !demo_support::saveAnnotatedImage(opt.image, opt.output, final_result,
-                                        &error)) {
-    std::cerr << "save failed: " << error << "\n";
-    return 8;
+  const int ret = runOffline(opt, use_scrfd_detector, use_custom_dense_landmark,
+                             &detector, &face_detector, &keypoint,
+                             &dense_landmark, &error);
+  if (ret != 0) {
+    std::cerr << "offline dense landmark failed: " << error << "\n";
   }
-
-  if (!opt.output.empty()) {
-    std::cout << "saved: " << opt.output << "\n";
-  }
-
-  std::cout << "face_count: " << final_result.boxes.size() << "\n";
-  std::cout << "dense_point_count: " << total_points << "\n";
-  return 0;
+  return ret;
 }

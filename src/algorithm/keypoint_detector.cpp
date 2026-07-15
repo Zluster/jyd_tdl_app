@@ -12,18 +12,15 @@
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
-#include "c_apis/tdl_sdk.h"
-#include "c_apis/tdl_utils.h"
-#include "algorithm/private/bmrt_utils.hpp"
-#include "algorithm/private/frame_convert.hpp"
-#include "algorithm/private/tdl_sdk_utils.hpp"
+#include "algorithm/private/vpss_preprocessor.hpp"
 #include "cvi_comm_video.h"
-#include "cvi_sys.h"
+#include "tdl_app/model_descriptor.hpp"
 
 namespace tdl_app {
 namespace {
 
 constexpr int kPoseKeypointDims = 3;
+constexpr int kSimccKeypointCount = 17;
 
 bool startsWith(const std::string &value, const std::string &prefix) {
   return value.size() >= prefix.size() &&
@@ -37,6 +34,33 @@ std::string toUpper(std::string value) {
                  });
   return value;
 }
+
+namespace keypoint_runtime_utils {
+
+void setError(std::string *error, const std::string &message) {
+  if (error) *error = message;
+}
+
+std::string resolveModelToken(const KeypointDetector::Config &config,
+                              const std::string &requested_model_type,
+                              const std::string &fallback_model_type,
+                              std::string *error) {
+  if (!config.model_type.empty()) return toUpper(config.model_type);
+  if (!config.model_spec.empty()) {
+    ModelDescriptor descriptor;
+    std::string ignored_error;
+    if (loadModelDescriptor(config.model_spec, &descriptor, &ignored_error) &&
+        !descriptor.model_type.empty()) {
+      return toUpper(descriptor.model_type);
+    }
+  }
+  if (!requested_model_type.empty()) return toUpper(requested_model_type);
+  if (!fallback_model_type.empty()) return toUpper(fallback_model_type);
+  setError(error, "model_type is empty and no default is available");
+  return std::string();
+}
+
+}  // namespace keypoint_runtime_utils
 
 float sigmoid(float value) { return 1.0f / (1.0f + std::exp(-value)); }
 
@@ -103,7 +127,7 @@ class PoseYolov8Runtime : public KeypointRuntime {
             const std::string &requested_model_type,
             std::string *resolved_model_type, std::string *error) {
     const std::string model_type =
-        private_tdl_sdk::resolveModelToken(config, requested_model_type,
+        keypoint_runtime_utils::resolveModelToken(config, requested_model_type,
                                            "KEYPOINT_YOLOV8POSE_PERSON17",
                                            error);
     if (model_type.empty()) {
@@ -142,6 +166,32 @@ class PoseYolov8Runtime : public KeypointRuntime {
       session_.close();
       return false;
     }
+    if (!session_.nchwLayout() ||
+        (session_.inputDtype() != BM_INT8 &&
+         session_.inputDtype() != BM_UINT8)) {
+      keypoint_runtime_utils::setError(
+          error, "YOLOv8 pose VPSS path requires NCHW INT8/UINT8 input");
+      session_.close();
+      return false;
+    }
+    bmrt_runtime::VpssPreprocessor::Config vpss_config;
+    vpss_config.width = session_.inputWidth();
+    vpss_config.height = session_.inputHeight();
+    vpss_config.rgb = bmrt_runtime::wantsRgbInput(descriptor_, true);
+    vpss_config.keep_aspect_ratio = true;
+    vpss_config.padding = {{114, 114, 114}};
+    vpss_config.input_dtype = session_.inputDtype();
+    vpss_config.input_scale = session_.inputScale();
+    vpss_config.input_zero_point = session_.inputZeroPoint();
+    vpss_config.mean = {{mean_[0], mean_[1], mean_[2]}};
+    vpss_config.scale = {{scale_[0], scale_[1], scale_[2]}};
+    std::unique_ptr<bmrt_runtime::VpssPreprocessor> preprocessor(
+        new bmrt_runtime::VpssPreprocessor());
+    if (!preprocessor->open(session_.handle(), vpss_config, error)) {
+      session_.close();
+      return false;
+    }
+    preprocessor_ = std::move(preprocessor);
 
     if (resolved_model_type) {
       *resolved_model_type = model_type_;
@@ -153,7 +203,7 @@ class PoseYolov8Runtime : public KeypointRuntime {
            std::string *error) {
     cv::Mat image = cv::imread(image_path, cv::IMREAD_COLOR);
     if (image.empty()) {
-      private_tdl_sdk::setError(error, "failed to read image: " + image_path);
+      keypoint_runtime_utils::setError(error, "failed to read image: " + image_path);
       return false;
     }
     return inferMat(image, result, error);
@@ -161,14 +211,41 @@ class PoseYolov8Runtime : public KeypointRuntime {
 
   bool runFrame(const Frame &frame, KeypointResult *result,
                 std::string *error) {
-    cv::Mat image;
-    if (!frame_convert::frameToBgrMat(frame, &image, error)) {
+    if (!result) {
+      keypoint_runtime_utils::setError(error, "keypoint result pointer is null");
       return false;
     }
-    return inferMat(image, result, error);
+    if (!frame.native) {
+      keypoint_runtime_utils::setError(error,
+                                 "frame has no native VIDEO_FRAME_INFO_S buffer");
+      return false;
+    }
+    const auto *video = static_cast<const VIDEO_FRAME_INFO_S *>(frame.native);
+    const int width = static_cast<int>(video->stVFrame.u32Width);
+    const int height = static_cast<int>(video->stVFrame.u32Height);
+    if (width <= 0 || height <= 0) {
+      keypoint_runtime_utils::setError(error, "invalid native frame size");
+      return false;
+    }
+
+    float ratio = 1.0f;
+    int top = 0;
+    int left = 0;
+    letterboxTransform(width, height, &ratio, &top, &left);
+    if (!preprocessor_->preprocess(frame.native, error)) {
+      return false;
+    }
+    std::vector<bmrt_runtime::OutputTensor> outputs;
+    if (!session_.launchDevice(preprocessor_->inputMemory(), &outputs, error)) {
+      return false;
+    }
+    return decodeOutputs(outputs, width, height, ratio, top, left, result);
   }
 
-  void reset() override { session_.close(); }
+  void reset() override {
+    preprocessor_.reset();
+    session_.close();
+  }
   bool initialized() const override { return session_.opened(); }
 
  private:
@@ -216,21 +293,21 @@ class PoseYolov8Runtime : public KeypointRuntime {
 
       if (branch.bbox_index < 0 || branch.score_index < 0 ||
           branch.kpt_index < 0) {
-        private_tdl_sdk::setError(
+        keypoint_runtime_utils::setError(
             error, "incomplete yolov8 pose output branches");
         return false;
       }
       const int branch_keypoint_count =
           branch.kpt_channels / kPoseKeypointDims;
       if (branch_keypoint_count <= 0) {
-        private_tdl_sdk::setError(
+        keypoint_runtime_utils::setError(
             error, "invalid yolov8 pose keypoint channel count");
         return false;
       }
       if (keypoint_count_ == 0) {
         keypoint_count_ = branch_keypoint_count;
       } else if (keypoint_count_ != branch_keypoint_count) {
-        private_tdl_sdk::setError(
+        keypoint_runtime_utils::setError(
             error, "inconsistent yolov8 pose keypoint branch shapes");
         return false;
       }
@@ -239,14 +316,23 @@ class PoseYolov8Runtime : public KeypointRuntime {
     return true;
   }
 
-  void preprocess(const cv::Mat &image, std::vector<float> *tensor, float *ratio,
-                  int *top, int *left) const {
-    *ratio = std::min(static_cast<float>(session_.inputHeight()) / image.rows,
-                      static_cast<float>(session_.inputWidth()) / image.cols);
-    const int resized_w = static_cast<int>(std::round(image.cols * (*ratio)));
-    const int resized_h = static_cast<int>(std::round(image.rows * (*ratio)));
+  void letterboxTransform(int source_width, int source_height, float *ratio,
+                          int *top, int *left) const {
+    *ratio = std::min(static_cast<float>(session_.inputHeight()) / source_height,
+                      static_cast<float>(session_.inputWidth()) / source_width);
+    const int resized_w =
+        static_cast<int>(std::round(source_width * (*ratio)));
+    const int resized_h =
+        static_cast<int>(std::round(source_height * (*ratio)));
     *top = (session_.inputHeight() - resized_h) / 2;
     *left = (session_.inputWidth() - resized_w) / 2;
+  }
+
+  void preprocess(const cv::Mat &image, std::vector<float> *tensor, float *ratio,
+                  int *top, int *left) const {
+    letterboxTransform(image.cols, image.rows, ratio, top, left);
+    const int resized_w = static_cast<int>(std::round(image.cols * (*ratio)));
+    const int resized_h = static_cast<int>(std::round(image.rows * (*ratio)));
 
     cv::Mat resized;
     cv::resize(image, resized, cv::Size(resized_w, resized_h), 0, 0,
@@ -291,24 +377,9 @@ class PoseYolov8Runtime : public KeypointRuntime {
     std::vector<Point> points;
   };
 
-  bool inferMat(const cv::Mat &image, KeypointResult *result,
-                std::string *error) {
-    if (!result) {
-      private_tdl_sdk::setError(error, "keypoint result pointer is null");
-      return false;
-    }
-
-    std::vector<float> input_tensor;
-    float ratio = 1.0f;
-    int top = 0;
-    int left = 0;
-    preprocess(image, &input_tensor, &ratio, &top, &left);
-
-    std::vector<bmrt_runtime::OutputTensor> outputs;
-    if (!session_.launch(input_tensor, &outputs, error)) {
-      return false;
-    }
-
+  bool decodeOutputs(const std::vector<bmrt_runtime::OutputTensor> &outputs,
+                     int image_width, int image_height, float ratio, int top,
+                     int left, KeypointResult *result) const {
     std::vector<PoseCandidate> candidates;
     for (const Branch &branch : branches_) {
       const auto &bbox =
@@ -344,16 +415,16 @@ class PoseYolov8Runtime : public KeypointRuntime {
         candidate.box.class_id = 0;
         candidate.box.x1 =
             std::max(0.0f, std::min((x1 - left) / ratio,
-                                    static_cast<float>(image.cols)));
+                                    static_cast<float>(image_width)));
         candidate.box.y1 =
             std::max(0.0f, std::min((y1 - top) / ratio,
-                                    static_cast<float>(image.rows)));
+                                    static_cast<float>(image_height)));
         candidate.box.x2 =
             std::max(0.0f, std::min((x2 - left) / ratio,
-                                    static_cast<float>(image.cols)));
+                                    static_cast<float>(image_width)));
         candidate.box.y2 =
             std::max(0.0f, std::min((y2 - top) / ratio,
-                                    static_cast<float>(image.rows)));
+                                    static_cast<float>(image_height)));
 
         candidate.points.reserve(keypoint_count_);
         for (int k = 0; k < keypoint_count_; ++k) {
@@ -366,7 +437,7 @@ class PoseYolov8Runtime : public KeypointRuntime {
                                       branch.stride -
                                   left) /
                                      ratio,
-                                 static_cast<float>(image.cols)));
+                                 static_cast<float>(image_width)));
           point.y =
               std::max(0.0f, std::min(
                                  ((kpt[(k * 3 + 1) * anchor_count + anchor] *
@@ -375,7 +446,7 @@ class PoseYolov8Runtime : public KeypointRuntime {
                                       branch.stride -
                                   top) /
                                      ratio,
-                                 static_cast<float>(image.rows)));
+                                 static_cast<float>(image_height)));
           point.score = sigmoid(
               kpt[(k * 3 + 2) * anchor_count + anchor]);
           candidate.points.push_back(point);
@@ -386,8 +457,8 @@ class PoseYolov8Runtime : public KeypointRuntime {
 
     if (candidates.empty()) {
       result->clear();
-      result->width = image.cols;
-      result->height = image.rows;
+      result->width = image_width;
+      result->height = image_height;
       return true;
     }
 
@@ -400,8 +471,8 @@ class PoseYolov8Runtime : public KeypointRuntime {
     const std::vector<Box> kept = nonMaxSuppression(raw_boxes, 0.45f);
     if (kept.empty()) {
       result->clear();
-      result->width = image.cols;
-      result->height = image.rows;
+      result->width = image_width;
+      result->height = image_height;
       return true;
     }
 
@@ -420,12 +491,31 @@ class PoseYolov8Runtime : public KeypointRuntime {
     }
 
     result->clear();
-    result->width = image.cols;
-    result->height = image.rows;
+    result->width = image_width;
+    result->height = image_height;
     if (best_candidate) {
       result->points = best_candidate->points;
     }
     return true;
+  }
+
+  bool inferMat(const cv::Mat &image, KeypointResult *result,
+                std::string *error) {
+    if (!result) {
+      keypoint_runtime_utils::setError(error, "keypoint result pointer is null");
+      return false;
+    }
+    std::vector<float> input_tensor;
+    float ratio = 1.0f;
+    int top = 0;
+    int left = 0;
+    preprocess(image, &input_tensor, &ratio, &top, &left);
+    std::vector<bmrt_runtime::OutputTensor> outputs;
+    if (!session_.launch(input_tensor, &outputs, error)) {
+      return false;
+    }
+    return decodeOutputs(outputs, image.cols, image.rows, ratio, top, left,
+                         result);
   }
 
   std::string model_type_;
@@ -433,23 +523,75 @@ class PoseYolov8Runtime : public KeypointRuntime {
   std::vector<float> mean_;
   std::vector<float> scale_;
   bmrt_runtime::Session session_;
+  std::unique_ptr<bmrt_runtime::VpssPreprocessor> preprocessor_;
   std::vector<Branch> branches_;
   int keypoint_count_ = 0;
 };
 
-class LegacyKeypointRuntime : public KeypointRuntime {
+class SimccRuntime : public KeypointRuntime {
  public:
-  bool load(const KeypointDetector::Config &config,
+  bool open(const KeypointDetector::Config &config,
             const std::string &requested_model_type,
             std::string *resolved_model_type, std::string *error) {
-    const std::string model_type = private_tdl_sdk::resolveModelToken(
-        config, requested_model_type, "KEYPOINT_HAND", error);
+    const std::string model_type = keypoint_runtime_utils::resolveModelToken(
+        config, requested_model_type, "KEYPOINT_SIMCC_PERSON17", error);
     if (model_type.empty()) {
       return false;
     }
-    if (!session_.open(config, model_type, error)) {
+    if (!loadModelDescriptor(config.model_spec, &descriptor_, error)) {
       return false;
     }
+    if (descriptor_.input_type.empty()) {
+      descriptor_.input_type = "rgb";
+    }
+    if (descriptor_.mean.empty()) {
+      descriptor_.mean = {0.485f * 255.0f, 0.456f * 255.0f,
+                          0.406f * 255.0f};
+    }
+    if (descriptor_.scale.empty()) {
+      descriptor_.scale = {1.0f / (255.0f * 0.229f),
+                           1.0f / (255.0f * 0.224f),
+                           1.0f / (255.0f * 0.225f)};
+    }
+    mean_ = bmrt_runtime::expandChannelValues(descriptor_.mean, 0.0f);
+    scale_ = bmrt_runtime::expandChannelValues(descriptor_.scale, 1.0f);
+
+    EngineConfig engine_config;
+    engine_config.model_descriptor_file = config.model_spec;
+    engine_config.model_dir = config.model_dir;
+    engine_config.bmrt_firmware = config.firmware;
+    if (!session_.open(engine_config, descriptor_, error)) {
+      return false;
+    }
+    if (!buildOutputs(error)) {
+      session_.close();
+      return false;
+    }
+    if (!session_.nchwLayout() ||
+        (session_.inputDtype() != BM_INT8 &&
+         session_.inputDtype() != BM_UINT8)) {
+      keypoint_runtime_utils::setError(
+          error, "SimCC VPSS path requires NCHW INT8/UINT8 input");
+      session_.close();
+      return false;
+    }
+
+    bmrt_runtime::VpssPreprocessor::Config vpss_config;
+    vpss_config.width = session_.inputWidth();
+    vpss_config.height = session_.inputHeight();
+    vpss_config.rgb = bmrt_runtime::wantsRgbInput(descriptor_, true);
+    vpss_config.input_dtype = session_.inputDtype();
+    vpss_config.input_scale = session_.inputScale();
+    vpss_config.input_zero_point = session_.inputZeroPoint();
+    vpss_config.mean = {{mean_[0], mean_[1], mean_[2]}};
+    vpss_config.scale = {{scale_[0], scale_[1], scale_[2]}};
+    std::unique_ptr<bmrt_runtime::VpssPreprocessor> preprocessor(
+        new bmrt_runtime::VpssPreprocessor());
+    if (!preprocessor->open(session_.handle(), vpss_config, error)) {
+      session_.close();
+      return false;
+    }
+    preprocessor_ = std::move(preprocessor);
     if (resolved_model_type) {
       *resolved_model_type = model_type;
     }
@@ -457,63 +599,274 @@ class LegacyKeypointRuntime : public KeypointRuntime {
   }
 
   bool run(const std::string &image_path, KeypointResult *result,
-           std::string *error) {
-    private_tdl_sdk::ImageGuard image;
-    if (!image.load(image_path, error)) {
+           std::string *error) override {
+    cv::Mat image = cv::imread(image_path, cv::IMREAD_COLOR);
+    if (image.empty()) {
+      keypoint_runtime_utils::setError(error, "failed to read image: " + image_path);
       return false;
     }
-    return infer(image.get(), result, error);
+    return inferMat(image, result, error);
   }
 
   bool runFrame(const Frame &frame, KeypointResult *result,
-                std::string *error) {
-    private_tdl_sdk::ImageGuard image;
-    if (!image.wrap(frame, error)) {
+                std::string *error) override {
+    if (!result || !frame.native) {
+      keypoint_runtime_utils::setError(error, "SimCC frame/result pointer is null");
       return false;
     }
-    return infer(image.get(), result, error);
+    const auto *video = static_cast<const VIDEO_FRAME_INFO_S *>(frame.native);
+    const int width = static_cast<int>(video->stVFrame.u32Width);
+    const int height = static_cast<int>(video->stVFrame.u32Height);
+    if (width <= 0 || height <= 0) {
+      keypoint_runtime_utils::setError(error, "invalid SimCC native frame size");
+      return false;
+    }
+    if (!preprocessor_->preprocess(frame.native, error)) {
+      return false;
+    }
+    std::vector<bmrt_runtime::OutputTensor> outputs;
+    if (!session_.launchDevice(preprocessor_->inputMemory(), &outputs, error)) {
+      return false;
+    }
+    return decodeOutputs(outputs, width, height, result, error);
   }
 
-  void reset() override { session_.close(); }
-  bool initialized() const override { return session_.initialized(); }
+  void reset() override {
+    preprocessor_.reset();
+    session_.close();
+  }
+  bool initialized() const override { return session_.opened(); }
 
  private:
-  bool infer(TDLImage image, KeypointResult *result, std::string *error) {
-    if (!session_.initialized()) {
-      private_tdl_sdk::setError(error, "keypoint detector is not initialized");
+  bool buildOutputs(std::string *error) {
+    x_index_ = -1;
+    y_index_ = -1;
+    const bm_net_info_t *net_info = session_.netInfo();
+    const auto &stage = net_info->stages[0];
+    const int expected_x_bins = session_.inputWidth() * 2;
+    const int expected_y_bins = session_.inputHeight() * 2;
+    for (int i = 0; i < net_info->output_num; ++i) {
+      const bm_shape_t &shape = stage.output_shapes[i];
+      if (shape.num_dims != 3 || shape.dims[0] != 1 ||
+          shape.dims[1] != kSimccKeypointCount) {
+        continue;
+      }
+      const int bins = shape.dims[2];
+      if (bins == expected_x_bins) {
+        x_index_ = i;
+      } else if (bins == expected_y_bins) {
+        y_index_ = i;
+      }
+    }
+    if (x_index_ < 0 || y_index_ < 0) {
+      keypoint_runtime_utils::setError(
+          error, "unable to locate SimCC [1,17,2*width/height] outputs");
       return false;
     }
-    if (!result) {
-      private_tdl_sdk::setError(error, "keypoint result pointer is null");
-      return false;
-    }
+    return true;
+  }
 
-    TDLKeypoint meta;
-    std::memset(&meta, 0, sizeof(meta));
-    const int ret =
-        TDL_Keypoint(session_.handle(), session_.modelId(), image, &meta);
-    if (ret != 0) {
-      private_tdl_sdk::setError(
-          error, "TDL_Keypoint failed, ret=" + std::to_string(ret));
+  void preprocess(const cv::Mat &image, std::vector<float> *tensor) const {
+    cv::Mat resized;
+    cv::resize(image, resized,
+               cv::Size(session_.inputWidth(), session_.inputHeight()), 0, 0,
+               cv::INTER_LINEAR);
+    bmrt_runtime::writeImageToTensor(
+        resized, bmrt_runtime::wantsRgbInput(descriptor_, true),
+        session_.nchwLayout(), mean_, scale_, tensor);
+  }
+
+  bool decodeOutputs(const std::vector<bmrt_runtime::OutputTensor> &outputs,
+                     int image_width, int image_height,
+                     KeypointResult *result, std::string *error) const {
+    if (x_index_ < 0 || y_index_ < 0 ||
+        x_index_ >= static_cast<int>(outputs.size()) ||
+        y_index_ >= static_cast<int>(outputs.size())) {
+      keypoint_runtime_utils::setError(error, "invalid SimCC output index");
+      return false;
+    }
+    const auto &x = outputs[static_cast<size_t>(x_index_)];
+    const auto &y = outputs[static_cast<size_t>(y_index_)];
+    const int x_bins = x.shape.dims[2];
+    const int y_bins = y.shape.dims[2];
+    if (x_bins <= 0 || y_bins <= 0 ||
+        x.data.size() < static_cast<size_t>(kSimccKeypointCount * x_bins) ||
+        y.data.size() < static_cast<size_t>(kSimccKeypointCount * y_bins)) {
+      keypoint_runtime_utils::setError(error, "unexpected SimCC output size");
       return false;
     }
 
     result->clear();
-    result->width = static_cast<int>(meta.width);
-    result->height = static_cast<int>(meta.height);
-    result->points.reserve(meta.size);
-    for (std::uint32_t i = 0; i < meta.size; ++i) {
+    result->width = image_width;
+    result->height = image_height;
+    result->points.reserve(kSimccKeypointCount);
+    const float x_scale = static_cast<float>(image_width) / session_.inputWidth();
+    const float y_scale = static_cast<float>(image_height) / session_.inputHeight();
+    for (int keypoint = 0; keypoint < kSimccKeypointCount; ++keypoint) {
+      const auto x_begin = x.data.begin() + keypoint * x_bins;
+      const auto y_begin = y.data.begin() + keypoint * y_bins;
+      const auto x_max = std::max_element(x_begin, x_begin + x_bins);
+      const auto y_max = std::max_element(y_begin, y_begin + y_bins);
       Point point;
-      point.x = meta.info[i].x * meta.width;
-      point.y = meta.info[i].y * meta.height;
-      point.score = meta.info[i].score;
+      point.x = std::max(0.0f, std::min(
+          (static_cast<float>(std::distance(x_begin, x_max)) / 2.0f) * x_scale,
+          static_cast<float>(image_width)));
+      point.y = std::max(0.0f, std::min(
+          (static_cast<float>(std::distance(y_begin, y_max)) / 2.0f) * y_scale,
+          static_cast<float>(image_height)));
+      point.score = std::min(*x_max, *y_max);
       result->points.push_back(point);
     }
-    TDL_ReleaseKeypointMeta(&meta);
     return true;
   }
 
-  private_tdl_sdk::Session session_;
+  bool inferMat(const cv::Mat &image, KeypointResult *result,
+                std::string *error) {
+    if (!result) {
+      keypoint_runtime_utils::setError(error, "keypoint result pointer is null");
+      return false;
+    }
+    std::vector<float> input_tensor;
+    preprocess(image, &input_tensor);
+    std::vector<bmrt_runtime::OutputTensor> outputs;
+    if (!session_.launch(input_tensor, &outputs, error)) {
+      return false;
+    }
+    return decodeOutputs(outputs, image.cols, image.rows, result, error);
+  }
+
+  ModelDescriptor descriptor_;
+  std::vector<float> mean_;
+  std::vector<float> scale_;
+  bmrt_runtime::Session session_;
+  std::unique_ptr<bmrt_runtime::VpssPreprocessor> preprocessor_;
+  int x_index_ = -1;
+  int y_index_ = -1;
+};
+
+class HandRuntime : public KeypointRuntime {
+ public:
+  bool open(const KeypointDetector::Config &config,
+            const std::string &requested_model_type,
+            std::string *resolved_model_type, std::string *error) {
+    const std::string model_type = keypoint_runtime_utils::resolveModelToken(
+        config, requested_model_type, "KEYPOINT_HAND", error);
+    if (model_type.empty() || !loadModelDescriptor(config.model_spec, &descriptor_, error)) {
+      return false;
+    }
+    if (descriptor_.input_type.empty()) descriptor_.input_type = "rgb";
+    if (descriptor_.mean.empty()) {
+      descriptor_.mean = {0.485f * 255.0f, 0.456f * 255.0f, 0.406f * 255.0f};
+    }
+    if (descriptor_.scale.empty()) {
+      descriptor_.scale = {1.0f / (255.0f * 0.229f),
+                           1.0f / (255.0f * 0.224f),
+                           1.0f / (255.0f * 0.225f)};
+    }
+    mean_ = bmrt_runtime::expandChannelValues(descriptor_.mean, 0.0f);
+    scale_ = bmrt_runtime::expandChannelValues(descriptor_.scale, 1.0f);
+    EngineConfig engine_config;
+    engine_config.model_descriptor_file = config.model_spec;
+    engine_config.model_dir = config.model_dir;
+    engine_config.bmrt_firmware = config.firmware;
+    if (!session_.open(engine_config, descriptor_, error)) return false;
+    const bm_net_info_t *net_info = session_.netInfo();
+    const bm_shape_t &output = net_info->stages[0].output_shapes[0];
+    if (!session_.nchwLayout() ||
+        (session_.inputDtype() != BM_INT8 && session_.inputDtype() != BM_UINT8) ||
+        net_info->output_num != 1 || output.num_dims != 3 ||
+        output.dims[0] != 1 || output.dims[1] != 21 || output.dims[2] != 2) {
+      keypoint_runtime_utils::setError(error,
+          "hand keypoint requires NCHW int8/uint8 input and [1,21,2] output");
+      session_.close();
+      return false;
+    }
+    bmrt_runtime::VpssPreprocessor::Config vpss_config;
+    vpss_config.width = session_.inputWidth();
+    vpss_config.height = session_.inputHeight();
+    vpss_config.rgb = bmrt_runtime::wantsRgbInput(descriptor_, true);
+    vpss_config.input_dtype = session_.inputDtype();
+    vpss_config.input_scale = session_.inputScale();
+    vpss_config.input_zero_point = session_.inputZeroPoint();
+    vpss_config.mean = {{mean_[0], mean_[1], mean_[2]}};
+    vpss_config.scale = {{scale_[0], scale_[1], scale_[2]}};
+    std::unique_ptr<bmrt_runtime::VpssPreprocessor> preprocessor(
+        new bmrt_runtime::VpssPreprocessor());
+    if (!preprocessor->open(session_.handle(), vpss_config, error)) {
+      session_.close();
+      return false;
+    }
+    preprocessor_ = std::move(preprocessor);
+    if (resolved_model_type) *resolved_model_type = model_type;
+    return true;
+  }
+
+  bool run(const std::string &image_path, KeypointResult *result,
+           std::string *error) override {
+    cv::Mat image = cv::imread(image_path, cv::IMREAD_COLOR);
+    if (image.empty()) {
+      keypoint_runtime_utils::setError(error, "failed to read image: " + image_path);
+      return false;
+    }
+    cv::Mat resized;
+    cv::resize(image, resized, cv::Size(session_.inputWidth(), session_.inputHeight()));
+    std::vector<float> input;
+    bmrt_runtime::writeImageToTensor(resized,
+        bmrt_runtime::wantsRgbInput(descriptor_, true), session_.nchwLayout(),
+        mean_, scale_, &input);
+    std::vector<bmrt_runtime::OutputTensor> outputs;
+    return session_.launch(input, &outputs, error) &&
+           decode(outputs, image.cols, image.rows, result, error);
+  }
+
+  bool runFrame(const Frame &frame, KeypointResult *result,
+                std::string *error) override {
+    if (!frame.native || !result) {
+      keypoint_runtime_utils::setError(error, "hand keypoint frame/result pointer is null");
+      return false;
+    }
+    const auto *video = static_cast<const VIDEO_FRAME_INFO_S *>(frame.native);
+    const int width = static_cast<int>(video->stVFrame.u32Width);
+    const int height = static_cast<int>(video->stVFrame.u32Height);
+    if (width <= 0 || height <= 0 || !preprocessor_->preprocess(frame.native, error)) {
+      return false;
+    }
+    std::vector<bmrt_runtime::OutputTensor> outputs;
+    return session_.launchDevice(preprocessor_->inputMemory(), &outputs, error) &&
+           decode(outputs, width, height, result, error);
+  }
+
+  void reset() override { preprocessor_.reset(); session_.close(); }
+  bool initialized() const override { return session_.opened(); }
+
+ private:
+  bool decode(const std::vector<bmrt_runtime::OutputTensor> &outputs, int width,
+              int height, KeypointResult *result, std::string *error) const {
+    if (!result || outputs.size() != 1 || outputs[0].data.size() < 42) {
+      keypoint_runtime_utils::setError(error, "unexpected hand keypoint output");
+      return false;
+    }
+    result->clear();
+    result->width = width;
+    result->height = height;
+    result->points.reserve(21);
+    for (int index = 0; index < 21; ++index) {
+      Point point;
+      point.x = std::max(0.0f, std::min(outputs[0].data[index * 2] * width,
+                                         static_cast<float>(width)));
+      point.y = std::max(0.0f, std::min(outputs[0].data[index * 2 + 1] * height,
+                                         static_cast<float>(height)));
+      point.score = 1.0f;
+      result->points.push_back(point);
+    }
+    return true;
+  }
+
+  ModelDescriptor descriptor_;
+  std::vector<float> mean_;
+  std::vector<float> scale_;
+  bmrt_runtime::Session session_;
+  std::unique_ptr<bmrt_runtime::VpssPreprocessor> preprocessor_;
 };
 
 }  // namespace
@@ -522,7 +875,7 @@ class KeypointDetector::Impl {
  public:
  bool load(const Config &config, const std::string &requested_model_type,
             std::string *resolved_model_type, std::string *error) {
-    const std::string model_type = private_tdl_sdk::resolveModelToken(
+    const std::string model_type = keypoint_runtime_utils::resolveModelToken(
         config, requested_model_type, "KEYPOINT_HAND", error);
     if (model_type.empty()) {
       return false;
@@ -537,7 +890,23 @@ class KeypointDetector::Impl {
       runtime_ = std::move(pose_runtime);
       return true;
     }
-    private_tdl_sdk::setError(
+    if (startsWith(toUpper(model_type), "KEYPOINT_SIMCC")) {
+      std::unique_ptr<SimccRuntime> simcc_runtime(new SimccRuntime());
+      if (!simcc_runtime->open(config, model_type, resolved_model_type, error)) {
+        return false;
+      }
+      runtime_ = std::move(simcc_runtime);
+      return true;
+    }
+    if (startsWith(toUpper(model_type), "KEYPOINT_HAND")) {
+      std::unique_ptr<HandRuntime> hand_runtime(new HandRuntime());
+      if (!hand_runtime->open(config, model_type, resolved_model_type, error)) {
+        return false;
+      }
+      runtime_ = std::move(hand_runtime);
+      return true;
+    }
+    keypoint_runtime_utils::setError(
         error, "unsupported keypoint model_type for custom BMRT runtime: " +
                    model_type);
     return false;
@@ -546,7 +915,7 @@ class KeypointDetector::Impl {
   bool run(const std::string &image_path, KeypointResult *result,
            std::string *error) {
     if (!runtime_) {
-      private_tdl_sdk::setError(error, "keypoint detector is not initialized");
+      keypoint_runtime_utils::setError(error, "keypoint detector is not initialized");
       return false;
     }
     return runtime_->run(image_path, result, error);
@@ -555,7 +924,7 @@ class KeypointDetector::Impl {
   bool runFrame(const Frame &frame, KeypointResult *result,
                 std::string *error) {
     if (!runtime_) {
-      private_tdl_sdk::setError(error, "keypoint detector is not initialized");
+      keypoint_runtime_utils::setError(error, "keypoint detector is not initialized");
       return false;
     }
     return runtime_->runFrame(frame, result, error);
@@ -648,7 +1017,7 @@ bool KeypointDetector::run(const std::string &image_path, KeypointResult *result
 bool KeypointDetector::runFrame(const Frame &frame, KeypointResult *result,
                                 std::string *error) {
   if (!impl_) {
-    private_tdl_sdk::setError(error, "keypoint detector is not initialized");
+    keypoint_runtime_utils::setError(error, "keypoint detector is not initialized");
     return false;
   }
   return impl_->runFrame(frame, result, error);
@@ -658,7 +1027,7 @@ bool KeypointDetector::estimate(const std::string &image_path,
                                 KeypointResult *result,
                                 std::string *error) {
   if (!impl_) {
-    private_tdl_sdk::setError(error, "keypoint detector is not initialized");
+    keypoint_runtime_utils::setError(error, "keypoint detector is not initialized");
     return false;
   }
   return impl_->run(image_path, result, error);

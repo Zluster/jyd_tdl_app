@@ -3,6 +3,10 @@ cmake_minimum_required(VERSION 3.16)
 project(jyd_tdl_mmf_minimal C CXX)
 
 option(MMF_MINIMAL_BUILD_EXAMPLES "Build minimal MMF examples" ON)
+option(JYD_SELF_RUNTIME_BUILD_CLASSIFIER_BASELINE
+       "Build the standalone, TDL-free classifier benchmark" ON)
+option(JYD_SELF_RUNTIME_BUILD_FEATURE_BENCHMARK
+       "Build the camera feature-extraction benchmark" ON)
 
 set(MMF_MINIMAL_SOURCES
   src/audio/mmf_cvi_audio.cpp

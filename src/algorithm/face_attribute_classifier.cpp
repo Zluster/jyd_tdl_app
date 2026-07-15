@@ -133,6 +133,18 @@ bool FaceAttributeClassifier::classifyCrop(const std::string &image_path,
   return model_->predictCrop(image_path, roi, options, result, error);
 }
 
+bool FaceAttributeClassifier::classifyFrameCrop(
+    const Frame &frame, const Box &roi, const InferOptions &options,
+    AlgorithmResult *result, std::string *error) {
+  if (!model_) {
+    if (error) {
+      *error = "face attribute classifier is not initialized";
+    }
+    return false;
+  }
+  return model_->predictFrameCrop(frame, roi, options, result, error);
+}
+
 bool FaceAttributeClassifier::initialized() const {
   return model_ && model_->initialized();
 }

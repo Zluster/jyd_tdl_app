@@ -71,15 +71,25 @@ if [ ! -d "${THIRD_PARTY_DIR}" ]; then
 fi
 
 rm -rf "${RESOLVED_PKG_DIR}"
-mkdir -p "${RESOLVED_PKG_DIR}/bin" "${RESOLVED_PKG_DIR}/lib" "${RESOLVED_PKG_DIR}/models" "${RESOLVED_PKG_DIR}/configs" "${RESOLVED_PKG_DIR}/firmware" "${RESOLVED_PKG_DIR}/assets"
+mkdir -p "${RESOLVED_PKG_DIR}/bin" "${RESOLVED_PKG_DIR}/lib" "${RESOLVED_PKG_DIR}/models" "${RESOLVED_PKG_DIR}/configs" "${RESOLVED_PKG_DIR}/firmware" "${RESOLVED_PKG_DIR}/assets" "${RESOLVED_PKG_DIR}/docs"
 
 cp -a "${RESOLVED_INSTALL_DIR}/bin/." "${RESOLVED_PKG_DIR}/bin/" 2>/dev/null || true
 cp -a "${RESOLVED_INSTALL_DIR}/lib/." "${RESOLVED_PKG_DIR}/lib/" 2>/dev/null || true
 cp -a "${RESOLVED_INSTALL_DIR}/configs/." "${RESOLVED_PKG_DIR}/configs/" 2>/dev/null || true
 cp -a "${THIRD_PARTY_DIR}/lib/." "${RESOLVED_PKG_DIR}/lib/"
 cp -a "${THIRD_PARTY_DIR}/models/." "${RESOLVED_PKG_DIR}/models/"
+# Project-specific models override/extend the base Dual-OS bundle. This is
+# where converted PP-OCR, dense landmark and application models are stored.
+PROJECT_MODELS_DIR="${PROJECT_ROOT}/third_party/cv184x/models"
+if [ -d "${PROJECT_MODELS_DIR}" ]; then
+  cp -a "${PROJECT_MODELS_DIR}/." "${RESOLVED_PKG_DIR}/models/"
+fi
 cp -a "${THIRD_PARTY_DIR}/firmware/." "${RESOLVED_PKG_DIR}/firmware/" 2>/dev/null || true
 cp -a "${PROJECT_ROOT}/assets/." "${RESOLVED_PKG_DIR}/assets/" 2>/dev/null || true
+cp "${PROJECT_ROOT}/docs/ALGORITHM_TESTING_GUIDE_CN.md" \
+  "${RESOLVED_PKG_DIR}/docs/" 2>/dev/null || true
+cp "${PROJECT_ROOT}/docs/VISUAL_ALGORITHM_TEST_MATRIX_CN.md" \
+  "${RESOLVED_PKG_DIR}/docs/" 2>/dev/null || true
 
 cat > "${RESOLVED_PKG_DIR}/env.sh" <<'EOF'
 #!/bin/sh
@@ -144,6 +154,24 @@ DIR=$(cd "$(dirname "$0")" && pwd)
 exec "${DIR}/bin/tdl_keypoint_demo" "$@"
 EOF
 chmod +x "${RESOLVED_PKG_DIR}/run_keypoint_demo.sh"
+
+cat > "${RESOLVED_PKG_DIR}/run_pose_classifier_demo.sh" <<'EOF'
+#!/bin/sh
+set -eu
+DIR=$(cd "$(dirname "$0")" && pwd)
+. "${DIR}/env.sh"
+exec "${DIR}/bin/tdl_pose_classifier_demo" "$@"
+EOF
+chmod +x "${RESOLVED_PKG_DIR}/run_pose_classifier_demo.sh"
+
+cat > "${RESOLVED_PKG_DIR}/run_single_object_tracker_demo.sh" <<'EOF'
+#!/bin/sh
+set -eu
+DIR=$(cd "$(dirname "$0")" && pwd)
+. "${DIR}/env.sh"
+exec "${DIR}/bin/tdl_single_object_tracker_demo" "$@"
+EOF
+chmod +x "${RESOLVED_PKG_DIR}/run_single_object_tracker_demo.sh"
 
 cat > "${RESOLVED_PKG_DIR}/run_semantic_seg_demo.sh" <<'EOF'
 #!/bin/sh

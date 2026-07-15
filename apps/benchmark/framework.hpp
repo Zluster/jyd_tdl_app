@@ -19,6 +19,10 @@ struct RunConfig {
   // CV 模块
   std::string image;    // 可选输入图路径，留空则用内置合成图
 
+  // NPU 模块
+  std::string task;     // 可选任务名，留空则运行全部 NPU 任务
+  bool profile = false; // 打印算法内部耗时分解
+
   // Display 模块（VoOutput 路径）
   int vo_dev = 0;
   int layer = 0;

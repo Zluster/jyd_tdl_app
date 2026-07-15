@@ -2,7 +2,6 @@
 
 #include <algorithm>
 #include <cmath>
-#include <cstring>
 #include <limits>
 #include <memory>
 #include <utility>
@@ -11,11 +10,7 @@
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
-#include "algorithm/private/bmrt_utils.hpp"
-#include "algorithm/private/frame_convert.hpp"
-#include "algorithm/private/tdl_sdk_utils.hpp"
-#include "cvi_comm_video.h"
-#include "cvi_sys.h"
+#include "algorithm/private/vpss_preprocessor.hpp"
 
 namespace tdl_app {
 namespace {
@@ -23,6 +18,10 @@ namespace {
 constexpr int kLaneCandidateCount = 7;
 constexpr int kLaneLogitDims = 2;
 constexpr int kLaneCurveDims = 8;
+constexpr int kLaneSlices = 100;
+constexpr float kLaneCutRatio = 0.25f;
+constexpr float kLaneUpperY = 0.6f;
+constexpr float kLaneLowerY = 0.8f;
 
 float sigmoid(float value) { return 1.0f / (1.0f + std::exp(-value)); }
 
@@ -41,15 +40,16 @@ class LstrRuntime : public LaneRuntime {
   bool open(const LaneDetector::Config &config,
             const std::string &requested_model_type,
             std::string *resolved_model_type, std::string *error) {
-    const std::string model_type = private_tdl_sdk::resolveModelToken(
-        config, requested_model_type, "LSTR_DET_LANE", error);
-    if (model_type.empty()) {
-      return false;
-    }
-
     if (!loadModelDescriptor(config.model_spec, &descriptor_, error)) {
       return false;
     }
+    const std::string model_type = !requested_model_type.empty()
+                                       ? requested_model_type
+                                       : (!config.model_type.empty()
+                                              ? config.model_type
+                                              : (!descriptor_.model_type.empty()
+                                                     ? descriptor_.model_type
+                                                     : "LSTR_DET_LANE"));
     if (descriptor_.runtime.empty()) {
       descriptor_.runtime = "lane_detection";
     }
@@ -83,6 +83,31 @@ class LstrRuntime : public LaneRuntime {
       session_.close();
       return false;
     }
+    if (!session_.nchwLayout() ||
+        (session_.inputDtype() != BM_INT8 &&
+         session_.inputDtype() != BM_UINT8)) {
+      bmrt_runtime::setError(
+          error, "LSTR VPSS path requires NCHW INT8/UINT8 model input");
+      session_.close();
+      return false;
+    }
+
+    bmrt_runtime::VpssPreprocessor::Config vpss_config;
+    vpss_config.width = session_.inputWidth();
+    vpss_config.height = session_.inputHeight();
+    vpss_config.rgb = bmrt_runtime::wantsRgbInput(descriptor_, true);
+    vpss_config.input_dtype = session_.inputDtype();
+    vpss_config.input_scale = session_.inputScale();
+    vpss_config.input_zero_point = session_.inputZeroPoint();
+    vpss_config.mean = {{mean_[0], mean_[1], mean_[2]}};
+    vpss_config.scale = {{scale_[0], scale_[1], scale_[2]}};
+    std::unique_ptr<bmrt_runtime::VpssPreprocessor> preprocessor(
+        new bmrt_runtime::VpssPreprocessor());
+    if (!preprocessor->open(session_.handle(), vpss_config, error)) {
+      session_.close();
+      return false;
+    }
+    preprocessor_ = std::move(preprocessor);
 
     if (resolved_model_type) {
       *resolved_model_type = model_type;
@@ -94,7 +119,7 @@ class LstrRuntime : public LaneRuntime {
            std::string *error) override {
     cv::Mat image = cv::imread(image_path, cv::IMREAD_COLOR);
     if (image.empty()) {
-      private_tdl_sdk::setError(error, "failed to read image: " + image_path);
+      bmrt_runtime::setError(error, "failed to read image: " + image_path);
       return false;
     }
     return infer(image, result, error);
@@ -105,14 +130,31 @@ class LstrRuntime : public LaneRuntime {
     if (!frame.image_path.empty()) {
       return run(frame.image_path, result, error);
     }
-    cv::Mat image;
-    if (!frame_convert::frameToBgrMat(frame, &image, error)) {
+    if (!frame.native || !result) {
+      bmrt_runtime::setError(error, "lane frame/result pointer is null");
       return false;
     }
-    return infer(image, result, error);
+    if (!preprocessor_->preprocess(frame.native, error)) {
+      return false;
+    }
+    const auto *video = static_cast<const VIDEO_FRAME_INFO_S *>(frame.native);
+    const int width = static_cast<int>(video->stVFrame.u32Width);
+    const int height = static_cast<int>(video->stVFrame.u32Height);
+    if (width <= 0 || height <= 0) {
+      bmrt_runtime::setError(error, "invalid native lane frame size");
+      return false;
+    }
+    std::vector<bmrt_runtime::OutputTensor> outputs;
+    if (!session_.launchDevice(preprocessor_->inputMemory(), &outputs, error)) {
+      return false;
+    }
+    return decodeOutputs(outputs, width, height, result, error);
   }
 
-  void reset() override { session_.close(); }
+  void reset() override {
+    preprocessor_.reset();
+    session_.close();
+  }
   bool initialized() const override { return session_.opened(); }
 
  private:
@@ -136,7 +178,7 @@ class LstrRuntime : public LaneRuntime {
     }
 
     if (logits_index_ < 0 || curves_index_ < 0) {
-      private_tdl_sdk::setError(
+      bmrt_runtime::setError(
           error,
           "unable to locate LSTR lane outputs (expected [1,7,2] and [1,7,8])");
       return false;
@@ -153,59 +195,26 @@ class LstrRuntime : public LaneRuntime {
         session_.nchwLayout(), mean_, scale_, tensor);
   }
 
-  LaneSegment decodeLane(const float score, const float *curve,
-                         int image_width, int image_height) const {
-    LaneSegment lane;
-    lane.score = score;
-
-    const float y0 = std::max(0.0f, std::min(1.0f, curve[0]));
-    const float y1 = std::max(0.0f, std::min(1.0f, curve[1]));
-    const float k_2 = curve[2];
-    const float f_2 = curve[3];
-    const float m_2 = curve[4];
-    const float n_1 = curve[5];
-    const float b_2 = curve[6];
-    const float b_3 = curve[7];
-
-    auto eval_x = [&](float y_norm) {
-      const float y = y_norm;
-      const float denom = y - f_2;
-      if (std::fabs(denom) < 1e-6f) {
-        return n_1 + b_2 * y - b_3;
-      }
-      return k_2 / (denom * denom) + m_2 / denom + n_1 + b_2 * y - b_3;
-    };
-
-    const float x0 = eval_x(y0);
-    const float x1 = eval_x(y1);
-
-    lane.start.x = std::max(0.0f, std::min(x0, 1.0f)) * image_width;
-    lane.start.y = y0 * image_height;
-    lane.start.score = score;
-    lane.end.x = std::max(0.0f, std::min(x1, 1.0f)) * image_width;
-    lane.end.y = y1 * image_height;
-    lane.end.score = score;
-    return lane;
+  float laneXAtY(const float *curve, float y) const {
+    const float denominator = y - curve[3];
+    if (std::fabs(denominator) < 1e-6f) {
+      return curve[5] + curve[6] * y - curve[7];
+    }
+    return curve[2] / (denominator * denominator) + curve[4] / denominator +
+           curve[5] + curve[6] * y - curve[7];
   }
 
-  bool infer(const cv::Mat &image, LaneDetectionResult *result,
-             std::string *error) {
+  bool decodeOutputs(const std::vector<bmrt_runtime::OutputTensor> &outputs,
+                     int image_width, int image_height,
+                     LaneDetectionResult *result, std::string *error) const {
     if (!result) {
-      private_tdl_sdk::setError(error, "lane result pointer is null");
-      return false;
-    }
-
-    std::vector<float> input_tensor;
-    preprocess(image, &input_tensor);
-
-    std::vector<bmrt_runtime::OutputTensor> outputs;
-    if (!session_.launch(input_tensor, &outputs, error)) {
+      bmrt_runtime::setError(error, "lane result pointer is null");
       return false;
     }
     if (logits_index_ < 0 || curves_index_ < 0 ||
         logits_index_ >= static_cast<int>(outputs.size()) ||
         curves_index_ >= static_cast<int>(outputs.size())) {
-      private_tdl_sdk::setError(error, "invalid lane output index");
+      bmrt_runtime::setError(error, "invalid lane output index");
       return false;
     }
 
@@ -213,46 +222,106 @@ class LstrRuntime : public LaneRuntime {
     const auto &curves = outputs[static_cast<size_t>(curves_index_)].data;
     if (logits.size() != static_cast<size_t>(kLaneCandidateCount * kLaneLogitDims) ||
         curves.size() != static_cast<size_t>(kLaneCandidateCount * kLaneCurveDims)) {
-      private_tdl_sdk::setError(error, "unexpected lane output tensor size");
+      bmrt_runtime::setError(error, "unexpected lane output tensor size");
       return false;
     }
 
     result->clear();
-    result->width = image.cols;
-    result->height = image.rows;
+    result->width = image_width;
+    result->height = image_height;
 
-    int active_count = 0;
+    std::vector<int> active_indices;
+    std::vector<float> lane_distance;
     for (int i = 0; i < kLaneCandidateCount; ++i) {
       const float bg_logit = logits[static_cast<size_t>(i * 2 + 0)];
       const float lane_logit = logits[static_cast<size_t>(i * 2 + 1)];
-      const float lane_prob = sigmoid(lane_logit - bg_logit);
-      if (lane_prob < 0.5f) {
+      if (lane_logit <= bg_logit) {
         continue;
       }
-
       const float *curve = &curves[static_cast<size_t>(i * kLaneCurveDims)];
-      const LaneSegment lane = decodeLane(lane_prob, curve, image.cols, image.rows);
-      if (lane.start.y == lane.end.y) {
-        continue;
-      }
-      result->lanes.push_back(lane);
-      ++active_count;
+      active_indices.push_back(i);
+      lane_distance.push_back((laneXAtY(curve, 1.0f) - 0.5f) * image_width);
     }
 
-    std::sort(result->lanes.begin(), result->lanes.end(),
-              [](const LaneSegment &lhs, const LaneSegment &rhs) {
-                const float lhs_center = (lhs.start.x + lhs.end.x) * 0.5f;
-                const float rhs_center = (rhs.start.x + rhs.end.x) * 0.5f;
-                return lhs_center < rhs_center;
-              });
-    result->lane_state = active_count;
+    std::vector<int> order(active_indices.size());
+    for (size_t i = 0; i < order.size(); ++i) {
+      order[i] = static_cast<int>(i);
+    }
+    std::sort(order.begin(), order.end(), [&](int lhs, int rhs) {
+      return lane_distance[static_cast<size_t>(lhs)] <
+             lane_distance[static_cast<size_t>(rhs)];
+    });
+
+    std::vector<int> selected;
+    for (size_t i = 0; i < order.size(); ++i) {
+      const int candidate = order[i];
+      const float *curve = &curves[static_cast<size_t>(
+          active_indices[static_cast<size_t>(candidate)] * kLaneCurveDims)];
+      if (curve[1] - curve[0] <= 0.2f) {
+        continue;
+      }
+      if (lane_distance[static_cast<size_t>(candidate)] < 0.0f) {
+        if (i + 1 == order.size() ||
+            lane_distance[static_cast<size_t>(order[i + 1])] > 0.0f) {
+          selected.push_back(candidate);
+        }
+      } else {
+        selected.push_back(candidate);
+        break;
+      }
+    }
+
+    for (int selected_index : selected) {
+      const int lane_index = active_indices[static_cast<size_t>(selected_index)];
+      const float *curve =
+          &curves[static_cast<size_t>(lane_index * kLaneCurveDims)];
+      const float lower = std::max(0.0f, curve[0]);
+      const float upper = std::min(1.0f, curve[1]);
+      const float slice = (upper - lower) / kLaneSlices;
+      const float y1 = lower + kLaneSlices * kLaneCutRatio * slice;
+      const float y2 = lower + kLaneSlices * (1.0f - kLaneCutRatio) * slice;
+      const float denominator = y2 - y1;
+      if (std::fabs(denominator) < 1e-6f) {
+        continue;
+      }
+      const float x1 = laneXAtY(curve, y1);
+      const float x2 = laneXAtY(curve, y2);
+      const float score = sigmoid(
+          logits[static_cast<size_t>(lane_index * 2 + 1)] -
+          logits[static_cast<size_t>(lane_index * 2)]);
+
+      LaneSegment lane;
+      lane.score = score;
+      lane.start.x = (x1 + (kLaneUpperY - y1) * (x2 - x1) / denominator) *
+                     image_width;
+      lane.start.y = kLaneUpperY * image_height;
+      lane.start.score = score;
+      lane.end.x = (x1 + (kLaneLowerY - y1) * (x2 - x1) / denominator) *
+                   image_width;
+      lane.end.y = kLaneLowerY * image_height;
+      lane.end.score = score;
+      result->lanes.push_back(lane);
+    }
+    result->lane_state = static_cast<int>(result->lanes.size());
     return true;
+  }
+
+  bool infer(const cv::Mat &image, LaneDetectionResult *result,
+             std::string *error) {
+    std::vector<float> input_tensor;
+    preprocess(image, &input_tensor);
+    std::vector<bmrt_runtime::OutputTensor> outputs;
+    if (!session_.launch(input_tensor, &outputs, error)) {
+      return false;
+    }
+    return decodeOutputs(outputs, image.cols, image.rows, result, error);
   }
 
   ModelDescriptor descriptor_;
   std::vector<float> mean_;
   std::vector<float> scale_;
   bmrt_runtime::Session session_;
+  std::unique_ptr<bmrt_runtime::VpssPreprocessor> preprocessor_;
   int logits_index_ = -1;
   int curves_index_ = -1;
 };
@@ -263,11 +332,11 @@ class LaneDetector::Impl {
  public:
   bool load(const Config &config, const std::string &requested_model_type,
             std::string *resolved_model_type, std::string *error) {
-    const std::string model_type = private_tdl_sdk::resolveModelToken(
-        config, requested_model_type, "LSTR_DET_LANE", error);
-    if (model_type.empty()) {
-      return false;
-    }
+    const std::string model_type = !requested_model_type.empty()
+                                       ? requested_model_type
+                                       : (!config.model_type.empty()
+                                              ? config.model_type
+                                              : "LSTR_DET_LANE");
 
     runtime_.reset();
     if (bmrt_runtime::startsWith(bmrt_runtime::toUpper(model_type), "LSTR_DET_LANE")) {
@@ -279,7 +348,7 @@ class LaneDetector::Impl {
       return true;
     }
 
-    private_tdl_sdk::setError(
+    bmrt_runtime::setError(
         error, "unsupported lane model_type for custom BMRT runtime: " + model_type);
     return false;
   }
@@ -287,7 +356,7 @@ class LaneDetector::Impl {
   bool run(const std::string &image_path, LaneDetectionResult *result,
            std::string *error) {
     if (!runtime_) {
-      private_tdl_sdk::setError(error, "lane detector is not initialized");
+      bmrt_runtime::setError(error, "lane detector is not initialized");
       return false;
     }
     return runtime_->run(image_path, result, error);
@@ -296,7 +365,7 @@ class LaneDetector::Impl {
   bool runFrame(const Frame &frame, LaneDetectionResult *result,
                 std::string *error) {
     if (!runtime_) {
-      private_tdl_sdk::setError(error, "lane detector is not initialized");
+      bmrt_runtime::setError(error, "lane detector is not initialized");
       return false;
     }
     return runtime_->runFrame(frame, result, error);
@@ -389,7 +458,7 @@ bool LaneDetector::run(const std::string &image_path, LaneDetectionResult *resul
 bool LaneDetector::runFrame(const Frame &frame, LaneDetectionResult *result,
                             std::string *error) {
   if (!impl_) {
-    private_tdl_sdk::setError(error, "lane detector is not initialized");
+    bmrt_runtime::setError(error, "lane detector is not initialized");
     return false;
   }
   return impl_->runFrame(frame, result, error);
@@ -399,7 +468,7 @@ bool LaneDetector::detect(const std::string &image_path,
                           LaneDetectionResult *result,
                           std::string *error) {
   if (!impl_) {
-    private_tdl_sdk::setError(error, "lane detector is not initialized");
+    bmrt_runtime::setError(error, "lane detector is not initialized");
     return false;
   }
   return impl_->run(image_path, result, error);

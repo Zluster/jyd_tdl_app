@@ -16,6 +16,23 @@ void setError(std::string *error, const std::string &message) {
   }
 }
 
+// A frame borrowed from VI/VPSS must be returned on every exit path.
+class FrameLease {
+ public:
+  explicit FrameLease(FrameSource *source) : source_(source) {}
+  ~FrameLease() {
+    if (source_) {
+      source_->releaseFrame();
+    }
+  }
+
+  FrameLease(const FrameLease &) = delete;
+  FrameLease &operator=(const FrameLease &) = delete;
+
+ private:
+  FrameSource *source_ = nullptr;
+};
+
 }  // namespace
 
 class VisionPipeline::Impl {
@@ -79,6 +96,7 @@ class VisionPipeline::Impl {
     if (!source_->read(&frame, error)) {
       return false;
     }
+    FrameLease frame_lease(source_.get());
 
     if (!model_->inferFrame(frame, threshold, result, error)) {
       return false;
@@ -104,6 +122,7 @@ class VisionPipeline::Impl {
     if (!source_->read(&frame, error)) {
       return false;
     }
+    FrameLease frame_lease(source_.get());
 
     if (!model_->predictFrame(frame, options, result, error)) {
       return false;
