@@ -69,6 +69,7 @@ struct Options {
   int interface_type = tdl_app::VoInterfaceType::Mipi;
   int interface_sync = tdl_app::VoInterfaceSync::P720_1280_60;
   int stream_port = 8080;
+  bool start_stream = false;
   std::string control_pipe = "/tmp/sophpi_ai_osd.ctrl";
 };
 
@@ -171,7 +172,7 @@ void printUsage() {
       << "                     [--top-k 5]\n"
       << "                     [--logo /root/logo.png]\n"
       << "                     [--screen-width N] [--screen-height N]\n"
-      << "                     [--stream-port 8080]\n"
+      << "                     [--stream] [--stream-port 8080]\n"
       << "                     [--control-pipe /tmp/sophpi_ai_osd.ctrl]\n"
       << "\n"
       << "  Model family is auto-detected from the model-spec (task field):\n"
@@ -242,6 +243,8 @@ bool parseArgs(int argc, char **argv, Options *opt) {
       const char *v = value("--stream-port");
       if (!v) return false;
       opt->stream_port = std::atoi(v);
+    } else if (arg == "--stream") {
+      opt->start_stream = true;
     } else if (arg == "--control-pipe") {
       const char *v = value("--control-pipe");
       if (!v) return false;
@@ -1231,6 +1234,10 @@ int main(int argc, char **argv) {
       startStream();
     }
   };
+
+  if (opt.start_stream) {
+    startStream();
+  }
 
   auto toggleAudio = [&]() {
     if (audio_loopback.running()) {
