@@ -1,4 +1,6 @@
+#include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <iostream>
 #include <string>
@@ -25,6 +27,8 @@ struct Options {
   int channel = 1;
   int timeout_ms = 1000;
   int frames = 1;
+  bool hand_refine = false;
+  float hand_refine_expand_ratio = 0.35f;
 };
 
 constexpr int kPose17Skeleton[][2] = {
@@ -34,8 +38,8 @@ constexpr int kPose17Skeleton[][2] = {
 
 constexpr int kHand21Skeleton[][2] = {
     {0, 1}, {1, 2}, {2, 3}, {3, 4}, {0, 5}, {5, 6}, {6, 7}, {7, 8},
-    {0, 9}, {9, 10}, {10, 11}, {11, 12}, {0, 13}, {13, 14}, {14, 15},
-    {15, 16}, {0, 17}, {17, 18}, {18, 19}, {19, 20}};
+    {5, 9}, {9, 10}, {10, 11}, {11, 12}, {9, 13}, {13, 14}, {14, 15},
+    {15, 16}, {13, 17}, {17, 18}, {18, 19}, {19, 20}, {0, 17}};
 
 void printUsage() {
   std::cout
@@ -43,6 +47,7 @@ void printUsage() {
       << "  tdl_keypoint_demo (--image FILE | --camera) --model-spec FILE\n"
       << "                    [--firmware FILE] [--model-dir DIR] [--output FILE]\n"
       << "                    [--dump-frame FILE] [--dump-overlay FILE]\n"
+      << "                    [--hand-refine] [--hand-refine-expand-ratio 0.35]\n"
       << "                    [--group N] [--channel N] [--timeout-ms N] [--frames N]\n";
 }
 
@@ -103,6 +108,12 @@ bool parseArgs(int argc, char **argv, Options *opt) {
       const char *value = requireValue("--frames");
       if (!value) return false;
       opt->frames = std::atoi(value);
+    } else if (arg == "--hand-refine") {
+      opt->hand_refine = true;
+    } else if (arg == "--hand-refine-expand-ratio") {
+      const char *value = requireValue("--hand-refine-expand-ratio");
+      if (!value) return false;
+      opt->hand_refine_expand_ratio = static_cast<float>(std::atof(value));
     } else if (arg == "-h" || arg == "--help") {
       printUsage();
       std::exit(0);
@@ -132,6 +143,38 @@ bool parseArgs(int argc, char **argv, Options *opt) {
     return false;
   }
   return true;
+}
+
+struct HandRoi { int x = 0; int y = 0; int width = 0; int height = 0; };
+
+bool makeHandRoi(const tdl_app::KeypointResult &result, int image_width,
+                 int image_height, float expand_ratio, HandRoi *roi) {
+  if (!roi || result.points.size() != 21 || image_width <= 0 || image_height <= 0) {
+    return false;
+  }
+  float x1 = result.points[0].x, y1 = result.points[0].y;
+  float x2 = x1, y2 = y1;
+  for (const tdl_app::Point &point : result.points) {
+    x1 = std::min(x1, point.x); y1 = std::min(y1, point.y);
+    x2 = std::max(x2, point.x); y2 = std::max(y2, point.y);
+  }
+  const float side = std::max(x2 - x1, y2 - y1) *
+                     std::max(1.0f, 1.0f + expand_ratio);
+  const float cx = (x1 + x2) * 0.5f, cy = (y1 + y2) * 0.5f;
+  const int left = std::max(0, std::min(image_width - 1,
+      static_cast<int>(std::floor(cx - side * 0.5f))));
+  const int top = std::max(0, std::min(image_height - 1,
+      static_cast<int>(std::floor(cy - side * 0.5f))));
+  const int right = std::max(left + 1, std::min(image_width,
+      static_cast<int>(std::ceil(cx + side * 0.5f))));
+  const int bottom = std::max(top + 1, std::min(image_height,
+      static_cast<int>(std::ceil(cy + side * 0.5f))));
+  roi->x = left; roi->y = top; roi->width = right - left; roi->height = bottom - top;
+  return true;
+}
+
+void mapHandRoi(const HandRoi &roi, tdl_app::KeypointResult *result) {
+  for (tdl_app::Point &point : result->points) { point.x += roi.x; point.y += roi.y; }
 }
 
 bool saveAnnotatedImage(const std::string &image_path, const std::string &output,
@@ -240,7 +283,19 @@ int main(int argc, char **argv) {
       }
       const auto read_end = std::chrono::steady_clock::now();
       const auto infer_begin = std::chrono::steady_clock::now();
-      const bool ok = detector.runFrame(frame, &result, &error);
+      bool ok = detector.runFrame(frame, &result, &error);
+      if (ok && opt.hand_refine && result.pointCount() == 21) {
+        const auto *video = static_cast<const VIDEO_FRAME_INFO_S *>(frame.native);
+        HandRoi roi;
+        if (video && makeHandRoi(result, static_cast<int>(video->stVFrame.u32Width),
+                                 static_cast<int>(video->stVFrame.u32Height),
+                                 opt.hand_refine_expand_ratio, &roi)) {
+          tdl_app::KeypointResult refined;
+          ok = detector.runFrameCrop(frame, roi.x, roi.y, roi.width, roi.height,
+                                     &refined, &error);
+          if (ok) { mapHandRoi(roi, &refined); result = std::move(refined); }
+        }
+      }
       const auto infer_end = std::chrono::steady_clock::now();
       if (!ok) {
         std::cerr << "runFrame failed: " << error << "\n";
@@ -288,6 +343,20 @@ int main(int argc, char **argv) {
   } else if (!detector.run(opt.image, &result, &error)) {
     std::cerr << "run failed: " << error << "\n";
     return 3;
+  } else if (opt.hand_refine && result.pointCount() == 21) {
+    cv::Mat image = cv::imread(opt.image, cv::IMREAD_COLOR);
+    HandRoi roi;
+    if (!image.empty() && makeHandRoi(result, image.cols, image.rows,
+                                      opt.hand_refine_expand_ratio, &roi)) {
+      tdl_app::KeypointResult refined;
+      const cv::Mat crop = image(cv::Rect(roi.x, roi.y, roi.width, roi.height));
+      if (!detector.runMat(crop, &refined, &error)) {
+        std::cerr << "refine failed: " << error << "\n";
+        return 3;
+      }
+      mapHandRoi(roi, &refined);
+      result = std::move(refined);
+    }
   }
 
   std::cout << "points: " << result.pointCount() << "\n";

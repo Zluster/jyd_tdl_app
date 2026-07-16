@@ -117,6 +117,17 @@ struct KeypointRuntime {
                    std::string *error) = 0;
   virtual bool runFrame(const Frame &frame, KeypointResult *result,
                         std::string *error) = 0;
+  virtual bool runMat(const cv::Mat &, KeypointResult *, std::string *error) {
+    keypoint_runtime_utils::setError(error,
+                                     "cropped inference is unavailable");
+    return false;
+  }
+  virtual bool runFrameCrop(const Frame &, int, int, int, int,
+                            KeypointResult *, std::string *error) {
+    keypoint_runtime_utils::setError(error,
+                                     "cropped inference is unavailable");
+    return false;
+  }
   virtual void reset() = 0;
   virtual bool initialized() const = 0;
 };
@@ -808,6 +819,15 @@ class HandRuntime : public KeypointRuntime {
       keypoint_runtime_utils::setError(error, "failed to read image: " + image_path);
       return false;
     }
+    return runMat(image, result, error);
+  }
+
+  bool runMat(const cv::Mat &image, KeypointResult *result,
+              std::string *error) override {
+    if (image.empty()) {
+      keypoint_runtime_utils::setError(error, "hand keypoint input is empty");
+      return false;
+    }
     cv::Mat resized;
     cv::resize(image, resized, cv::Size(session_.inputWidth(), session_.inputHeight()));
     std::vector<float> input;
@@ -828,7 +848,28 @@ class HandRuntime : public KeypointRuntime {
     const auto *video = static_cast<const VIDEO_FRAME_INFO_S *>(frame.native);
     const int width = static_cast<int>(video->stVFrame.u32Width);
     const int height = static_cast<int>(video->stVFrame.u32Height);
-    if (width <= 0 || height <= 0 || !preprocessor_->preprocess(frame.native, error)) {
+    return runFrameCrop(frame, 0, 0, width, height, result, error);
+  }
+
+  bool runFrameCrop(const Frame &frame, int x, int y, int width, int height,
+                    KeypointResult *result, std::string *error) override {
+    if (!frame.native || !result || x < 0 || y < 0 || width <= 0 || height <= 0) {
+      keypoint_runtime_utils::setError(error, "invalid hand keypoint crop");
+      return false;
+    }
+    const auto *video = static_cast<const VIDEO_FRAME_INFO_S *>(frame.native);
+    const int frame_width = static_cast<int>(video->stVFrame.u32Width);
+    const int frame_height = static_cast<int>(video->stVFrame.u32Height);
+    if (x + width > frame_width || y + height > frame_height) {
+      keypoint_runtime_utils::setError(error, "hand keypoint crop is outside frame");
+      return false;
+    }
+    bmrt_runtime::VpssPreprocessor::Roi roi;
+    roi.x = x;
+    roi.y = y;
+    roi.width = width;
+    roi.height = height;
+    if (!preprocessor_->preprocess(frame.native, &roi, error)) {
       return false;
     }
     std::vector<bmrt_runtime::OutputTensor> outputs;
@@ -930,6 +971,24 @@ class KeypointDetector::Impl {
     return runtime_->runFrame(frame, result, error);
   }
 
+  bool runMat(const cv::Mat &image, KeypointResult *result,
+              std::string *error) {
+    if (!runtime_) {
+      keypoint_runtime_utils::setError(error, "keypoint detector is not initialized");
+      return false;
+    }
+    return runtime_->runMat(image, result, error);
+  }
+
+  bool runFrameCrop(const Frame &frame, int x, int y, int width, int height,
+                    KeypointResult *result, std::string *error) {
+    if (!runtime_) {
+      keypoint_runtime_utils::setError(error, "keypoint detector is not initialized");
+      return false;
+    }
+    return runtime_->runFrameCrop(frame, x, y, width, height, result, error);
+  }
+
   void reset() {
     if (runtime_) {
       runtime_->reset();
@@ -1021,6 +1080,26 @@ bool KeypointDetector::runFrame(const Frame &frame, KeypointResult *result,
     return false;
   }
   return impl_->runFrame(frame, result, error);
+}
+
+bool KeypointDetector::runMat(const cv::Mat &image, KeypointResult *result,
+                              std::string *error) {
+  if (!impl_) {
+    keypoint_runtime_utils::setError(error, "keypoint detector is not initialized");
+    return false;
+  }
+  return impl_->runMat(image, result, error);
+}
+
+bool KeypointDetector::runFrameCrop(const Frame &frame, int x, int y,
+                                    int width, int height,
+                                    KeypointResult *result,
+                                    std::string *error) {
+  if (!impl_) {
+    keypoint_runtime_utils::setError(error, "keypoint detector is not initialized");
+    return false;
+  }
+  return impl_->runFrameCrop(frame, x, y, width, height, result, error);
 }
 
 bool KeypointDetector::estimate(const std::string &image_path,
