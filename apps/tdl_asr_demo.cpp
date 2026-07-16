@@ -165,6 +165,10 @@ int main(int argc, char **argv) {
   }
 
   std::cout << "pcm_bytes: " << pcm.size() << "\n";
-  std::cout << "text: " << result.text << "\n";
-  return 0;
+  std::cout << "text: " << result.text << "\n" << std::flush;
+
+  // CV184X TDL tears down unrelated VPSS/MMF state while destroying the
+  // Zipformer handle, which can crash after a successful one-shot CLI run.
+  // This demo owns no persistent resources and is intentionally one-shot.
+  std::_Exit(0);
 }
