@@ -5,6 +5,7 @@
 #include <fstream>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "c_apis/tdl_model_def.h"
 #include "c_apis/tdl_sdk.h"
@@ -153,9 +154,14 @@ class SpeechRecognizer::Impl {
       return false;
     }
 
+    // Zipformer needs trailing samples to flush the final feature windows.
+    // This matches the official offline ASR example (0.5 s at 16 kHz/16-bit).
+    constexpr std::size_t kTailPaddingBytes = 16000;
+    std::vector<std::uint8_t> padded_pcm = pcm16le_mono;
+    padded_pcm.insert(padded_pcm.end(), kTailPaddingBytes, 0);
+
     TDLImage audio_frame = TDL_ReadAudioFrame(
-        const_cast<std::uint8_t *>(pcm16le_mono.data()),
-        static_cast<int>(pcm16le_mono.size()));
+        padded_pcm.data(), static_cast<int>(padded_pcm.size()));
     if (!audio_frame) {
       setError(error, "TDL_ReadAudioFrame failed");
       return false;
