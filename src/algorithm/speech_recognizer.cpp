@@ -154,36 +154,40 @@ class SpeechRecognizer::Impl {
       return false;
     }
 
-    // Zipformer needs trailing samples to flush the final feature windows.
-    // This matches the official offline ASR example (0.5 s at 16 kHz/16-bit).
-    constexpr std::size_t kTailPaddingBytes = 16000;
+    // The CV184X C API sample feeds one second of PCM per call. Keep the
+    // handle alive across chunks so Zipformer retains its streaming state.
+    constexpr std::size_t kChunkBytes = 16000 * 2;
     std::vector<std::uint8_t> padded_pcm = pcm16le_mono;
-    padded_pcm.insert(padded_pcm.end(), kTailPaddingBytes, 0);
-
-    TDLImage audio_frame = TDL_ReadAudioFrame(
-        padded_pcm.data(), static_cast<int>(padded_pcm.size()));
-    if (!audio_frame) {
-      setError(error, "TDL_ReadAudioFrame failed");
-      return false;
-    }
-
-    TDLText text_meta;
-    std::memset(&text_meta, 0, sizeof(text_meta));
-    const int ret = TDL_SpeechRecognition(
-        handle_, TDL_MODEL_RECOGNITION_SPEECH_ZIPFORMER_ENCODER, audio_frame,
-        &text_meta);
-    TDL_DestroyImage(audio_frame);
-    if (ret != 0) {
-      setError(error, "TDL_SpeechRecognition failed, ret=" +
-                          std::to_string(ret));
-      return false;
-    }
-
     result->clear();
-    if (text_meta.text_info) {
-      result->text = text_meta.text_info;
+    const std::size_t tail_bytes =
+        (kChunkBytes - padded_pcm.size() % kChunkBytes) % kChunkBytes;
+    padded_pcm.insert(padded_pcm.end(), tail_bytes, 0);
+
+    for (std::size_t offset = 0; offset < padded_pcm.size();
+         offset += kChunkBytes) {
+      TDLImage audio_frame = TDL_ReadAudioFrame(
+          padded_pcm.data() + offset, static_cast<int>(kChunkBytes));
+      if (!audio_frame) {
+        setError(error, "TDL_ReadAudioFrame failed");
+        return false;
+      }
+
+      TDLText text_meta;
+      std::memset(&text_meta, 0, sizeof(text_meta));
+      const int ret = TDL_SpeechRecognition(
+          handle_, TDL_MODEL_RECOGNITION_SPEECH_ZIPFORMER_ENCODER,
+          audio_frame, &text_meta);
+      TDL_DestroyImage(audio_frame);
+      if (ret != 0) {
+        setError(error, "TDL_SpeechRecognition failed, ret=" +
+                            std::to_string(ret));
+        return false;
+      }
+      if (text_meta.text_info) {
+        result->text += text_meta.text_info;
+      }
+      TDL_ReleaseCharacterMeta(&text_meta);
     }
-    TDL_ReleaseCharacterMeta(&text_meta);
     return true;
   }
 

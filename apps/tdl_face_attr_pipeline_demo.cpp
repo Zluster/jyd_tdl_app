@@ -192,9 +192,19 @@ std::string describeAttributes(const tdl_app::AlgorithmResult &result) {
     if (!text.empty()) {
       text += " ";
     }
-    if (attribute.name == "emotion") {
+    if (attribute.name == "gender") {
+      text += attribute.value > 0.5f ? "gender=male" : "gender=female";
+    } else if (attribute.name == "age") {
+      const int age = std::max(0, std::min(100, static_cast<int>(
+          std::lround(attribute.value * 100.0f))));
+      text += "age=" + std::to_string(age);
+    } else if (attribute.name == "glasses") {
+      text += attribute.value > 0.5f ? "glasses=yes" : "glasses=no";
+    } else if (attribute.name == "mask") {
+      text += attribute.value > 0.5f ? "mask=yes" : "mask=no";
+    } else if (attribute.name == "emotion") {
       static const char *kEmotionNames[] = {
-          "neutral", "happy", "sad", "surprise", "fear", "disgust", "anger"};
+          "anger", "disgust", "fear", "happy", "neutral", "sad", "surprise"};
       const int index = static_cast<int>(attribute.value);
       text += "emotion=";
       text += index >= 0 && index < 7 ? kEmotionNames[index] : "unknown";
