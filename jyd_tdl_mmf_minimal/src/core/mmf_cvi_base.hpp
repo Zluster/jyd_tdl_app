@@ -78,7 +78,7 @@ struct DualOsLayout {
   static constexpr int kScreenHeight = 480;
   static constexpr int kVoDevice = 0;
   static constexpr int kVoChannel = 0;
-  static constexpr int kVoRotation = 180;
+  static constexpr int kVoRotation = 0;
 };
 
 enum class MediaModule { Vi = 0, Vpss = 1, Venc = 2, Vo = 3, Rgn = 4, Vdec = 5, Unknown = 255 };

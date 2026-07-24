@@ -38,7 +38,7 @@ struct DualOsLayout {
 
   static constexpr int kVoDevice = 0;
   static constexpr int kVoChannel = 0;
-  static constexpr int kVoRotation = 180;
+  static constexpr int kVoRotation = 0;
 };
 
 }  // namespace tdl_app
