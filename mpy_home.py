@@ -283,7 +283,6 @@ class AppTile:
         self.container.set_style_pad_column(0, 0)
         
         # 图标处理（支持Lottie动画或静态图片）
-        print(app_info.icon)
         if ".json" in app_info.icon:
             self.lottie = lv.lottie(self.container)
             self.lottie.set_size(self.w, self.h)

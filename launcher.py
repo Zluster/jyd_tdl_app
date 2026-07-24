@@ -1,126 +1,60 @@
-"""CPython 端封装：基于 nanobind 扩展模块 `mpy` 嵌入 MicroPython。
+"""launcher: CPython 宿主入口。
 
-替代旧的 ctypes + libmicropython.so 方案（cpy_lvgl.py）。主要差异：
-
-- 不再手动声明函数签名，import mpy 即用
-- exec()/exec_file() 直接返回捕获的 stdout；MicroPython 未捕获异常
-  变为 RuntimeError（消息为完整 traceback），不再需要
-  capture()/capture_read()
-- 函数注册用 @m.export 装饰器，参数/返回值注解决定类型转换
-- LVGL 事件循环由 CPython 侧驱动（mpy.call 快速路径），不再依赖
-  MicroPython 内部的 lv_timer.py（signal + ffi 方案已废弃）
-
-用法示例见文件末尾 __main__。
+职责划分：
+- 硬件/显示通路（tdl_py 的 VO/VPSS/OSD、framebuffer 注册）在本文件
+- 与 MicroPython 的一切交互走 mpyc（typed bridge + 属性代理），
+  不再有内联的 MicroPython 封装类和 tick 源码模板
 """
 
 import asyncio
-import ctypes
 import signal
-
-import mpy
-
-
-class MicroPython:
-    """MicroPython 解释器的生命周期与调用封装。"""
-
-    def __init__(self, heap_size=16 * 1024 * 1024):
-        mpy.init(heap_size)
-
-    # ---- 执行 ----
-
-    def exec(self, code: str, capture: bool = True) -> str:
-        """执行 MicroPython 源码，返回捕获的 stdout。
-
-        未捕获的 MicroPython 异常 -> RuntimeError(traceback 文本)。
-        capture=False 时不重定向 stdout：print 直接打到终端（进程崩溃
-        也不会丢），返回值为空字符串。调试崩溃问题时建议 False。
-        """
-        return mpy.exec(code, capture=capture)
-
-    def exec_file(self, path: str, capture: bool = True) -> str:
-        """执行 MicroPython 脚本文件，语义同 exec()。"""
-        return mpy.exec_file(path, capture=capture)
-
-    def call(self, name: str, *args):
-        """快速路径：直接调用 MicroPython __main__ 里的函数。
-
-        跳过词法分析/编译和 stdout 捕获，适合高频调用（tick、事件上报）。
-        """
-        return mpy.call(name, *args)
-
-    # ---- 注册 CPython 函数给 MicroPython 调用 ----
-
-    def export(self, fn=None, *, name=None):
-        """装饰器：把 CPython 函数注册给 MicroPython。
-
-        @m.export
-        def read_sensor() -> float: ...
-
-        @m.export(name="cfg")
-        def load_config(path: str) -> bytes: ...
-
-        MicroPython 侧: import mpy_embed; mpy_embed.read_sensor()
-        参数/返回值注解（int/float/bool/str/bytes/memoryview/None）决定
-        转换方式；无注解按运行时类型自动转换。
-        """
-        def wrap(f):
-            mpy.register(f, name=name)
-            return f
-        if fn is None:
-            return wrap          # @m.export(name=...)
-        return wrap(fn)          # @m.export
-
-    def unexport(self, name: str):
-        mpy.unregister(name)
-
-    def exports(self):
-        return mpy.registered()
-
-    # ---- 生命周期 ----
-
-    def close(self):
-        if mpy.active():
-            mpy.deinit()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, exc_type, exc, tb):
-        self.close()
-
-# ==================== 使用示例 ====================
 import time
-async def lv_tick(m, freq=25):
-        delay = 1.0 / freq
-        next_tick = time.perf_counter()  # 使用perf_counter更精确
-        tick_str = f'''
-lv.tick_inc({int(delay*1000)})
-if lv._nesting.value == 0:
-    try:
-        lv.task_handler()
-    except Exception as e:
-        print("Exception in task_handler:", e)
-'''
-        while True:
-            m.exec(tick_str, capture=False)
-            next_tick += delay
-            sleep_time = next_tick - time.perf_counter()
-            await asyncio.sleep(sleep_time if sleep_time > 0 else 0)
 
+import mpy      # 仅用于显示通路（set_flush_buf / set_flush_callback）
 import tdl_py
-async def main():
-    vo = None
+from mpyc import Mpyc
+
+
+async def lv_tick_loop(m: Mpyc, freq: int = 25):
+    """LVGL 事件循环：走 mpyc 的 __mpyc_tick__ 快速路径。"""
+    delay = 1.0 / freq
+    ms = int(delay * 1000)
+    next_tick = time.perf_counter()
+    while True:
+        try:
+            m.tick(ms)
+        except RuntimeError as e:
+            # MicroPython 侧异常不终止 UI 循环，打印后继续
+            print("Exception in task_handler:", e)
+        next_tick += delay
+        sleep_time = next_tick - time.perf_counter()
+        await asyncio.sleep(sleep_time if sleep_time > 0 else 0)
+
+
+def setup_display_path():
+    """摄像头预览 -> VPSS -> VO 的媒体链路（幂等）。
+
+    返回创建的链路对象列表，调用者必须持有到程序结束：VoOutput 的
+    析构会关闭 VO、MediaLink 的析构会 unbind，对象被 GC 即通路被拆。
+    """
+    keep = []
     if not tdl_py.vo_is_enabled(0):
         vo = tdl_py.VoOutput()
         vo.open()
-    preview = None
+        keep.append(vo)
     if tdl_py.get_bind_source_vpss(1) is None:          # grp1 输入端没人绑
         preview = tdl_py.MediaLink.vpss_to_vpss(0, 2, 1, 0)
         preview.bind()
-    display = None
+        keep.append(preview)
     if tdl_py.get_bind_source_vo(0, 0) is None:         # VO layer0/ch0 没人绑
         display = tdl_py.MediaLink.vpss_to_vo(1, 0, 0, 0)
         display.bind()
+        keep.append(display)
+    return keep
+
+
+async def main():
+    media_links = setup_display_path()  # 持有到 main 结束，勿删
 
     osd_screen = tdl_py.Osd(handle=202, canvas_count=2)
     try:
@@ -138,10 +72,9 @@ async def main():
             osd_screen.update()
         mpy.set_flush_callback(on_flush, bytes_per_pixel=4)
 
-        with MicroPython(heap_size=4 * 1024 * 1024) as m:
-            out = m.exec_file("/root/launcher/mpy_env.py", capture=False)
-            # await lv_tick(m, 25)
-            tick_task = asyncio.create_task(lv_tick(m, 25))
+        with Mpyc(heap_size=4 * 1024 * 1024) as m:
+            m.exec_file("/root/launcher/mpy_env.py", capture=False)
+            tick_task = asyncio.create_task(lv_tick_loop(m, 25))
             while True:
                 await asyncio.sleep(0.01)
     finally:
