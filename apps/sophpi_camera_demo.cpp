@@ -38,9 +38,9 @@ struct Options {
   int layer = 0;
   int vo_chn = 0;
   int screen_width = 720;
-  int screen_height = 1280;
+  int screen_height = 480;
   int interface_type = tdl_app::VoInterfaceType::Mipi;
-  int interface_sync = tdl_app::VoInterfaceSync::P720_1280_60;
+  int interface_sync = tdl_app::VoInterfaceSync::P720_480_60;
   std::string album_dir = "./album";
 };
 
@@ -1009,4 +1009,3 @@ int main(int argc, char **argv) {
   std::cout << "camera demo exit\n";
   return 0;
 }
-

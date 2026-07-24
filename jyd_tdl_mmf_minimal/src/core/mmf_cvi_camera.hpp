@@ -51,7 +51,7 @@ class Display {
     int height = DualOsLayout::kScreenHeight;
     int pixel_format = PixelFormat::NV12;
     int interface_type = VO_INTF_MIPI;
-    int interface_sync = VO_OUTPUT_720x1280_60;
+    int interface_sync = VO_OUTPUT_480P60;
     int display_buf_len = 3;
     int frame_rate = 25;
     int channel_x = 0;

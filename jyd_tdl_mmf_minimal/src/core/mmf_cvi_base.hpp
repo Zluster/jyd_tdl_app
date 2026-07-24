@@ -66,19 +66,19 @@ struct DualOsLayout {
   static constexpr int kLiveChannel = 2;
   static constexpr int kSubRgbChannel = 3;
   static constexpr int kDisplayChannel = 0;
-  static constexpr int kMainWidth = 1920;
-  static constexpr int kMainHeight = 1080;
+  static constexpr int kMainWidth = 1600;
+  static constexpr int kMainHeight = 1200;
   static constexpr int kAiWidth = 640;
   static constexpr int kAiHeight = 640;
-  static constexpr int kLiveWidth = 1280;
-  static constexpr int kLiveHeight = 720;
+  static constexpr int kLiveWidth = 720;
+  static constexpr int kLiveHeight = 480;
   static constexpr int kSubRgbWidth = 640;
   static constexpr int kSubRgbHeight = 640;
   static constexpr int kScreenWidth = 720;
-  static constexpr int kScreenHeight = 1280;
+  static constexpr int kScreenHeight = 480;
   static constexpr int kVoDevice = 0;
   static constexpr int kVoChannel = 0;
-  static constexpr int kVoRotation = 90;
+  static constexpr int kVoRotation = 0;
 };
 
 enum class MediaModule { Vi = 0, Vpss = 1, Venc = 2, Vo = 3, Rgn = 4, Vdec = 5, Unknown = 255 };

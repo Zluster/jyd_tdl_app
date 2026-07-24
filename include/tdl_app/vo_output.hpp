@@ -17,7 +17,7 @@ class VoOutput {
     int height = 640;
     int pixel_format = PixelFormat::NV12;
     int interface_type = VoInterfaceType::Mipi;
-    int interface_sync = VoInterfaceSync::P720_1280_60;
+    int interface_sync = VoInterfaceSync::P720_480_60;
     int display_buf_len = 3;
     int frame_rate = 25;
     int channel_x = 0;
@@ -30,7 +30,7 @@ class VoOutput {
                         int width = 640, int height = 640,
                         int pixel_format = PixelFormat::NV12,
                         int interface_type = VoInterfaceType::Mipi,
-                        int interface_sync = VoInterfaceSync::P720_1280_60,
+                        int interface_sync = VoInterfaceSync::P720_480_60,
                         int display_buf_len = 3) {
     Config config;
     config.device = device;
@@ -46,9 +46,9 @@ class VoOutput {
   }
 
   static Config argb8888Display(int device = 0, int layer = 0, int channel = 0,
-                                int width = 720, int height = 1280,
+                                int width = 720, int height = 480,
                                 int interface_type = VoInterfaceType::Mipi,
-                                int interface_sync = VoInterfaceSync::P720_1280_60,
+                                int interface_sync = VoInterfaceSync::P720_480_60,
                                 int display_buf_len = 2) {
     Config config = display(device, layer, channel, width, height,
                             PixelFormat::ARGB8888, interface_type,

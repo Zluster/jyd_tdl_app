@@ -65,9 +65,9 @@ struct Options {
   int layer = 0;
   int vo_chn = 0;
   int screen_width = 720;
-  int screen_height = 1280;
+  int screen_height = 480;
   int interface_type = tdl_app::VoInterfaceType::Mipi;
-  int interface_sync = tdl_app::VoInterfaceSync::P720_1280_60;
+  int interface_sync = tdl_app::VoInterfaceSync::P720_480_60;
   int stream_port = 8080;
   bool start_stream = false;
   std::string control_pipe = "/tmp/sophpi_ai_osd.ctrl";

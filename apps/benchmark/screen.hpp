@@ -21,9 +21,9 @@ class ScreenDisplay {
     int layer = 0;
     int vo_chn = 0;
     int screen_width = 720;
-    int screen_height = 1280;
+    int screen_height = 480;
     int interface_type = 0;  // tdl_app::VoInterfaceType::Mipi
-    int interface_sync = 0;  // tdl_app::VoInterfaceSync::P720_1280_60
+    int interface_sync = 0;  // tdl_app::VoInterfaceSync::P720_480_60
     int osd_handle = 140;
   };
 

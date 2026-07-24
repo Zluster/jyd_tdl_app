@@ -31,7 +31,7 @@ class Display {
     int height = DualOsLayout::kScreenHeight;
     int pixel_format = PixelFormat::NV12;
     int interface_type = VoInterfaceType::Mipi;
-    int interface_sync = VoInterfaceSync::P720_1280_60;
+    int interface_sync = VoInterfaceSync::P720_480_60;
     std::string framebuffer = "/dev/fb0";
     int image_layer = 0;
     bool image_double_buffer = true;

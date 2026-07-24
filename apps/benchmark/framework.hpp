@@ -28,9 +28,9 @@ struct RunConfig {
   int layer = 0;
   int vo_chn = 0;
   int screen_width = 720;
-  int screen_height = 1280;
+  int screen_height = 480;
   int interface_type = tdl_app::VoInterfaceType::Mipi;
-  int interface_sync = tdl_app::VoInterfaceSync::P720_1280_60;
+  int interface_sync = tdl_app::VoInterfaceSync::P720_480_60;
   int frames = 60;      // display 每个分辨率送帧数
   int buffers = 3;      // display 帧池中的 buffer 数
 };

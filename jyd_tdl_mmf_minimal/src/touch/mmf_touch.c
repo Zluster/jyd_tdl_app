@@ -15,7 +15,7 @@ void mmf_touch_get_default_config(mmf_touch_config_t* config) {
   memset(config, 0, sizeof(*config));
   config->input_device = "/dev/input/event0";
   config->screen_width = 720;
-  config->screen_height = 1280;
+  config->screen_height = 480;
   config->read_timeout_ms = 1000;
 }
 
