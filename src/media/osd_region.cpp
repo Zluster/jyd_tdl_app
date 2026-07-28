@@ -186,6 +186,7 @@ bool OsdRegion::getCanvas(OsdCanvas *canvas, std::string *error) {
   }
 
   canvas->data = info.pu8VirtAddr;
+  canvas->phys = info.u64PhyAddr;
   canvas->width = static_cast<int>(info.stSize.u32Width);
   canvas->height = static_cast<int>(info.stSize.u32Height);
   canvas->stride = static_cast<int>(info.u32Stride);

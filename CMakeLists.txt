@@ -9,6 +9,9 @@ set(CMAKE_SKIP_RPATH ON)
 option(TDL_APP_BUILD_DEMOS "Build command line demo applications" ON)
 option(TDL_APP_MEDIA_MINIMAL "Build only media/audio targets and skip algorithm sources/demos" OFF)
 option(TDL_APP_BUILD_MMF_MINIMAL "Build standalone C MMF API wrapper" ON)
+option(TDL_APP_BUILD_PYTHON "Build the tdl_py nanobind python module" ON)
+set(TDL_APP_PYTHON_INCLUDE_DIR "${CMAKE_CURRENT_LIST_DIR}/python3.10"
+    CACHE PATH "Target-platform Python 3.10 headers (Python.h)")
 set(TDL_APP_PROFILE "dual_os" CACHE STRING "Build profile")
 
 if(NOT TDL_APP_PROFILE STREQUAL "dual_os")
@@ -155,6 +158,51 @@ if(TDL_APP_BUILD_MMF_MINIMAL)
   add_subdirectory(jyd_tdl_mmf_minimal)
 endif()
 
+if(TDL_APP_BUILD_PYTHON)
+  if(NOT EXISTS "${TDL_APP_PYTHON_INCLUDE_DIR}/Python.h")
+    message(FATAL_ERROR
+      "Missing target Python headers: ${TDL_APP_PYTHON_INCLUDE_DIR}/Python.h\n"
+      "Set TDL_APP_PYTHON_INCLUDE_DIR or disable TDL_APP_BUILD_PYTHON.")
+  endif()
+
+  # tdl_app_sdk is linked into the shared python module, so it (and the ini
+  # helper it drags in) must be compiled as position-independent code.
+  set_target_properties(tdl_app_sdk tdl_app_ini_compat PROPERTIES
+    POSITION_INDEPENDENT_CODE ON)
+
+  # nanobind is compiled statically into the module (nb_combined.cpp), which
+  # avoids find_package(Python) and works with the cross toolchain. Flags
+  # follow the manual-build recipe documented in nb_combined.cpp.
+  add_library(tdl_py MODULE
+    python/tdl_py_module.cpp
+    third_party/nanobind/src/nb_combined.cpp
+  )
+  set_target_properties(tdl_py PROPERTIES
+    PREFIX ""
+    OUTPUT_NAME "tdl_py"
+    SUFFIX ".so"
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON
+    CXX_VISIBILITY_PRESET hidden
+  )
+  target_compile_definitions(tdl_py PRIVATE NB_COMPACT_ASSERTIONS)
+  target_compile_options(tdl_py PRIVATE
+    -fno-strict-aliasing
+    -ffunction-sections
+    -fdata-sections
+  )
+  target_include_directories(tdl_py PRIVATE
+    "${TDL_APP_PYTHON_INCLUDE_DIR}"
+    "${CMAKE_CURRENT_LIST_DIR}/third_party/nanobind/include"
+    "${CMAKE_CURRENT_LIST_DIR}/third_party/nanobind/ext/robin_map/include"
+    "${TDL_CV184X_INCLUDE_DIRS}"
+  )
+  target_link_libraries(tdl_py PRIVATE tdl_app_sdk)
+  target_link_options(tdl_py PRIVATE -Wl,--gc-sections -Wl,--as-needed)
+
+  install(TARGETS tdl_py LIBRARY DESTINATION lib/python)
+endif()
+
 if(TDL_APP_BUILD_DEMOS)
   add_executable(tdl_audio_aio_demo apps/tdl_audio_aio_demo.cpp)
   target_include_directories(tdl_audio_aio_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
@@ -237,21 +285,28 @@ if(TDL_APP_BUILD_DEMOS)
       PATHS "${TDL_APP_FREETYPE_ROOT}/lib" NO_DEFAULT_PATH)
     find_library(TDL_APP_ROOTFS_Z_LIBRARY NAMES z
       PATHS "${TDL_APP_FREETYPE_ROOT}/../lib" NO_DEFAULT_PATH)
-    if(NOT TDL_APP_FREETYPE_INCLUDE_DIR OR NOT TDL_APP_FREETYPE_LIBRARY OR
-       NOT TDL_APP_BZ2_LIBRARY OR NOT TDL_APP_PNG_LIBRARY OR
-       NOT TDL_APP_BROTLI_DEC_LIBRARY OR NOT TDL_APP_BROTLI_COMMON_LIBRARY OR
-       NOT TDL_APP_ROOTFS_Z_LIBRARY)
-      message(FATAL_ERROR
-        "FreeType and its rootfs dependencies are required for UTF-8 OCR overlays. Set TDL_APP_FREETYPE_ROOT.")
+    # FreeType is only needed by the two PP-OCR demos (UTF-8 overlay text).
+    # When the cross-compiled rootfs is not available, skip those demos
+    # instead of failing the whole configure.
+    if(TDL_APP_FREETYPE_INCLUDE_DIR AND TDL_APP_FREETYPE_LIBRARY AND
+       TDL_APP_BZ2_LIBRARY AND TDL_APP_PNG_LIBRARY AND
+       TDL_APP_BROTLI_DEC_LIBRARY AND TDL_APP_BROTLI_COMMON_LIBRARY AND
+       TDL_APP_ROOTFS_Z_LIBRARY)
+      set(TDL_APP_HAS_FREETYPE ON)
+      set(TDL_APP_FREETYPE_LIBRARIES
+        "${TDL_APP_FREETYPE_LIBRARY}"
+        "${TDL_APP_BZ2_LIBRARY}"
+        "${TDL_APP_PNG_LIBRARY}"
+        "${TDL_APP_BROTLI_DEC_LIBRARY}"
+        "${TDL_APP_BROTLI_COMMON_LIBRARY}"
+        "${TDL_APP_ROOTFS_Z_LIBRARY}"
+      )
+    else()
+      set(TDL_APP_HAS_FREETYPE OFF)
+      message(WARNING
+        "FreeType rootfs not found (TDL_APP_FREETYPE_ROOT=${TDL_APP_FREETYPE_ROOT}); "
+        "skipping tdl_pp_ocr_demo and tdl_pp_ocr_camera_demo.")
     endif()
-    set(TDL_APP_FREETYPE_LIBRARIES
-      "${TDL_APP_FREETYPE_LIBRARY}"
-      "${TDL_APP_BZ2_LIBRARY}"
-      "${TDL_APP_PNG_LIBRARY}"
-      "${TDL_APP_BROTLI_DEC_LIBRARY}"
-      "${TDL_APP_BROTLI_COMMON_LIBRARY}"
-      "${TDL_APP_ROOTFS_Z_LIBRARY}"
-    )
 
     add_executable(tdl_detect_demo apps/tdl_detect_demo.cpp apps/demo_support.cpp)
     target_include_directories(tdl_detect_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
@@ -387,28 +442,30 @@ if(TDL_APP_BUILD_DEMOS)
     target_include_directories(tdl_plate_recognize_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
     target_link_libraries(tdl_plate_recognize_demo PRIVATE tdl_app_sdk)
 
-    add_executable(tdl_pp_ocr_demo
-      apps/tdl_pp_ocr_demo.cpp
-      apps/demo_support.cpp
-      apps/ocr_overlay_support.cpp
-    )
-    target_include_directories(tdl_pp_ocr_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps" "${TDL_APP_FREETYPE_INCLUDE_DIR}")
-    target_link_libraries(tdl_pp_ocr_demo PRIVATE tdl_app_sdk ${TDL_APP_FREETYPE_LIBRARIES})
-    target_link_options(tdl_pp_ocr_demo PRIVATE
-      "-Wl,-rpath-link,${TDL_APP_FREETYPE_ROOT}/lib"
-      "-Wl,-rpath-link,${TDL_APP_FREETYPE_ROOT}/../lib")
+    if(TDL_APP_HAS_FREETYPE)
+      add_executable(tdl_pp_ocr_demo
+        apps/tdl_pp_ocr_demo.cpp
+        apps/demo_support.cpp
+        apps/ocr_overlay_support.cpp
+      )
+      target_include_directories(tdl_pp_ocr_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps" "${TDL_APP_FREETYPE_INCLUDE_DIR}")
+      target_link_libraries(tdl_pp_ocr_demo PRIVATE tdl_app_sdk ${TDL_APP_FREETYPE_LIBRARIES})
+      target_link_options(tdl_pp_ocr_demo PRIVATE
+        "-Wl,-rpath-link,${TDL_APP_FREETYPE_ROOT}/lib"
+        "-Wl,-rpath-link,${TDL_APP_FREETYPE_ROOT}/../lib")
 
-    add_executable(tdl_pp_ocr_camera_demo
-      apps/tdl_pp_ocr_camera_demo.cpp
-      apps/camera_demo_support.cpp
-      apps/ocr_overlay_support.cpp
-    )
-    target_include_directories(tdl_pp_ocr_camera_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps" "${TDL_APP_FREETYPE_INCLUDE_DIR}")
-    target_link_libraries(tdl_pp_ocr_camera_demo PRIVATE tdl_app_sdk ${TDL_APP_FREETYPE_LIBRARIES})
-    target_link_options(tdl_pp_ocr_camera_demo PRIVATE
-      -Wl,--as-needed
-      "-Wl,-rpath-link,${TDL_APP_FREETYPE_ROOT}/lib"
-      "-Wl,-rpath-link,${TDL_APP_FREETYPE_ROOT}/../lib")
+      add_executable(tdl_pp_ocr_camera_demo
+        apps/tdl_pp_ocr_camera_demo.cpp
+        apps/camera_demo_support.cpp
+        apps/ocr_overlay_support.cpp
+      )
+      target_include_directories(tdl_pp_ocr_camera_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps" "${TDL_APP_FREETYPE_INCLUDE_DIR}")
+      target_link_libraries(tdl_pp_ocr_camera_demo PRIVATE tdl_app_sdk ${TDL_APP_FREETYPE_LIBRARIES})
+      target_link_options(tdl_pp_ocr_camera_demo PRIVATE
+        -Wl,--as-needed
+        "-Wl,-rpath-link,${TDL_APP_FREETYPE_ROOT}/lib"
+        "-Wl,-rpath-link,${TDL_APP_FREETYPE_ROOT}/../lib")
+    endif()
 
     add_executable(tdl_camera_detect_demo
       apps/tdl_camera_detect_demo.cpp
@@ -522,8 +579,6 @@ if(TDL_APP_BUILD_DEMOS)
       tdl_face_attr_pipeline_demo
       tdl_face_recognition_demo
       tdl_plate_recognize_demo
-      tdl_pp_ocr_demo
-      tdl_pp_ocr_camera_demo
       tdl_camera_detect_demo
       tdl_camera_scrfd_benchmark_demo
       tdl_camera_tdlsdk_face_benchmark_demo
@@ -534,6 +589,14 @@ if(TDL_APP_BUILD_DEMOS)
       tdl_benchmark_demo
       RUNTIME DESTINATION bin
     )
+
+    if(TDL_APP_HAS_FREETYPE)
+      install(TARGETS
+        tdl_pp_ocr_demo
+        tdl_pp_ocr_camera_demo
+        RUNTIME DESTINATION bin
+      )
+    endif()
   endif()
 endif()
 

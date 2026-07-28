@@ -9,6 +9,7 @@ namespace tdl_app {
 
 struct OsdCanvas {
   void *data = nullptr;
+  std::uint64_t phys = 0;  // physical address, for user-owned persistent maps
   int width = 0;
   int height = 0;
   int stride = 0;
