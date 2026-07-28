@@ -3,13 +3,14 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
-#include <cstring>
 #include <fstream>
 #include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
+
+#include "media/private/audio_file_decoder.hpp"
 
 namespace tdl_app {
 namespace {
@@ -252,20 +253,6 @@ void writeLe32(std::ofstream *out, std::uint32_t value) {
   out->put(static_cast<char>((value >> 24) & 0xff));
 }
 
-std::uint16_t readLe16(std::ifstream *in) {
-  const std::uint8_t b0 = static_cast<std::uint8_t>(in->get());
-  const std::uint8_t b1 = static_cast<std::uint8_t>(in->get());
-  return static_cast<std::uint16_t>(b0 | (b1 << 8));
-}
-
-std::uint32_t readLe32(std::ifstream *in) {
-  const std::uint8_t b0 = static_cast<std::uint8_t>(in->get());
-  const std::uint8_t b1 = static_cast<std::uint8_t>(in->get());
-  const std::uint8_t b2 = static_cast<std::uint8_t>(in->get());
-  const std::uint8_t b3 = static_cast<std::uint8_t>(in->get());
-  return static_cast<std::uint32_t>(b0 | (b1 << 8) | (b2 << 16) | (b3 << 24));
-}
-
 bool writeWavHeader(std::ofstream *out, const AudioIoConfig &config,
                     std::uint32_t data_size, std::string *error) {
   if (!out || !(*out)) {
@@ -292,75 +279,6 @@ bool writeWavHeader(std::ofstream *out, const AudioIoConfig &config,
     return false;
   }
   return true;
-}
-
-bool readWavHeader(std::ifstream *in, AudioIoConfig *config,
-                   std::uint32_t *data_size, std::string *error) {
-  if (!in || !(*in)) {
-    setError(error, "wav input file is not open");
-    return false;
-  }
-  char riff[4] = {0, 0, 0, 0};
-  char wave[4] = {0, 0, 0, 0};
-  in->read(riff, 4);
-  if (!(*in) || std::strncmp(riff, "RIFF", 4) != 0) {
-    setError(error, "invalid wav header: missing RIFF");
-    return false;
-  }
-  (void)readLe32(in);
-  in->read(wave, 4);
-  if (!(*in) || std::strncmp(wave, "WAVE", 4) != 0) {
-    setError(error, "invalid wav header: missing WAVE");
-    return false;
-  }
-  bool fmt_found = false;
-  bool data_found = false;
-  std::uint16_t audio_format = 1;
-  std::uint16_t channels = 1;
-  std::uint32_t sample_rate = 16000;
-  std::uint16_t bits_per_sample = 16;
-  std::uint32_t payload_size = 0;
-  while (*in && (!fmt_found || !data_found)) {
-    char chunk_id[4] = {0, 0, 0, 0};
-    in->read(chunk_id, 4);
-    if (!(*in)) {
-      break;
-    }
-    const std::uint32_t chunk_size = readLe32(in);
-    if (std::strncmp(chunk_id, "fmt ", 4) == 0) {
-      audio_format = readLe16(in);
-      channels = readLe16(in);
-      sample_rate = readLe32(in);
-      (void)readLe32(in);
-      (void)readLe16(in);
-      bits_per_sample = readLe16(in);
-      if (chunk_size > 16) {
-        in->seekg(chunk_size - 16, std::ios::cur);
-      }
-      fmt_found = true;
-    } else if (std::strncmp(chunk_id, "data", 4) == 0) {
-      payload_size = chunk_size;
-      data_found = true;
-      break;
-    } else {
-      in->seekg(chunk_size, std::ios::cur);
-    }
-  }
-  if (!fmt_found || !data_found) {
-    setError(error, "wav header is incomplete");
-    return false;
-  }
-  if (audio_format != 1) {
-    setError(error, "only PCM wav is supported");
-    return false;
-  }
-  config->sample_rate = static_cast<int>(sample_rate);
-  config->channels = static_cast<int>(channels);
-  config->bit_depth = static_cast<int>(bits_per_sample);
-  if (data_size) {
-    *data_size = payload_size;
-  }
-  return validateIoConfig(*config, error);
 }
 
 bool drainOutput(AudioOutput *output, int wait_ms) {
@@ -706,31 +624,11 @@ bool Audio::recordWav(const std::string &path, double seconds,
 
 bool Audio::playWav(const std::string &path, const AudioIoConfig &config,
                     std::string *error) const {
-  std::ifstream in(path, std::ios::binary);
-  if (!in) {
-    setError(error, "failed to open wav input: " + path);
-    return false;
-  }
   AudioIoConfig wav_config = config;
-  std::uint32_t data_size = 0;
-  if (!readWavHeader(&in, &wav_config, &data_size, error)) {
-    return false;
-  }
-  wav_config.ao_device = config.ao_device;
-  wav_config.ao_channel = config.ao_channel;
-  wav_config.ao_card_id = config.ao_card_id;
-  wav_config.ao_volume = config.ao_volume;
-  wav_config.frame_count = config.frame_count;
-  wav_config.frame_depth = config.frame_depth;
-  wav_config.timeout_ms = config.timeout_ms;
-  wav_config.points_per_frame = config.points_per_frame > 0
-      ? config.points_per_frame
-      : std::max(80, wav_config.sample_rate / 100);
-  const int source_channels = wav_config.channels;
-  const bool duplicate_mono = source_channels == 1;
-  if (duplicate_mono) {
-    wav_config.channels = 2;
-  }
+  wav_config.sample_rate = private_audio::kPlaybackSampleRate;
+  wav_config.channels = private_audio::kPlaybackChannels;
+  wav_config.bit_depth = private_audio::kPlaybackBitDepth;
+  wav_config.points_per_frame = private_audio::kPlaybackSamplesPerFrame;
   std::string build_error;
   AudioOutput output(toOutputConfig(wav_config, &build_error));
   if (!build_error.empty()) {
@@ -740,53 +638,24 @@ bool Audio::playWav(const std::string &path, const AudioIoConfig &config,
   if (!output.open(error)) {
     return false;
   }
-  const std::size_t sample_bytes = bytesPerSample(wav_config.bit_depth);
-  const std::size_t source_frame_bytes =
-      static_cast<std::size_t>(wav_config.points_per_frame) *
-      source_channels * sample_bytes;
-  const std::size_t output_frame_bytes =
-      static_cast<std::size_t>(wav_config.points_per_frame) *
-      wav_config.channels * sample_bytes;
-  std::vector<std::uint8_t> input_buffer(source_frame_bytes, 0);
-  std::vector<std::uint8_t> output_buffer(output_frame_bytes, 0);
   std::uint32_t sequence = 0;
-  std::uint32_t remaining = data_size;
-  while (remaining > 0) {
-    const std::size_t want = std::min<std::size_t>(input_buffer.size(), remaining);
-    std::fill(input_buffer.begin(), input_buffer.end(), 0);
-    in.read(reinterpret_cast<char *>(input_buffer.data()), static_cast<std::streamsize>(want));
-    const std::streamsize got = in.gcount();
-    if (got <= 0) {
-      break;
-    }
-    std::fill(output_buffer.begin(), output_buffer.end(), 0);
-    if (duplicate_mono) {
-      const std::size_t samples = static_cast<std::size_t>(got) / sample_bytes;
-      for (std::size_t i = 0; i < samples; ++i) {
-        const std::uint8_t *sample = input_buffer.data() + i * sample_bytes;
-        std::copy_n(sample, sample_bytes,
-                    output_buffer.data() + (i * 2) * sample_bytes);
-        std::copy_n(sample, sample_bytes,
-                    output_buffer.data() + (i * 2 + 1) * sample_bytes);
-      }
-    } else {
-      std::copy_n(input_buffer.data(), static_cast<std::size_t>(got),
-                  output_buffer.data());
-    }
+  const private_audio::Pcm16StereoSink sink =
+      [&](const std::vector<std::uint8_t> &data,
+          std::string *sink_error) {
     AudioPcmChunk chunk;
     chunk.sample_rate = wav_config.sample_rate;
     chunk.channels = wav_config.channels;
     chunk.bit_depth = wav_config.bit_depth;
     chunk.sequence = sequence++;
-    chunk.data.assign(output_buffer.begin(), output_buffer.end());
+    chunk.data = data;
     AudioFrame frame;
-    if (!chunkToAudioFrame(chunk, wav_config, &frame, error)) {
+    if (!chunkToAudioFrame(chunk, wav_config, &frame, sink_error)) {
       return false;
     }
-    if (!output.writeFrame(frame, wav_config.timeout_ms, error)) {
-      return false;
-    }
-    remaining -= static_cast<std::uint32_t>(got);
+    return output.writeFrame(frame, wav_config.timeout_ms, sink_error);
+  };
+  if (!private_audio::decodeAudioFileToPcm16Stereo(path, sink, error)) {
+    return false;
   }
   drainOutput(&output, 800);
   return true;

@@ -74,6 +74,7 @@ set(TDL_APP_MEDIA_SOURCES
   src/media/mipi_device.cpp
   src/media/osd_region.cpp
   src/media/mmf.cpp
+  src/media/private/audio_file_decoder.cpp
   src/media/private/audio_runtime.cpp
   src/media/region_overlay.cpp
   src/media/sys_context.cpp
@@ -100,6 +101,34 @@ add_library(tdl_app_ini_compat STATIC
   third_party/vendor/ini/ini.c
 )
 
+set(TDL_APP_AUDIO_FFMPEG_ROOT
+    "/home/jyd/zwz/sophpi/install/soc_cv1843hp_jyd_common_sd_dualos_alios/images/rootfs_new/usr"
+    CACHE PATH "CV184X rootfs usr directory containing FFmpeg headers and libraries")
+find_path(TDL_APP_FFMPEG_INCLUDE_DIR
+  NAMES libavformat/avformat.h
+  PATHS "${TDL_APP_AUDIO_FFMPEG_ROOT}/include"
+  NO_DEFAULT_PATH)
+find_file(TDL_APP_AVFORMAT_LIBRARY
+  NAMES libavformat.so.59 libavformat.so.59.16.100
+  PATHS "${TDL_APP_AUDIO_FFMPEG_ROOT}/lib" NO_DEFAULT_PATH)
+find_file(TDL_APP_AVCODEC_LIBRARY
+  NAMES libavcodec.so.59 libavcodec.so.59.18.100
+  PATHS "${TDL_APP_AUDIO_FFMPEG_ROOT}/lib" NO_DEFAULT_PATH)
+find_file(TDL_APP_AVUTIL_LIBRARY
+  NAMES libavutil.so.57 libavutil.so.57.17.100
+  PATHS "${TDL_APP_AUDIO_FFMPEG_ROOT}/lib" NO_DEFAULT_PATH)
+find_file(TDL_APP_SWRESAMPLE_LIBRARY
+  NAMES libswresample.so.4 libswresample.so.4.3.100
+  PATHS "${TDL_APP_AUDIO_FFMPEG_ROOT}/lib" NO_DEFAULT_PATH)
+if(NOT TDL_APP_FFMPEG_INCLUDE_DIR OR NOT TDL_APP_AVFORMAT_LIBRARY OR
+   NOT TDL_APP_AVCODEC_LIBRARY OR NOT TDL_APP_AVUTIL_LIBRARY OR
+   NOT TDL_APP_SWRESAMPLE_LIBRARY)
+  message(FATAL_ERROR
+    "FFmpeg audio decode/resample dependencies were not found under ${TDL_APP_AUDIO_FFMPEG_ROOT}")
+endif()
+set_property(SOURCE src/media/private/audio_file_decoder.cpp APPEND PROPERTY
+  COMPILE_OPTIONS "-isystem${TDL_APP_FFMPEG_INCLUDE_DIR}")
+
 target_include_directories(tdl_app_sdk
   PUBLIC
     "${CMAKE_CURRENT_LIST_DIR}/include"
@@ -112,7 +141,15 @@ target_link_libraries(tdl_app_sdk
   PUBLIC
     ${TDL_CV184X_LIBS}
     tdl_app_ini_compat
+    "${TDL_APP_AVFORMAT_LIBRARY}"
+    "${TDL_APP_AVCODEC_LIBRARY}"
+    "${TDL_APP_SWRESAMPLE_LIBRARY}"
+    "${TDL_APP_AVUTIL_LIBRARY}"
 )
+
+target_link_options(tdl_app_sdk PUBLIC
+  "-Wl,-rpath-link,${TDL_APP_AUDIO_FFMPEG_ROOT}/lib"
+  "-Wl,-rpath-link,${TDL_APP_AUDIO_FFMPEG_ROOT}/../lib")
 
 if(TDL_APP_BUILD_MMF_MINIMAL)
   add_subdirectory(jyd_tdl_mmf_minimal)
