@@ -682,20 +682,29 @@ bool Audio::loopback(double seconds, const AudioSessionConfig &config,
   const std::uint64_t target_samples = targetSampleCount(seconds, local.io);
   std::uint64_t looped_samples = 0;
   while (looped_samples < target_samples) {
-    AudioFrame frame;
-    if (!state.input->readFrame(&frame, local.io.timeout_ms, error)) {
+    AudioFrame input_frame;
+    if (!state.input->readFrame(&input_frame, local.io.timeout_ms, error)) {
       state.close();
       return false;
     }
-    frame.sequence = state.output_sequence++;
-    if (!state.output->writeFrame(frame, local.io.timeout_ms, error)) {
+    AudioPcmChunk chunk;
+    if (!audioFrameToChunk(input_frame, 0, &chunk, error)) {
       state.close();
       return false;
     }
-    if (!frame.channels.empty()) {
-      looped_samples += frame.channels.front().size() /
-                        bytesPerSample(static_cast<int>(frame.bit_width));
+    chunk.sample_rate = local.io.sample_rate;
+    chunk.channels = local.io.channels;
+    chunk.bit_depth = local.io.bit_depth;
+    chunk.sequence = state.output_sequence++;
+    AudioFrame output_frame;
+    if (!chunkToAudioFrame(chunk, local.io, &output_frame, error) ||
+        !state.output->writeFrame(output_frame, local.io.timeout_ms, error)) {
+      state.close();
+      return false;
     }
+    looped_samples += chunk.data.size() /
+                      (static_cast<std::size_t>(local.io.channels) *
+                       bytesPerSample(local.io.bit_depth));
   }
   state.close();
   return true;
