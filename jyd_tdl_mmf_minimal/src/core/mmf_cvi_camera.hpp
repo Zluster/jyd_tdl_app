@@ -42,7 +42,7 @@ class Camera {
 
 class Display {
  public:
-  enum class Input { None, Live, Ai, Main, SubRgb };
+  enum class Input { None, Live, Ai, Main, SubRgb, Screen };
   struct Config {
     int device = DualOsLayout::kVoDevice;
     int layer = 0;

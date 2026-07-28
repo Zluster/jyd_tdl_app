@@ -29,6 +29,7 @@ mmf_cvi::Display::Input to_display_input(mmf_camera_source_t source) {
       return mmf_cvi::Display::Input::SubRgb;
     case MMF_CAMERA_SRC_LIVE:
     case MMF_CAMERA_SRC_SCREEN:
+      return mmf_cvi::Display::Input::Screen;
     default:
       return mmf_cvi::Display::Input::Live;
   }
@@ -110,7 +111,6 @@ static mmf_result_t show_image_via_osd(mmf_display_t* display, const char* path,
     display->osd.reset();
   }
   if (!display->osd) {
-    purge_osd_region(handle);
     display->osd.reset(new mmf_cvi::OsdRegion(mmf_cvi::OsdRegion::canvas(
         static_cast<int>(handle), width, height, mmf_cvi::PixelFormat::ARGB8888, 2, 0)));
     std::string error;

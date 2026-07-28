@@ -270,6 +270,8 @@ CameraSourceId Display::toCameraSource(Input input) {
     return CameraSourceId::Main;
   if (input == Input::SubRgb)
     return CameraSourceId::SubRgb;
+  if (input == Input::Screen)
+    return CameraSourceId::Screen;
   return CameraSourceId::Live;
 }
 bool Display::show(Input input, std::string* error) {
