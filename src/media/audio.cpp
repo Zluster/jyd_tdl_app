@@ -230,20 +230,13 @@ bool chunkToAudioFrame(const AudioPcmChunk &chunk, const AudioIoConfig &config,
   frame->timestamp = chunk.timestamp;
   frame->sequence = chunk.sequence;
   frame->bytes_per_channel = static_cast<std::uint32_t>(chunk.data.size() / static_cast<std::size_t>(channels));
-  frame->channels.assign(channels, std::vector<std::uint8_t>(frame->bytes_per_channel, 0));
+  frame->channels.clear();
   if (channels == 1) {
-    frame->channels[0] = chunk.data;
+    frame->channels.push_back(chunk.data);
     return true;
   }
-  const std::size_t sample_count = frame->bytes_per_channel / sample_bytes;
-  for (std::size_t sample = 0; sample < sample_count; ++sample) {
-    for (int ch = 0; ch < channels; ++ch) {
-      const std::size_t src_offset = (sample * static_cast<std::size_t>(channels) + ch) * sample_bytes;
-      const std::size_t dst_offset = sample * sample_bytes;
-      std::copy_n(chunk.data.data() + src_offset, sample_bytes,
-                  frame->channels[ch].data() + dst_offset);
-    }
-  }
+  // CVI_AO_SendFrame expects interleaved stereo in u64VirAddr[0].
+  frame->channels.push_back(chunk.data);
   return true;
 }
 
@@ -733,6 +726,11 @@ bool Audio::playWav(const std::string &path, const AudioIoConfig &config,
   wav_config.points_per_frame = config.points_per_frame > 0
       ? config.points_per_frame
       : std::max(80, wav_config.sample_rate / 100);
+  const int source_channels = wav_config.channels;
+  const bool duplicate_mono = source_channels == 1;
+  if (duplicate_mono) {
+    wav_config.channels = 2;
+  }
   std::string build_error;
   AudioOutput output(toOutputConfig(wav_config, &build_error));
   if (!build_error.empty()) {
@@ -742,25 +740,45 @@ bool Audio::playWav(const std::string &path, const AudioIoConfig &config,
   if (!output.open(error)) {
     return false;
   }
-  const std::size_t frame_bytes = static_cast<std::size_t>(wav_config.points_per_frame) *
-                                  wav_config.channels * bytesPerSample(wav_config.bit_depth);
-  std::vector<std::uint8_t> buffer(frame_bytes, 0);
+  const std::size_t sample_bytes = bytesPerSample(wav_config.bit_depth);
+  const std::size_t source_frame_bytes =
+      static_cast<std::size_t>(wav_config.points_per_frame) *
+      source_channels * sample_bytes;
+  const std::size_t output_frame_bytes =
+      static_cast<std::size_t>(wav_config.points_per_frame) *
+      wav_config.channels * sample_bytes;
+  std::vector<std::uint8_t> input_buffer(source_frame_bytes, 0);
+  std::vector<std::uint8_t> output_buffer(output_frame_bytes, 0);
   std::uint32_t sequence = 0;
   std::uint32_t remaining = data_size;
   while (remaining > 0) {
-    const std::size_t want = std::min<std::size_t>(buffer.size(), remaining);
-    std::fill(buffer.begin(), buffer.end(), 0);
-    in.read(reinterpret_cast<char *>(buffer.data()), static_cast<std::streamsize>(want));
+    const std::size_t want = std::min<std::size_t>(input_buffer.size(), remaining);
+    std::fill(input_buffer.begin(), input_buffer.end(), 0);
+    in.read(reinterpret_cast<char *>(input_buffer.data()), static_cast<std::streamsize>(want));
     const std::streamsize got = in.gcount();
     if (got <= 0) {
       break;
+    }
+    std::fill(output_buffer.begin(), output_buffer.end(), 0);
+    if (duplicate_mono) {
+      const std::size_t samples = static_cast<std::size_t>(got) / sample_bytes;
+      for (std::size_t i = 0; i < samples; ++i) {
+        const std::uint8_t *sample = input_buffer.data() + i * sample_bytes;
+        std::copy_n(sample, sample_bytes,
+                    output_buffer.data() + (i * 2) * sample_bytes);
+        std::copy_n(sample, sample_bytes,
+                    output_buffer.data() + (i * 2 + 1) * sample_bytes);
+      }
+    } else {
+      std::copy_n(input_buffer.data(), static_cast<std::size_t>(got),
+                  output_buffer.data());
     }
     AudioPcmChunk chunk;
     chunk.sample_rate = wav_config.sample_rate;
     chunk.channels = wav_config.channels;
     chunk.bit_depth = wav_config.bit_depth;
     chunk.sequence = sequence++;
-    chunk.data.assign(buffer.begin(), buffer.end());
+    chunk.data.assign(output_buffer.begin(), output_buffer.end());
     AudioFrame frame;
     if (!chunkToAudioFrame(chunk, wav_config, &frame, error)) {
       return false;
@@ -1116,4 +1134,3 @@ bool Audio::writeDecodedChunk(const AudioEncodedStream &chunk,
 }
 
 }  // namespace tdl_app
-
