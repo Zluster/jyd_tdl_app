@@ -49,6 +49,11 @@ void unbindStale(const tdl_app::MediaChannel &src,
   CVI_SYS_UnBind(&s, &d);
 }
 
+bool sameChannel(const MMF_CHN_S &lhs, const MMF_CHN_S &rhs) {
+  return lhs.enModId == rhs.enModId && lhs.s32DevId == rhs.s32DevId &&
+         lhs.s32ChnId == rhs.s32ChnId;
+}
+
 // 清掉上次异常退出残留的同号 RGN：先从 grp1/ch0 解绑再销毁。
 void purgeStaleRegion(int handle) {
   MMF_CHN_S chn = toMmfChn(displayOutputChannel());
@@ -88,21 +93,32 @@ bool ScreenDisplay::open(const Config &config, std::string *error) {
     return false;
   }
 
-  // 3) 绑定 grp0(live) -> grp1/ch0 -> VO（绑定前先清残留绑定）。
+  // 3) 复用小核的 grp0(live) -> grp1/ch0，只创建缺失的绑定。
   const tdl_app::MediaChannel preview_src = camera_demo_support::previewChannel(
       camera_options_, runtime_.camera.config());
   const tdl_app::MediaChannel display_dst =
       tdl_app::MediaChannel::vo(config.layer, config.vo_chn);
 
-  unbindStale(preview_src, displayOutputChannel());
-  unbindStale(displayOutputChannel(), display_dst);
-
-  preview_link_.reset(
-      new tdl_app::MediaLink({preview_src, displayOutputChannel()}));
-  if (!preview_link_->bind(error)) {
-    close();
-    return false;
+  const MMF_CHN_S expected_preview_src = toMmfChn(preview_src);
+  const MMF_CHN_S preview_dst = toMmfChn(displayOutputChannel());
+  MMF_CHN_S current_preview_src;
+  std::memset(&current_preview_src, 0, sizeof(current_preview_src));
+  if (CVI_SYS_GetBindbyDest(&preview_dst, &current_preview_src) == CVI_SUCCESS) {
+    if (!sameChannel(current_preview_src, expected_preview_src)) {
+      if (error) *error = "display VPSS input is bound to an unexpected source";
+      close();
+      return false;
+    }
+  } else {
+    preview_link_.reset(
+        new tdl_app::MediaLink({preview_src, displayOutputChannel()}));
+    if (!preview_link_->bind(error)) {
+      close();
+      return false;
+    }
   }
+
+  unbindStale(displayOutputChannel(), display_dst);
   display_link_.reset(
       new tdl_app::MediaLink({displayOutputChannel(), display_dst}));
   if (!display_link_->bind(error)) {

@@ -40,6 +40,37 @@ mmf_cvi::MediaChannel display_output_channel() {
                                      mmf_cvi::DualOsLayout::kDisplayChannel);
 }
 
+bool same_channel(const MMF_CHN_S& lhs, const MMF_CHN_S& rhs) {
+  return lhs.enModId == rhs.enModId && lhs.s32DevId == rhs.s32DevId &&
+         lhs.s32ChnId == rhs.s32ChnId;
+}
+
+mmf_result_t ensure_live_display_input() {
+  const MMF_CHN_S expected_source = mmf_cvi::toMmfChannel(
+      mmf_cvi::MediaChannel::vpss(mmf_cvi::DualOsLayout::kCaptureVpssGroup,
+                                  mmf_cvi::DualOsLayout::kLiveChannel));
+  const MMF_CHN_S destination =
+      mmf_cvi::toMmfChannel(display_output_channel());
+  MMF_CHN_S current_source;
+  std::memset(&current_source, 0, sizeof(current_source));
+
+  if (CVI_SYS_GetBindbyDest(&destination, &current_source) == CVI_SUCCESS) {
+    if (same_channel(current_source, expected_source)) {
+      return MMF_OK;
+    }
+    set_last_error("display VPSS input is bound to an unexpected source");
+    return MMF_EBUSY;
+  }
+
+  const int ret = CVI_SYS_Bind(&expected_source, &destination);
+  if (ret != CVI_SUCCESS) {
+    set_last_error("CVI_SYS_Bind live display input failed, ret=" +
+                   std::to_string(ret));
+    return MMF_EIO;
+  }
+  return MMF_OK;
+}
+
 void purge_osd_region(uint32_t handle) {
   if (handle == 0) {
     return;
@@ -297,6 +328,11 @@ mmf_result_t mmf_display_set_window(mmf_display_t* display, const mmf_rect_t* wi
 mmf_result_t mmf_display_bind_camera(mmf_display_t* display, mmf_camera_source_t source) {
   if (display == nullptr)
     return MMF_EINVAL;
+  if (source == MMF_CAMERA_SRC_LIVE || source == MMF_CAMERA_SRC_SCREEN) {
+    const mmf_result_t ret = ensure_live_display_input();
+    if (ret != MMF_OK)
+      return ret;
+  }
   std::string error;
   bool ok = display->display.show(to_display_input(source), &error);
   if (!ok)
