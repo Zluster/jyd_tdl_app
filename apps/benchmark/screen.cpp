@@ -110,9 +110,12 @@ bool ScreenDisplay::open(const Config &config, std::string *error) {
       return false;
     }
   } else {
-    preview_link_.reset(
-        new tdl_app::MediaLink({preview_src, displayOutputChannel()}));
-    if (!preview_link_->bind(error)) {
+    const int ret = CVI_SYS_Bind(&expected_preview_src, &preview_dst);
+    if (ret != CVI_SUCCESS) {
+      if (error) {
+        *error = "CVI_SYS_Bind display VPSS input failed, ret=" +
+                 std::to_string(ret);
+      }
       close();
       return false;
     }
