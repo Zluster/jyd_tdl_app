@@ -42,11 +42,21 @@ bool VoOutput::open(std::string *error) {
     return true;
   }
 
+  if (config_.preserve_hardware_on_close) {
+    if (!CVI_VO_IsEnabled(config_.device)) {
+      setError(error, "VO device is not enabled for U-Boot handoff");
+      return false;
+    }
+    device_enabled_ = true;
+    layer_enabled_ = true;
+    channel_enabled_ = true;
+    return true;
+  }
+
   VO_PUB_ATTR_S pub_attr;
   std::memset(&pub_attr, 0, sizeof(pub_attr));
   pub_attr.enIntfType = static_cast<VO_INTF_TYPE_E>(config_.interface_type);
   pub_attr.enIntfSync = static_cast<VO_INTF_SYNC_E>(config_.interface_sync);
-
   int ret = CVI_VO_SetPubAttr(config_.device, &pub_attr);
   if (ret != CVI_SUCCESS) {
     setError(error, "CVI_VO_SetPubAttr failed, ret=" + std::to_string(ret));
@@ -125,6 +135,10 @@ bool VoOutput::open(std::string *error) {
 }
 
 void VoOutput::close() {
+  if (config_.preserve_hardware_on_close && channel_enabled_ &&
+      layer_enabled_ && device_enabled_) {
+    return;
+  }
   if (channel_enabled_) {
     CVI_VO_DisableChn(config_.layer, config_.channel);
     channel_enabled_ = false;

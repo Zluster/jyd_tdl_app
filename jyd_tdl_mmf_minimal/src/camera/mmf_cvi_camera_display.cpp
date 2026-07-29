@@ -173,6 +173,7 @@ ROTATION_E toRotation(int rotation) {
       return ROTATION_0;
   }
 }
+
 }  // namespace
 
 bool Display::open(std::string* error) {
@@ -181,11 +182,24 @@ bool Display::open(std::string* error) {
   if (!ensureMmfRuntimeInitialized(error))
     return false;
 
+  // The panel, DSI PHY and VO device are initialized by U-Boot. In handoff
+  // mode, never fall back to reprogramming their timing.
+  if (config_.preserve_hardware_on_close) {
+    if (!CVI_VO_IsEnabled(static_cast<VO_DEV>(config_.device))) {
+      if (error)
+        *error = "VO device is not enabled for U-Boot handoff";
+      return false;
+    }
+    device_enabled_ = true;
+    layer_enabled_ = true;
+    channel_enabled_ = true;
+    return true;
+  }
+
   VO_PUB_ATTR_S pub_attr;
   std::memset(&pub_attr, 0, sizeof(pub_attr));
   pub_attr.enIntfType = static_cast<VO_INTF_TYPE_E>(config_.interface_type);
   pub_attr.enIntfSync = static_cast<VO_INTF_SYNC_E>(config_.interface_sync);
-
   int ret = CVI_VO_SetPubAttr(static_cast<VO_DEV>(config_.device), &pub_attr);
   if (ret != CVI_SUCCESS) {
     setError(error, "CVI_VO_SetPubAttr failed, ret=" + std::to_string(ret));
@@ -311,6 +325,9 @@ bool Display::snapshot(const std::string& path, int timeout_ms, std::string* err
 }
 void Display::close() {
   hideLive(nullptr);
+  if (config_.preserve_hardware_on_close) {
+    return;
+  }
   if (channel_enabled_) {
     CVI_VO_DisableChn(static_cast<VO_LAYER>(config_.layer),
                       static_cast<VO_CHN>(config_.channel));

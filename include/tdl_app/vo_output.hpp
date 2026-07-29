@@ -24,6 +24,7 @@ class VoOutput {
     int channel_y = 0;
     int priority = 0;
     int rotation = DualOsLayout::kVoRotation;
+    bool preserve_hardware_on_close = false;
   };
 
   static Config display(int device = 0, int layer = 0, int channel = 0,

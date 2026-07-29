@@ -58,6 +58,7 @@ class Display {
     int channel_y = 0;
     int priority = 0;
     int rotation = DualOsLayout::kVoRotation;
+    bool preserve_hardware_on_close = true;
   };
   Display();
   explicit Display(const Config& config);

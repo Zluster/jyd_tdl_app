@@ -14,6 +14,7 @@ struct mmf_display {
   std::string overlay_path;
   mmf_rect_t overlay_rect{};
   bool overlay_active = false;
+  bool live_input_bound = false;
   mmf_display_status_t status{};
 };
 
@@ -40,35 +41,32 @@ mmf_cvi::MediaChannel display_output_channel() {
                                      mmf_cvi::DualOsLayout::kDisplayChannel);
 }
 
-bool same_channel(const MMF_CHN_S& lhs, const MMF_CHN_S& rhs) {
-  return lhs.enModId == rhs.enModId && lhs.s32DevId == rhs.s32DevId &&
-         lhs.s32ChnId == rhs.s32ChnId;
-}
-
-mmf_result_t ensure_live_display_input() {
-  const MMF_CHN_S expected_source = mmf_cvi::toMmfChannel(
+mmf_result_t bind_live_display_input(mmf_display_t* display) {
+  if (display->live_input_bound)
+    return MMF_OK;
+  const MMF_CHN_S source = mmf_cvi::toMmfChannel(
       mmf_cvi::MediaChannel::vpss(mmf_cvi::DualOsLayout::kCaptureVpssGroup,
                                   mmf_cvi::DualOsLayout::kLiveChannel));
-  const MMF_CHN_S destination =
-      mmf_cvi::toMmfChannel(display_output_channel());
-  MMF_CHN_S current_source;
-  std::memset(&current_source, 0, sizeof(current_source));
-
-  if (CVI_SYS_GetBindbyDest(&destination, &current_source) == CVI_SUCCESS) {
-    if (same_channel(current_source, expected_source)) {
-      return MMF_OK;
-    }
-    set_last_error("display VPSS input is bound to an unexpected source");
-    return MMF_EBUSY;
-  }
-
-  const int ret = CVI_SYS_Bind(&expected_source, &destination);
+  const MMF_CHN_S destination = mmf_cvi::toMmfChannel(display_output_channel());
+  const int ret = CVI_SYS_Bind(&source, &destination);
   if (ret != CVI_SUCCESS) {
-    set_last_error("CVI_SYS_Bind live display input failed, ret=" +
+    set_last_error("CVI_SYS_Bind live->display VPSS failed, ret=" +
                    std::to_string(ret));
     return MMF_EIO;
   }
+  display->live_input_bound = true;
   return MMF_OK;
+}
+
+void unbind_live_display_input(mmf_display_t* display) {
+  if (!display->live_input_bound)
+    return;
+  const MMF_CHN_S source = mmf_cvi::toMmfChannel(
+      mmf_cvi::MediaChannel::vpss(mmf_cvi::DualOsLayout::kCaptureVpssGroup,
+                                  mmf_cvi::DualOsLayout::kLiveChannel));
+  const MMF_CHN_S destination = mmf_cvi::toMmfChannel(display_output_channel());
+  (void)CVI_SYS_UnBind(&source, &destination);
+  display->live_input_bound = false;
 }
 
 void purge_osd_region(uint32_t handle) {
@@ -282,6 +280,7 @@ void mmf_display_close(mmf_display_t* display) {
     display->osd.reset();
   }
   display->display.close();
+  unbind_live_display_input(display);
   delete display;
 }
 
@@ -328,15 +327,22 @@ mmf_result_t mmf_display_set_window(mmf_display_t* display, const mmf_rect_t* wi
 mmf_result_t mmf_display_bind_camera(mmf_display_t* display, mmf_camera_source_t source) {
   if (display == nullptr)
     return MMF_EINVAL;
-  if (source == MMF_CAMERA_SRC_LIVE || source == MMF_CAMERA_SRC_SCREEN) {
-    const mmf_result_t ret = ensure_live_display_input();
+  const bool use_live_input =
+      source == MMF_CAMERA_SRC_LIVE || source == MMF_CAMERA_SRC_SCREEN;
+  if (use_live_input) {
+    const mmf_result_t ret = bind_live_display_input(display);
     if (ret != MMF_OK)
       return ret;
+  } else {
+    unbind_live_display_input(display);
   }
   std::string error;
   bool ok = display->display.show(to_display_input(source), &error);
-  if (!ok)
+  if (!ok) {
+    if (use_live_input)
+      unbind_live_display_input(display);
     return ok_or_error(false, error);
+  }
   display->status.showing = MMF_TRUE;
   display->status.mode = MMF_DISPLAY_MODE_CAMERA_BIND;
   display->status.bound_camera_source = source;
@@ -350,6 +356,7 @@ mmf_result_t mmf_display_unbind(mmf_display_t* display) {
   bool ok = display->display.hideLive(&error);
   if (!ok)
     return ok_or_error(false, error);
+  unbind_live_display_input(display);
   display->status.showing = MMF_FALSE;
   display->status.mode = MMF_DISPLAY_MODE_NONE;
   return MMF_OK;
@@ -374,6 +381,7 @@ mmf_result_t mmf_display_show_frame(mmf_display_t* display, const mmf_video_fram
   if (!display->display.hideLive(&error)) {
     return ok_or_error(false, error);
   }
+  unbind_live_display_input(display);
 
   auto* native = static_cast<VIDEO_FRAME_INFO_S*>(frame->priv);
   const int ret = CVI_VO_SendFrame(static_cast<VO_LAYER>(display->config.layer),
@@ -435,6 +443,7 @@ mmf_result_t mmf_display_clear(mmf_display_t* display) {
   std::string error;
   if (!display->display.hideLive(&error))
     return ok_or_error(false, error);
+  unbind_live_display_input(display);
   if (display->osd) {
     (void)display->osd->setVisible(false, &error);
     display->osd->detach();

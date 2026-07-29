@@ -247,6 +247,7 @@ tdl_app::VoOutput::Config makeVoConfig(const Options &opt) {
   config.pixel_format = tdl_app::PixelFormat::NV12;
   config.interface_type = opt.interface_type;
   config.interface_sync = opt.interface_sync;
+  config.preserve_hardware_on_close = true;
   return config;
 }
 
