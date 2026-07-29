@@ -42,30 +42,45 @@ bool VoOutput::open(std::string *error) {
     return true;
   }
 
+  int ret;
   if (config_.preserve_hardware_on_close) {
+    // U-Boot owns panel/DSI startup. AliOS has no VO context after boot,
+    // however, so register the configured full-screen output once before
+    // enabling it. Without this, its inherited logo window remains 320x240
+    // and rejects the 720x480 video layer rectangle.
     if (!CVI_VO_IsEnabled(config_.device)) {
-      setError(error, "VO device is not enabled for U-Boot handoff");
+      VO_PUB_ATTR_S pub_attr;
+      std::memset(&pub_attr, 0, sizeof(pub_attr));
+      pub_attr.enIntfType = static_cast<VO_INTF_TYPE_E>(config_.interface_type);
+      pub_attr.enIntfSync = static_cast<VO_INTF_SYNC_E>(config_.interface_sync);
+      ret = CVI_VO_SetPubAttr(config_.device, &pub_attr);
+      if (ret != CVI_SUCCESS) {
+        setError(error, "CVI_VO_SetPubAttr for U-Boot handoff failed, ret=" +
+                            std::to_string(ret));
+        return false;
+      }
+      ret = CVI_VO_Enable(config_.device);
+      if (ret != CVI_SUCCESS) {
+        setError(error, "CVI_VO_Enable for U-Boot handoff failed, ret=" +
+                            std::to_string(ret));
+        return false;
+      }
+    }
+  } else {
+    VO_PUB_ATTR_S pub_attr;
+    std::memset(&pub_attr, 0, sizeof(pub_attr));
+    pub_attr.enIntfType = static_cast<VO_INTF_TYPE_E>(config_.interface_type);
+    pub_attr.enIntfSync = static_cast<VO_INTF_SYNC_E>(config_.interface_sync);
+    ret = CVI_VO_SetPubAttr(config_.device, &pub_attr);
+    if (ret != CVI_SUCCESS) {
+      setError(error, "CVI_VO_SetPubAttr failed, ret=" + std::to_string(ret));
       return false;
     }
-    device_enabled_ = true;
-    layer_enabled_ = true;
-    channel_enabled_ = true;
-    return true;
-  }
-
-  VO_PUB_ATTR_S pub_attr;
-  std::memset(&pub_attr, 0, sizeof(pub_attr));
-  pub_attr.enIntfType = static_cast<VO_INTF_TYPE_E>(config_.interface_type);
-  pub_attr.enIntfSync = static_cast<VO_INTF_SYNC_E>(config_.interface_sync);
-  int ret = CVI_VO_SetPubAttr(config_.device, &pub_attr);
-  if (ret != CVI_SUCCESS) {
-    setError(error, "CVI_VO_SetPubAttr failed, ret=" + std::to_string(ret));
-    return false;
-  }
-  ret = CVI_VO_Enable(config_.device);
-  if (ret != CVI_SUCCESS) {
-    setError(error, "CVI_VO_Enable failed, ret=" + std::to_string(ret));
-    return false;
+    ret = CVI_VO_Enable(config_.device);
+    if (ret != CVI_SUCCESS) {
+      setError(error, "CVI_VO_Enable failed, ret=" + std::to_string(ret));
+      return false;
+    }
   }
   device_enabled_ = true;
 
