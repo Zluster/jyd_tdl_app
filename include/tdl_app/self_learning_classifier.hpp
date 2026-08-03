@@ -25,6 +25,12 @@ struct SelfLearningClassificationResult {
   bool empty() const { return classes.empty(); }
 };
 
+struct SelfLearningClassificationProfile {
+  double feature_ms = 0.0;
+  double match_ms = 0.0;
+  double total_ms = 0.0;
+};
+
 class SelfLearningClassifier {
  public:
   using Config = FeatureExtractor::Config;
@@ -49,6 +55,10 @@ class SelfLearningClassifier {
   bool classify(const std::string &image_path, int top_k,
                 SelfLearningClassificationResult *result,
                 std::string *error = nullptr);
+  bool classifyFrame(const Frame &frame, int top_k,
+                     SelfLearningClassificationResult *result,
+                     SelfLearningClassificationProfile *profile = nullptr,
+                     std::string *error = nullptr);
 
   bool saveBank(const std::string &path, std::string *error = nullptr) const;
   bool loadBank(const std::string &path, std::string *error = nullptr);
@@ -65,6 +75,10 @@ class SelfLearningClassifier {
     std::string label;
     std::vector<float> feature;
   };
+
+  bool classifyFeature(std::vector<float> feature, int top_k,
+                       SelfLearningClassificationResult *result,
+                       std::string *error) const;
 
   Config config_;
   FeatureExtractor extractor_;

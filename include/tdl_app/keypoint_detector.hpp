@@ -6,6 +6,10 @@
 #include "tdl_app/frame_source.hpp"
 #include "tdl_app/vision_task_types.hpp"
 
+namespace cv {
+class Mat;
+}
+
 namespace tdl_app {
 
 class KeypointDetector {
@@ -35,8 +39,13 @@ class KeypointDetector {
 
   bool run(const std::string &image_path, KeypointResult *result,
            std::string *error = nullptr);
+  bool runMat(const cv::Mat &image, KeypointResult *result,
+              std::string *error = nullptr);
   bool runFrame(const Frame &frame, KeypointResult *result,
                 std::string *error = nullptr);
+  // Results are relative to the supplied source-frame crop.
+  bool runFrameCrop(const Frame &frame, int x, int y, int width, int height,
+                    KeypointResult *result, std::string *error = nullptr);
   bool estimate(const std::string &image_path, KeypointResult *result,
                 std::string *error = nullptr);
 

@@ -4,6 +4,7 @@
 #include <cstring>
 #include <fstream>
 #include <iostream>
+#include <sstream>
 #include <string>
 
 #include <opencv2/imgcodecs.hpp>
@@ -15,17 +16,18 @@
 namespace camera_demo_support {
 namespace {
 
-void dumpProcFile(const std::string &title, const std::string &path) {
-  std::ifstream input(path);
-  std::cerr << title << " (" << path << ")\n";
-  if (!input) {
-    std::cerr << "  unavailable\n";
-    return;
+int captureGroupForDevice(int device) {
+  return device == 1 ? tdl_app::DualOsLayout::kRearVpssGroup
+                     : tdl_app::DualOsLayout::kCaptureVpssGroup;
+}
+
+std::string toLower(std::string value) {
+  for (char &ch : value) {
+    if (ch >= 'A' && ch <= 'Z') {
+      ch = static_cast<char>(ch - 'A' + 'a');
+    }
   }
-  std::string line;
-  while (std::getline(input, line)) {
-    std::cerr << line << "\n";
-  }
+  return value;
 }
 
 const char *valueForArg(int argc, char **argv, int *index, const char *name,
@@ -45,6 +47,119 @@ const char *backendName(tdl_app::Camera::Backend backend) {
   return backend == tdl_app::Camera::Backend::Vi ? "VI" : "VPSS";
 }
 
+bool setCameraPreset(CommonOptions *opt, const std::string &preset,
+                     std::string *error) {
+  if (!opt) {
+    if (error) {
+      *error = "setCameraPreset received null options";
+    }
+    return false;
+  }
+
+  const std::string lower = toLower(preset);
+  opt->backend = "vpss";
+
+  if (lower == "ai") {
+    opt->group = captureGroupForDevice(opt->device);
+    opt->channel = tdl_app::DualOsLayout::kAiChannel;
+    opt->width = tdl_app::DualOsLayout::kAiWidth;
+    opt->height = tdl_app::DualOsLayout::kAiHeight;
+    opt->pixel_format = tdl_app::DualOsLayout::kAiPixelFormat;
+    return true;
+  }
+  if (lower == "live") {
+    opt->group = captureGroupForDevice(opt->device);
+    opt->channel = tdl_app::DualOsLayout::kLiveChannel;
+    opt->width = tdl_app::DualOsLayout::kLiveWidth;
+    opt->height = tdl_app::DualOsLayout::kLiveHeight;
+    opt->pixel_format = tdl_app::DualOsLayout::kLivePixelFormat;
+    return true;
+  }
+  if (lower == "main") {
+    opt->group = captureGroupForDevice(opt->device);
+    opt->channel = tdl_app::DualOsLayout::kMainChannel;
+    opt->width = tdl_app::DualOsLayout::kMainWidth;
+    opt->height = tdl_app::DualOsLayout::kMainHeight;
+    opt->pixel_format = tdl_app::DualOsLayout::kMainPixelFormat;
+    return true;
+  }
+  if (lower == "subrgb") {
+    opt->group = captureGroupForDevice(opt->device);
+    opt->channel = tdl_app::DualOsLayout::kSubRgbChannel;
+    opt->width = tdl_app::DualOsLayout::kSubRgbWidth;
+    opt->height = tdl_app::DualOsLayout::kSubRgbHeight;
+    opt->pixel_format = tdl_app::DualOsLayout::kSubRgbPixelFormat;
+    return true;
+  }
+  if (lower == "screen") {
+    opt->group = tdl_app::DualOsLayout::kDisplayVpssGroup;
+    opt->channel = tdl_app::DualOsLayout::kDisplayChannel;
+    opt->width = tdl_app::DualOsLayout::kDisplaySourceWidth;
+    opt->height = tdl_app::DualOsLayout::kDisplaySourceHeight;
+    opt->pixel_format = tdl_app::DualOsLayout::kDisplayPixelFormat;
+    return true;
+  }
+  if (lower == "rgb") {
+    opt->group = captureGroupForDevice(opt->device);
+    opt->channel = tdl_app::DualOsLayout::kRgbChannel;
+    opt->width = tdl_app::DualOsLayout::kRgbWidth;
+    opt->height = tdl_app::DualOsLayout::kRgbHeight;
+    opt->pixel_format = tdl_app::DualOsLayout::kRgbPixelFormat;
+    return true;
+  }
+
+  if (error) {
+    *error = "unknown camera preset: " + preset +
+             " (expected ai|live|main|subrgb|screen|rgb)";
+  }
+  return false;
+}
+
+std::string describeCameraPreset(const CommonOptions &opt) {
+  if (opt.backend == "vpss" && opt.group == captureGroupForDevice(opt.device)) {
+    if (opt.channel == tdl_app::DualOsLayout::kAiChannel &&
+        opt.width == tdl_app::DualOsLayout::kAiWidth &&
+        opt.height == tdl_app::DualOsLayout::kAiHeight) {
+      return "ai";
+    }
+    if (opt.channel == tdl_app::DualOsLayout::kLiveChannel &&
+        opt.width == tdl_app::DualOsLayout::kLiveWidth &&
+        opt.height == tdl_app::DualOsLayout::kLiveHeight) {
+      return "live";
+    }
+    if (opt.channel == tdl_app::DualOsLayout::kMainChannel &&
+        opt.width == tdl_app::DualOsLayout::kMainWidth &&
+        opt.height == tdl_app::DualOsLayout::kMainHeight) {
+      return "main";
+    }
+    if (opt.channel == tdl_app::DualOsLayout::kSubRgbChannel &&
+        opt.width == tdl_app::DualOsLayout::kSubRgbWidth &&
+        opt.height == tdl_app::DualOsLayout::kSubRgbHeight) {
+      return "subrgb";
+    }
+  }
+  if (opt.backend == "vpss" &&
+      opt.group == tdl_app::DualOsLayout::kDisplayVpssGroup &&
+      opt.channel == tdl_app::DualOsLayout::kDisplayChannel &&
+      opt.width == tdl_app::DualOsLayout::kDisplaySourceWidth &&
+      opt.height == tdl_app::DualOsLayout::kDisplaySourceHeight) {
+    return "screen";
+  }
+  if (opt.backend == "vpss" && opt.group == captureGroupForDevice(opt.device) &&
+      opt.channel == tdl_app::DualOsLayout::kRgbChannel &&
+      opt.width == tdl_app::DualOsLayout::kRgbWidth &&
+      opt.height == tdl_app::DualOsLayout::kRgbHeight) {
+    return "rgb";
+  }
+
+  std::ostringstream oss;
+  oss << opt.backend << " grp=" << opt.group
+      << " ch=" << opt.channel
+      << " " << opt.width << "x" << opt.height
+      << " fmt=" << opt.pixel_format;
+  return oss.str();
+}
+
 bool parseCommonArgs(int argc, char **argv, int *index, CommonOptions *opt,
                      bool *handled, std::string *error) {
   if (!index || !opt || !handled) {
@@ -57,31 +172,19 @@ bool parseCommonArgs(int argc, char **argv, int *index, CommonOptions *opt,
   *handled = true;
   const std::string arg = argv[*index];
 
-  if (arg == "--backend") {
+  // Dual-OS camera reads always attach to the small-core-owned MMF graph.
+  // Keep these flags so benchmark commands can state that intent explicitly.
+  if (arg == "--use-mmf" || arg == "--attach-existing") {
+    return true;
+  } else if (arg == "--use-sensor-media") {
+    if (error) {
+      *error = "--use-sensor-media is not supported by the Dual-OS benchmarks";
+    }
+    return false;
+  } else if (arg == "--backend") {
     const char *v = valueForArg(argc, argv, index, "--backend", error);
     if (!v) return false;
     opt->backend = v;
-  } else if (arg == "--use-mmf") {
-    opt->use_mmf = true;
-  } else if (arg == "--use-sensor-media") {
-    opt->use_sensor_media = true;
-  } else if (arg == "--use-ipcamera-helper") {
-    opt->use_sensor_media = true;
-    opt->use_ipcamera_helper = true;
-  } else if (arg == "--attach-existing") {
-    opt->attach_existing = true;
-  } else if (arg == "--sensor-ini") {
-    const char *v = valueForArg(argc, argv, index, "--sensor-ini", error);
-    if (!v) return false;
-    opt->sensor_ini = v;
-  } else if (arg == "--ipcamera-bin") {
-    const char *v = valueForArg(argc, argv, index, "--ipcamera-bin", error);
-    if (!v) return false;
-    opt->ipcamera_binary = v;
-  } else if (arg == "--ipcamera-ini") {
-    const char *v = valueForArg(argc, argv, index, "--ipcamera-ini", error);
-    if (!v) return false;
-    opt->ipcamera_ini = v;
   } else if (arg == "--frames") {
     const char *v = valueForArg(argc, argv, index, "--frames", error);
     if (!v) return false;
@@ -90,6 +193,12 @@ bool parseCommonArgs(int argc, char **argv, int *index, CommonOptions *opt,
     const char *v = valueForArg(argc, argv, index, "--device", error);
     if (!v) return false;
     opt->device = std::atoi(v);
+    if (opt->device != 0 && opt->device != 1) {
+      if (error) {
+        *error = "--device must be 0 (front) or 1 (rear)";
+      }
+      return false;
+    }
   } else if (arg == "--group") {
     const char *v = valueForArg(argc, argv, index, "--group", error);
     if (!v) return false;
@@ -130,13 +239,47 @@ bool parseCommonArgs(int argc, char **argv, int *index, CommonOptions *opt,
 }
 
 tdl_app::Camera::Config makeCameraConfig(const CommonOptions &opt) {
-  tdl_app::Camera::Config camera_config =
-      opt.backend == "vi"
-          ? tdl_app::Camera::vi(opt.pipe, opt.channel, opt.width, opt.height,
-                                opt.pixel_format, opt.timeout_ms)
-          : tdl_app::Camera::vpss(opt.group, opt.channel, opt.width, opt.height,
-                                  opt.pixel_format, opt.timeout_ms);
+  tdl_app::Camera::Config camera_config;
+  if (opt.backend == "vi") {
+    camera_config = tdl_app::Camera::vi(opt.pipe, opt.channel, opt.width,
+                                        opt.height, opt.pixel_format,
+                                        opt.timeout_ms);
+  } else if (opt.group == tdl_app::DualOsLayout::kCaptureVpssGroup &&
+             opt.channel == tdl_app::DualOsLayout::kAiChannel &&
+             opt.width == tdl_app::DualOsLayout::kAiWidth &&
+             opt.height == tdl_app::DualOsLayout::kAiHeight) {
+    camera_config = tdl_app::Camera::ai(opt.timeout_ms);
+  } else if (opt.group == tdl_app::DualOsLayout::kCaptureVpssGroup &&
+             opt.channel == tdl_app::DualOsLayout::kLiveChannel &&
+             opt.width == tdl_app::DualOsLayout::kLiveWidth &&
+             opt.height == tdl_app::DualOsLayout::kLiveHeight) {
+    camera_config = tdl_app::Camera::live(opt.timeout_ms);
+  } else if (opt.group == tdl_app::DualOsLayout::kCaptureVpssGroup &&
+             opt.channel == tdl_app::DualOsLayout::kMainChannel &&
+             opt.width == tdl_app::DualOsLayout::kMainWidth &&
+             opt.height == tdl_app::DualOsLayout::kMainHeight) {
+    camera_config = tdl_app::Camera::mainFrame(opt.timeout_ms);
+  } else if (opt.group == tdl_app::DualOsLayout::kCaptureVpssGroup &&
+             opt.channel == tdl_app::DualOsLayout::kSubRgbChannel &&
+             opt.width == tdl_app::DualOsLayout::kSubRgbWidth &&
+             opt.height == tdl_app::DualOsLayout::kSubRgbHeight) {
+    camera_config = tdl_app::Camera::subRgb(opt.timeout_ms);
+  } else if (opt.group == tdl_app::DualOsLayout::kDisplayVpssGroup &&
+             opt.channel == tdl_app::DualOsLayout::kDisplayChannel &&
+             opt.width == tdl_app::DualOsLayout::kDisplaySourceWidth &&
+             opt.height == tdl_app::DualOsLayout::kDisplaySourceHeight) {
+    camera_config = tdl_app::Camera::screen(opt.timeout_ms);
+  } else {
+    camera_config =
+        tdl_app::Camera::vpss(opt.group, opt.channel, opt.width, opt.height,
+                              opt.pixel_format, opt.timeout_ms);
+  }
   camera_config.device = opt.device;
+  if (camera_config.backend == tdl_app::Camera::Backend::Vpss &&
+      camera_config.group == tdl_app::DualOsLayout::kCaptureVpssGroup &&
+      opt.device == 1) {
+    camera_config.group = tdl_app::DualOsLayout::kRearVpssGroup;
+  }
   return camera_config;
 }
 
@@ -149,81 +292,6 @@ bool openCameraRuntime(const CommonOptions &opt, CameraRuntime *runtime,
     return false;
   }
 
-  runtime->mmf.reset();
-  runtime->sensor_media.reset();
-
-  if (opt.use_sensor_media) {
-    const bool use_vpss_backend = opt.backend != "vi";
-    tdl_app::SensorMedia::Config sensor_config =
-        opt.use_ipcamera_helper
-            ? tdl_app::SensorMedia::ipcameraHelper(
-                  opt.sensor_ini, opt.ipcamera_binary, opt.ipcamera_ini,
-                  use_vpss_backend, opt.device, opt.pipe, opt.channel,
-                  opt.group, opt.channel, opt.width, opt.height,
-                  opt.pixel_format)
-            : (opt.attach_existing
-                   ? tdl_app::SensorMedia::attachExisting(
-                         opt.sensor_ini, use_vpss_backend, opt.device, opt.pipe,
-                         opt.channel, opt.group, opt.channel, opt.width,
-                         opt.height, opt.pixel_format)
-                   : tdl_app::SensorMedia::fullStackSensor(
-                         opt.sensor_ini, use_vpss_backend, opt.device, opt.pipe,
-                         opt.channel, opt.group, opt.channel, opt.width,
-                         opt.height, opt.pixel_format));
-    if (opt.enable_preview_output &&
-        opt.preview_width > 0 &&
-        opt.preview_height > 0) {
-      sensor_config.vpss_outputs.push_back(tdl_app::SensorMedia::vpssOutput(
-          opt.preview_group, opt.preview_channel, opt.preview_width,
-          opt.preview_height, opt.preview_pixel_format, false));
-    }
-    if (opt.enable_pip_output &&
-        opt.pip_width > 0 &&
-        opt.pip_height > 0) {
-      sensor_config.vpss_outputs.push_back(tdl_app::SensorMedia::vpssOutput(
-          opt.pip_group, opt.pip_channel, opt.pip_width,
-          opt.pip_height, opt.pip_pixel_format, false));
-    }
-    runtime->sensor_media.reset(new tdl_app::SensorMedia(sensor_config));
-    if (!runtime->sensor_media->open(error)) {
-      return false;
-    }
-
-    tdl_app::Camera::Config camera_config = makeCameraConfig(opt);
-    if (!opt.use_ipcamera_helper && !opt.attach_existing &&
-        opt.backend == "vi") {
-      std::cerr
-          << "camera runtime: sensor-media full-stack uses online VPSS; "
-             "reading frames from VPSS grp="
-          << opt.group << " ch=" << opt.channel << "\n";
-      camera_config =
-          tdl_app::Camera::vpss(opt.group, opt.channel, opt.width, opt.height,
-                                opt.pixel_format, opt.timeout_ms);
-      camera_config.device = opt.device;
-    }
-    runtime->camera = tdl_app::Camera(camera_config);
-    return runtime->camera.open(error);
-  } else if (opt.use_mmf) {
-    tdl_app::Mmf::Config mmf_config;
-    mmf_config.pool.width = opt.width;
-    mmf_config.pool.height = opt.height;
-    mmf_config.pool.pixel_format = opt.pixel_format;
-    mmf_config.vpss.enable = true;
-    mmf_config.vpss.group = opt.group;
-    mmf_config.vpss.channel = opt.channel;
-    mmf_config.vpss.input_width = opt.width;
-    mmf_config.vpss.input_height = opt.height;
-    mmf_config.vpss.output_width = opt.width;
-    mmf_config.vpss.output_height = opt.height;
-    mmf_config.vpss.pixel_format = opt.pixel_format;
-    mmf_config.bind =
-        tdl_app::Mmf::viToVpss(opt.pipe, opt.channel, opt.group, opt.channel);
-    runtime->mmf.reset(new tdl_app::Mmf(mmf_config));
-    if (!runtime->mmf->open(error)) {
-      return false;
-    }
-  }
-
   runtime->camera = tdl_app::Camera(makeCameraConfig(opt));
   return runtime->camera.open(error);
 }
@@ -233,19 +301,11 @@ void closeCameraRuntime(CameraRuntime *runtime) {
     return;
   }
   runtime->camera.close();
-  if (runtime->sensor_media) {
-    runtime->sensor_media->close();
-  }
-  if (runtime->mmf) {
-    runtime->mmf->close();
-  }
 }
 
 tdl_app::MediaChannel previewChannel(const CommonOptions &opt,
                                      const tdl_app::Camera::Config &camera_config) {
-  if (opt.enable_preview_output && opt.preview_width > 0 && opt.preview_height > 0) {
-    return tdl_app::MediaChannel::vpss(opt.preview_group, opt.preview_channel);
-  }
+  (void)opt;
   return camera_config.backend == tdl_app::Camera::Backend::Vi
              ? tdl_app::MediaChannel::vi(camera_config.pipe, camera_config.channel)
              : tdl_app::MediaChannel::vpss(camera_config.group, camera_config.channel);
@@ -262,8 +322,14 @@ std::string frameOutputPath(const std::string &output, int index) {
   return output.substr(0, dot) + "_" + std::to_string(index) + output.substr(dot);
 }
 
-bool saveFrameAsImage(const tdl_app::Frame &frame, const std::string &output_path,
-                      std::string *error) {
+bool frameToBgrMat(const tdl_app::Frame &frame, cv::Mat *out_bgr,
+                   std::string *error) {
+  if (!out_bgr) {
+    if (error) {
+      *error = "out_bgr is null";
+    }
+    return false;
+  }
   if (!frame.native) {
     if (error) {
       *error = "frame has no native VIDEO_FRAME_INFO_S buffer";
@@ -286,10 +352,16 @@ bool saveFrameAsImage(const tdl_app::Frame &frame, const std::string &output_pat
 
   if (format != PIXEL_FORMAT_NV21 &&
       format != PIXEL_FORMAT_NV12 &&
-      format != PIXEL_FORMAT_YUV_400) {
+      format != PIXEL_FORMAT_YUV_400 &&
+      format != PIXEL_FORMAT_RGB_888 &&
+      format != PIXEL_FORMAT_BGR_888 &&
+      format != PIXEL_FORMAT_RGB_888_PLANAR &&
+      format != PIXEL_FORMAT_BGR_888_PLANAR) {
     if (error) {
-      *error = "snapshot only supports NV21/NV12/YUV400, format=" +
-               std::to_string(format);
+      *error =
+          "snapshot only supports NV21/NV12/YUV400/RGB888/BGR888/"
+          "RGB888_PLANAR/BGR888_PLANAR, format=" +
+          std::to_string(format);
     }
     return false;
   }
@@ -315,9 +387,44 @@ bool saveFrameAsImage(const tdl_app::Frame &frame, const std::string &output_pat
   }
   CVI_SYS_IonInvalidateCache(vf.u64PhyAddr[0], mapped, map_size);
 
-  bool ok = false;
   cv::Mat image;
   do {
+    if (format == PIXEL_FORMAT_RGB_888 || format == PIXEL_FORMAT_BGR_888) {
+      cv::Mat packed(height, width, CV_8UC3);
+      for (int y = 0; y < height; ++y) {
+        std::memcpy(packed.ptr(y), mapped + y * vf.u32Stride[0], width * 3);
+      }
+      if (format == PIXEL_FORMAT_RGB_888) {
+        cv::cvtColor(packed, image, cv::COLOR_RGB2BGR);
+      } else {
+        image = packed.clone();
+      }
+      break;
+    }
+
+    if (format == PIXEL_FORMAT_RGB_888_PLANAR ||
+        format == PIXEL_FORMAT_BGR_888_PLANAR) {
+      cv::Mat plane0(height, width, CV_8UC1);
+      cv::Mat plane1(height, width, CV_8UC1);
+      cv::Mat plane2(height, width, CV_8UC1);
+      unsigned char *base0 = mapped;
+      unsigned char *base1 = mapped + vf.u32Length[0];
+      unsigned char *base2 = mapped + vf.u32Length[0] + vf.u32Length[1];
+      for (int y = 0; y < height; ++y) {
+        std::memcpy(plane0.ptr(y), base0 + y * vf.u32Stride[0], width);
+        std::memcpy(plane1.ptr(y), base1 + y * vf.u32Stride[1], width);
+        std::memcpy(plane2.ptr(y), base2 + y * vf.u32Stride[2], width);
+      }
+      std::vector<cv::Mat> channels;
+      if (format == PIXEL_FORMAT_RGB_888_PLANAR) {
+        channels = {plane2, plane1, plane0};
+      } else {
+        channels = {plane0, plane1, plane2};
+      }
+      cv::merge(channels, image);
+      break;
+    }
+
     if (format == PIXEL_FORMAT_YUV_400) {
       cv::Mat gray(height, width, CV_8UC1);
       for (int y = 0; y < height; ++y) {
@@ -343,22 +450,43 @@ bool saveFrameAsImage(const tdl_app::Frame &frame, const std::string &output_pat
     cv::cvtColor(yuv, image, code);
   } while (false);
 
-  if (!image.empty()) {
-    ok = cv::imwrite(output_path, image);
-  }
   CVI_SYS_Munmap(mapped, map_size);
 
-  if (!ok && error) {
-    *error = "failed to write image: " + output_path;
+  if (image.empty()) {
+    if (error) {
+      *error = "frame conversion produced an empty image";
+    }
+    return false;
   }
-  return ok;
+  *out_bgr = std::move(image);
+  return true;
+}
+
+bool saveFrameAsImage(const tdl_app::Frame &frame, const std::string &output_path,
+                      std::string *error) {
+  cv::Mat image;
+  if (!frameToBgrMat(frame, &image, error)) {
+    return false;
+  }
+  if (!cv::imwrite(output_path, image)) {
+    if (error) {
+      *error = "failed to write image: " + output_path;
+    }
+    return false;
+  }
+  return true;
 }
 
 void dumpCameraDiagnostics() {
-  dumpProcFile("demo: /proc/mipi-rx", "/proc/mipi-rx");
-  dumpProcFile("demo: /proc/soph/vi", "/proc/soph/vi");
-  dumpProcFile("demo: /proc/soph/vi_dbg", "/proc/soph/vi_dbg");
-  dumpProcFile("demo: /proc/soph/vpss", "/proc/soph/vpss");
+  const char *ld_library_path = std::getenv("LD_LIBRARY_PATH");
+  const char *pwd = std::getenv("PWD");
+  std::cerr << "dual-os diagnostics:\n";
+  std::cerr << "  cwd=" << (pwd ? pwd : "<unset>") << "\n";
+  std::cerr << "  LD_LIBRARY_PATH="
+            << (ld_library_path ? ld_library_path : "<unset>") << "\n";
+  std::cerr << "  hint=run from the packaged runtime and source ./env.sh first,\n";
+  std::cerr << "       or use ./run_camera_capture_demo.sh instead of calling\n";
+  std::cerr << "       ./bin/tdl_camera_capture_demo directly\n";
 }
 
 }  // namespace camera_demo_support

@@ -10,14 +10,11 @@
 namespace {
 
 struct Options {
-  std::string sensor_ini = "./configs/sensor_cfg_0x44003340.ini";
-  int vi_device = 0;
-  int vi_pipe = 0;
-  int vi_channel = 0;
-  int group0 = 0;
-  int channel0 = 0;
-  int width0 = 640;
-  int height0 = 640;
+  camera_demo_support::CommonOptions camera;
+  int group0 = tdl_app::DualOsLayout::kCaptureVpssGroup;
+  int channel0 = tdl_app::DualOsLayout::kAiChannel;
+  int width0 = tdl_app::DualOsLayout::kAiWidth;
+  int height0 = tdl_app::DualOsLayout::kAiHeight;
   int group1 = 1;
   int channel1 = 0;
   int width1 = 960;
@@ -31,8 +28,7 @@ struct Options {
 void printUsage() {
   std::cout
       << "Usage:\n"
-      << "  tdl_multi_vpss_demo [--sensor-ini FILE]\n"
-      << "                      [--vi-device N] [--vi-pipe N] [--vi-channel N]\n"
+      << "  tdl_multi_vpss_demo [--device N] [--group N] [--pipe N] [--channel N]\n"
       << "                      [--group0 N] [--channel0 N] [--width0 N] [--height0 N]\n"
       << "                      [--group1 N] [--channel1 N] [--width1 N] [--height1 N]\n"
       << "                      [--pixel-format N] [--timeout-ms N]\n"
@@ -42,6 +38,16 @@ void printUsage() {
 bool parseArgs(int argc, char **argv, Options *opt) {
   for (int i = 1; i < argc; ++i) {
     std::string arg = argv[i];
+    bool handled = false;
+    std::string parse_error;
+    if (!camera_demo_support::parseCommonArgs(argc, argv, &i, &opt->camera,
+                                              &handled, &parse_error)) {
+      std::cerr << parse_error << "\n";
+      return false;
+    }
+    if (handled) {
+      continue;
+    }
     auto value = [&](const char *name) -> const char * {
       if (i + 1 >= argc) {
         std::cerr << "missing value for " << name << "\n";
@@ -50,23 +56,7 @@ bool parseArgs(int argc, char **argv, Options *opt) {
       return argv[++i];
     };
 
-    if (arg == "--sensor-ini") {
-      const char *v = value("--sensor-ini");
-      if (!v) return false;
-      opt->sensor_ini = v;
-    } else if (arg == "--vi-device") {
-      const char *v = value("--vi-device");
-      if (!v) return false;
-      opt->vi_device = std::atoi(v);
-    } else if (arg == "--vi-pipe") {
-      const char *v = value("--vi-pipe");
-      if (!v) return false;
-      opt->vi_pipe = std::atoi(v);
-    } else if (arg == "--vi-channel") {
-      const char *v = value("--vi-channel");
-      if (!v) return false;
-      opt->vi_channel = std::atoi(v);
-    } else if (arg == "--group0") {
+    if (arg == "--group0") {
       const char *v = value("--group0");
       if (!v) return false;
       opt->group0 = std::atoi(v);
@@ -163,23 +153,6 @@ int main(int argc, char **argv) {
   }
 
   std::string error;
-  tdl_app::SensorMedia::Config media_config =
-      tdl_app::SensorMedia::fullStackSensor(opt.sensor_ini, true, opt.vi_device,
-                                            opt.vi_pipe, opt.vi_channel, opt.group0,
-                                            opt.channel0, opt.width0, opt.height0,
-                                            opt.pixel_format);
-  media_config.vpss_outputs.clear();
-  media_config.vpss_outputs.push_back(tdl_app::SensorMedia::vpssOutput(
-      opt.group0, opt.channel0, opt.width0, opt.height0, opt.pixel_format));
-  media_config.vpss_outputs.push_back(tdl_app::SensorMedia::vpssOutput(
-      opt.group1, opt.channel1, opt.width1, opt.height1, opt.pixel_format));
-
-  tdl_app::SensorMedia media(media_config);
-  if (!media.open(&error)) {
-    std::cerr << "sensor media open failed: " << error << "\n";
-    return 2;
-  }
-
   const tdl_app::Camera::Config camera0 = makeVpssCameraConfig(
       opt.group0, opt.channel0, opt.width0, opt.height0, opt.pixel_format,
       opt.timeout_ms);
@@ -190,18 +163,15 @@ int main(int argc, char **argv) {
   if (!captureOne(camera0, opt.output0, &error)) {
     std::cerr << "capture group0 failed: " << error << "\n";
     camera_demo_support::dumpCameraDiagnostics();
-    media.close();
-    return 3;
+    return 2;
   }
   if (!captureOne(camera1, opt.output1, &error)) {
     std::cerr << "capture group1 failed: " << error << "\n";
     camera_demo_support::dumpCameraDiagnostics();
-    media.close();
-    return 4;
+    return 3;
   }
 
   std::cout << "saved: " << opt.output0 << "\n";
   std::cout << "saved: " << opt.output1 << "\n";
-  media.close();
   return 0;
 }

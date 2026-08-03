@@ -1,8 +1,9 @@
 #pragma once
 
 #include <cstdlib>
-#include <memory>
 #include <string>
+
+#include <opencv2/core.hpp>
 
 #include "tdl_app/advanced.hpp"
 
@@ -10,43 +11,25 @@ namespace camera_demo_support {
 
 struct CommonOptions {
   std::string backend = "vpss";
-  bool use_mmf = false;
-  bool use_sensor_media = false;
-  bool use_ipcamera_helper = false;
-  bool attach_existing = false;
-  std::string sensor_ini = "./configs/sensor_cfg_cv1842hp_wevb_cv2003_ipcamera.ini";
-  std::string ipcamera_binary = "/mnt/sd/install/ipcamera";
-  std::string ipcamera_ini = "/mnt/sd/install/cv1842hp_wevb_cv2003.ini";
   int frames = 1;
   int device = 0;
-  int group = 0;
+  int group = tdl_app::DualOsLayout::kCaptureVpssGroup;
   int pipe = 0;
-  int channel = 0;
-  int pixel_format = 18;
-  int width = 640;
-  int height = 640;
+  int channel = tdl_app::DualOsLayout::kAiChannel;
+  int pixel_format = tdl_app::DualOsLayout::kAiPixelFormat;
+  int width = tdl_app::DualOsLayout::kAiWidth;
+  int height = tdl_app::DualOsLayout::kAiHeight;
   int timeout_ms = 1000;
   int hold_ms = 0;
-  bool enable_preview_output = false;
-  int preview_group = 0;
-  int preview_channel = 1;
-  int preview_width = 0;
-  int preview_height = 0;
-  int preview_pixel_format = 18;
-  bool enable_pip_output = false;
-  int pip_group = 0;
-  int pip_channel = 2;
-  int pip_width = 0;
-  int pip_height = 0;
-  int pip_pixel_format = 18;
 };
 
 struct CameraRuntime {
-  std::unique_ptr<tdl_app::Mmf> mmf;
-  std::unique_ptr<tdl_app::SensorMedia> sensor_media;
   tdl_app::Camera camera;
 };
 
+bool setCameraPreset(CommonOptions *opt, const std::string &preset,
+                     std::string *error = nullptr);
+std::string describeCameraPreset(const CommonOptions &opt);
 const char *backendName(tdl_app::Camera::Backend backend);
 bool parseCommonArgs(int argc, char **argv, int *index, CommonOptions *opt,
                      bool *handled, std::string *error = nullptr);
@@ -58,6 +41,11 @@ tdl_app::MediaChannel previewChannel(const CommonOptions &opt,
                                      const tdl_app::Camera::Config &camera_config);
 
 std::string frameOutputPath(const std::string &output, int index);
+// Maps the frame's native VIDEO_FRAME_INFO_S buffer and converts it to a BGR
+// cv::Mat. Supports NV21/NV12/YUV400/RGB888/BGR888/RGB888_PLANAR/BGR888_PLANAR,
+// the same set saveFrameAsImage() supports (it is built on top of this).
+bool frameToBgrMat(const tdl_app::Frame &frame, cv::Mat *out_bgr,
+                   std::string *error = nullptr);
 bool saveFrameAsImage(const tdl_app::Frame &frame, const std::string &output_path,
                       std::string *error = nullptr);
 void dumpCameraDiagnostics();

@@ -7,6 +7,7 @@
 #include "cvi_errno.h"
 #include "cvi_sys.h"
 #include "cvi_vpss.h"
+#include "camera_demo_support.hpp"
 #include "tdl_app/advanced.hpp"
 
 namespace {
@@ -17,30 +18,34 @@ struct ProbeTarget {
 };
 
 struct Options {
-  std::string sensor_ini = "./configs/sensor_cfg_cv1842hp_wevb_cv2003_ipcamera.ini";
-  int vi_device = 0;
-  int vi_pipe = 0;
-  int vi_channel = 0;
-  int group = 0;
-  int channel = 2;
-  int width = 320;
-  int height = 240;
-  bool online_vpss = true;
+  camera_demo_support::CommonOptions camera;
+  int group = tdl_app::DualOsLayout::kCaptureVpssGroup;
+  int channel = tdl_app::DualOsLayout::kLiveChannel;
+  int width = tdl_app::DualOsLayout::kLiveWidth;
+  int height = tdl_app::DualOsLayout::kLiveHeight;
 };
 
 void printUsage() {
   std::cout
       << "Usage:\n"
-      << "  tdl_vpss_format_probe_demo [--sensor-ini FILE]\n"
-      << "                             [--vi-device N] [--vi-pipe N] [--vi-channel N]\n"
+      << "  tdl_vpss_format_probe_demo [--device N] [--group N] [--pipe N] [--channel N]\n"
       << "                             [--group N] [--channel N]\n"
-      << "                             [--width N] [--height N]\n"
-      << "                             [--online-vpss 0|1]\n";
+      << "                             [--width N] [--height N]\n";
 }
 
 bool parseArgs(int argc, char **argv, Options *opt) {
   for (int i = 1; i < argc; ++i) {
     const std::string arg = argv[i];
+    bool handled = false;
+    std::string parse_error;
+    if (!camera_demo_support::parseCommonArgs(argc, argv, &i, &opt->camera,
+                                              &handled, &parse_error)) {
+      std::cerr << parse_error << "\n";
+      return false;
+    }
+    if (handled) {
+      continue;
+    }
     auto value = [&](const char *name) -> const char * {
       if (i + 1 >= argc) {
         std::cerr << "missing value for " << name << "\n";
@@ -49,23 +54,7 @@ bool parseArgs(int argc, char **argv, Options *opt) {
       return argv[++i];
     };
 
-    if (arg == "--sensor-ini") {
-      const char *v = value("--sensor-ini");
-      if (!v) return false;
-      opt->sensor_ini = v;
-    } else if (arg == "--vi-device") {
-      const char *v = value("--vi-device");
-      if (!v) return false;
-      opt->vi_device = std::atoi(v);
-    } else if (arg == "--vi-pipe") {
-      const char *v = value("--vi-pipe");
-      if (!v) return false;
-      opt->vi_pipe = std::atoi(v);
-    } else if (arg == "--vi-channel") {
-      const char *v = value("--vi-channel");
-      if (!v) return false;
-      opt->vi_channel = std::atoi(v);
-    } else if (arg == "--group") {
+    if (arg == "--group") {
       const char *v = value("--group");
       if (!v) return false;
       opt->group = std::atoi(v);
@@ -81,10 +70,6 @@ bool parseArgs(int argc, char **argv, Options *opt) {
       const char *v = value("--height");
       if (!v) return false;
       opt->height = std::atoi(v);
-    } else if (arg == "--online-vpss") {
-      const char *v = value("--online-vpss");
-      if (!v) return false;
-      opt->online_vpss = std::atoi(v) != 0;
     } else if (arg == "-h" || arg == "--help") {
       printUsage();
       std::exit(0);
@@ -147,24 +132,20 @@ int main(int argc, char **argv) {
       {PIXEL_FORMAT_ARGB_8888, "ARGB8888"},
   };
 
-  tdl_app::SensorMedia::Config config = tdl_app::SensorMedia::fullStackSensor(
-      opt.sensor_ini, true, opt.vi_device, opt.vi_pipe, opt.vi_channel, opt.group,
-      0, opt.width, opt.height, PIXEL_FORMAT_NV12);
-  config.online_vpss = opt.online_vpss;
-  config.vpss_outputs.clear();
-  config.vpss_outputs.push_back(
-      tdl_app::SensorMedia::vpssOutput(opt.group, 0, opt.width, opt.height,
-                                       PIXEL_FORMAT_NV12, true));
+  opt.camera.group = opt.group;
+  opt.camera.channel = opt.channel;
+  opt.camera.width = opt.width;
+  opt.camera.height = opt.height;
+  opt.camera.pixel_format = PIXEL_FORMAT_NV12;
 
+  camera_demo_support::CameraRuntime runtime;
   std::string error;
-  tdl_app::SensorMedia sensor(config);
-  if (!sensor.open(&error)) {
-    std::cerr << "sensor open failed: " << error << "\n";
+  if (!camera_demo_support::openCameraRuntime(opt.camera, &runtime, &error)) {
+    std::cerr << "camera runtime open failed: " << error << "\n";
     return 2;
   }
 
-  std::cout << "probe begin: online_vpss=" << (opt.online_vpss ? 1 : 0)
-            << " group=" << opt.group
+  std::cout << "probe begin: group=" << opt.group
             << " channel=" << opt.channel
             << " size=" << opt.width << "x" << opt.height << "\n";
 
@@ -194,6 +175,6 @@ int main(int argc, char **argv) {
     }
   }
 
-  sensor.close();
+  camera_demo_support::closeCameraRuntime(&runtime);
   return 0;
 }

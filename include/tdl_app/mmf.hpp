@@ -3,6 +3,7 @@
 #include <string>
 #include <vector>
 
+#include "tdl_app/layout.hpp"
 #include "tdl_app/osd_region.hpp"
 #include "tdl_app/vdec_channel.hpp"
 #include "tdl_app/venc_channel.hpp"
@@ -314,6 +315,27 @@ class Mmf {
     config.graph = graph;
     config.reuse_existing_system = reuse_existing_system;
     config.configure_vb = configure_vb;
+    return config;
+  }
+
+  static Config dualOsGraph() {
+    Config config = Config::attachExisting();
+    config.graph.vpss.push_back(vpssOutput(
+        DualOsLayout::kCaptureVpssGroup, DualOsLayout::kAiChannel,
+        DualOsLayout::kMainWidth, DualOsLayout::kMainHeight,
+        DualOsLayout::kAiWidth, DualOsLayout::kAiHeight, 18));
+    config.graph.vpss.push_back(vpssOutput(
+        DualOsLayout::kCaptureVpssGroup, DualOsLayout::kMainChannel,
+        DualOsLayout::kMainWidth, DualOsLayout::kMainHeight,
+        DualOsLayout::kMainWidth, DualOsLayout::kMainHeight, 18));
+    config.graph.vpss.push_back(vpssOutput(
+        DualOsLayout::kCaptureVpssGroup, DualOsLayout::kLiveChannel,
+        DualOsLayout::kMainWidth, DualOsLayout::kMainHeight,
+        DualOsLayout::kLiveWidth, DualOsLayout::kLiveHeight, 18));
+    config.graph.vpss.push_back(vpssOutput(
+        DualOsLayout::kCaptureVpssGroup, DualOsLayout::kSubRgbChannel,
+        DualOsLayout::kMainWidth, DualOsLayout::kMainHeight,
+        DualOsLayout::kSubRgbWidth, DualOsLayout::kSubRgbHeight, 2));
     return config;
   }
 

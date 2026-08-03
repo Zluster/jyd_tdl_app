@@ -4,6 +4,7 @@
 #include <string>
 
 #include "cvi_audio.h"
+#include "tdl_app/sys_context.hpp"
 
 namespace tdl_app {
 namespace {
@@ -31,6 +32,10 @@ bool retainAudioRuntime(std::string *error) {
   if (audioRefCount() > 0) {
     ++audioRefCount();
     return true;
+  }
+
+  if (!ensureMmfRuntimeInitialized(error)) {
+    return false;
   }
 
   const int ret = CVI_AUDIO_INIT();

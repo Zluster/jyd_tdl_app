@@ -21,6 +21,7 @@ class FrameSource {
   virtual ~FrameSource() = default;
   virtual bool open(std::string *error = nullptr) = 0;
   virtual bool read(Frame *frame, std::string *error = nullptr) = 0;
+  virtual void releaseFrame() {}
   virtual void close() = 0;
 };
 
@@ -29,6 +30,7 @@ class ImageFileSource final : public FrameSource {
   explicit ImageFileSource(std::string path);
   bool open(std::string *error = nullptr) override;
   bool read(Frame *frame, std::string *error = nullptr) override;
+  void releaseFrame() override;
   void close() override;
 
  private:
@@ -60,6 +62,7 @@ class CameraSource final : public FrameSource {
   ~CameraSource() override;
   bool open(std::string *error = nullptr) override;
   bool read(Frame *frame, std::string *error = nullptr) override;
+  void releaseFrame() override;
   void close() override;
 
  private:

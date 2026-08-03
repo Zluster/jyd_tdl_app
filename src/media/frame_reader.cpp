@@ -7,6 +7,7 @@
 #include "cvi_errno.h"
 #include "cvi_vi.h"
 #include "cvi_vpss.h"
+#include "tdl_app/sys_context.hpp"
 
 namespace tdl_app {
 namespace {
@@ -62,6 +63,9 @@ class FrameReaderImpl {
       setError(error, "frame reader only supports VI or VPSS channels");
       return false;
     }
+    if (!ensureMmfRuntimeInitialized(error)) {
+      return false;
+    }
     opened_ = true;
     return true;
   }
@@ -103,6 +107,8 @@ class FrameReaderImpl {
     frame->timestamp_us = frame_info_.stVFrame.u64PTS;
     return true;
   }
+
+  void releaseFrame() { releaseCurrentFrame(); }
 
   void close() {
     releaseCurrentFrame();
@@ -153,6 +159,8 @@ bool FrameReader::open(std::string *error) { return impl_->open(error); }
 bool FrameReader::read(Frame *frame, std::string *error) {
   return impl_->read(frame, error);
 }
+
+void FrameReader::releaseFrame() { impl_->releaseFrame(); }
 
 void FrameReader::close() { impl_->close(); }
 

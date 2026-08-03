@@ -13,20 +13,18 @@ namespace {
 
 struct Options {
   camera_demo_support::CommonOptions camera;
+  std::string source = "live";
   std::string output = "frame.jpg";
 };
 
 void printUsage() {
   std::cout
       << "Usage:\n"
-      << "  tdl_camera_capture_demo [--backend vi|vpss]\n"
-      << "                          [--use-mmf | --use-sensor-media]\n"
-      << "                          [--use-ipcamera-helper]\n"
-      << "                          [--attach-existing]\n"
-      << "                          [--sensor-ini FILE] [--frames N]\n"
-      << "                          [--ipcamera-bin FILE] [--ipcamera-ini FILE]\n"
-      << "                          [--device N] [--group N] [--pipe N] [--channel N]\n"
-      << "                          [--width N] [--height N] [--pixel-format N]\n"
+      << "  tdl_camera_capture_demo [--source live|ai|main|subrgb|screen|rgb]\n"
+      << "                          [default: dual-os MMF frame source]\n"
+      << "                          [run from packaged runtime after '. ./env.sh']\n"
+      << "                          [--frames N]\n"
+      << "                          [debug only: --backend/--group/--channel/...]\n"
       << "                          [--timeout-ms N] [--hold-ms N]\n"
       << "                          [--output FILE]\n";
 }
@@ -53,7 +51,11 @@ bool parseArgs(int argc, char **argv, Options *opt) {
       return argv[++i];
     };
 
-    if (arg == "--output") {
+    if (arg == "--source") {
+      const char *v = value("--source");
+      if (!v) return false;
+      opt->source = v;
+    } else if (arg == "--output") {
       const char *v = value("--output");
       if (!v) return false;
       opt->output = v;
@@ -77,8 +79,13 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  camera_demo_support::CameraRuntime runtime;
   std::string error;
+  if (!camera_demo_support::setCameraPreset(&opt.camera, opt.source, &error)) {
+    std::cerr << error << "\n";
+    return 1;
+  }
+
+  camera_demo_support::CameraRuntime runtime;
 
   if (!camera_demo_support::openCameraRuntime(opt.camera, &runtime, &error)) {
     std::cerr << "camera runtime open failed: " << error << "\n";
@@ -89,6 +96,7 @@ int main(int argc, char **argv) {
 
   std::cerr << "camera config: backend="
             << camera_demo_support::backendName(camera_config.backend)
+            << " source=" << camera_demo_support::describeCameraPreset(opt.camera)
             << " device=" << camera_config.device
             << " pipe=" << camera_config.pipe
             << " group=" << camera_config.group

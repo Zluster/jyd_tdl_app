@@ -10,14 +10,30 @@ namespace tdl_app {
 struct SingleObjectTrackingResult {
   Box box;
   float confidence = 0.0f;
+  bool tracked = false;
+  int response_x = -1;
+  int response_y = -1;
   int search_width = 0;
   int search_height = 0;
+  double preprocess_ms = 0.0;
+  double inference_ms = 0.0;
+  double output_copy_ms = 0.0;
+  double postprocess_ms = 0.0;
+  double total_ms = 0.0;
 
   void clear() {
     box = Box{};
     confidence = 0.0f;
+    tracked = false;
+    response_x = -1;
+    response_y = -1;
     search_width = 0;
     search_height = 0;
+    preprocess_ms = 0.0;
+    inference_ms = 0.0;
+    output_copy_ms = 0.0;
+    postprocess_ms = 0.0;
+    total_ms = 0.0;
   }
 
   bool valid() const { return box.valid(); }

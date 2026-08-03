@@ -83,11 +83,12 @@ class VencChannelImpl {
       attr.stRcAttr.stH265Cbr.u32SrcFrameRate = static_cast<CVI_U32>(config_.src_fps);
       attr.stRcAttr.stH265Cbr.u32BitRate = static_cast<CVI_U32>(config_.bitrate_kbps);
     } else {
-      attr.stRcAttr.enRcMode = VENC_RC_MODE_MJPEGCBR;
-      attr.stRcAttr.stMjpegCbr.u32StatTime = 2;
-      attr.stRcAttr.stMjpegCbr.u32SrcFrameRate = static_cast<CVI_U32>(config_.src_fps);
-      attr.stRcAttr.stMjpegCbr.fr32DstFrameRate = config_.dst_fps;
-      attr.stRcAttr.stMjpegCbr.u32BitRate = static_cast<CVI_U32>(config_.bitrate_kbps);
+      attr.stRcAttr.enRcMode = VENC_RC_MODE_MJPEGFIXQP;
+      attr.stRcAttr.stMjpegFixQp.u32SrcFrameRate = static_cast<CVI_U32>(config_.src_fps);
+      attr.stRcAttr.stMjpegFixQp.fr32DstFrameRate = config_.dst_fps;
+      attr.stRcAttr.stMjpegFixQp.u32Qfactor =
+          static_cast<CVI_U32>(config_.qfactor < 1 ? 1 :
+                               (config_.qfactor > 99 ? 99 : config_.qfactor));
     }
 
     int ret = CVI_VENC_CreateChn(config_.channel, &attr);

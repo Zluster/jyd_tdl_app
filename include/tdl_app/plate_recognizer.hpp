@@ -11,6 +11,20 @@ class NnPlateRecognizer;
 class MultiStagePipeline;
 class Pipeline;
 
+struct OcrProfile {
+  double frame_convert_ms = 0.0;
+  double det_preprocess_ms = 0.0;
+  double det_inference_ms = 0.0;
+  double det_postprocess_ms = 0.0;
+  double rectify_ms = 0.0;
+  double rec_preprocess_ms = 0.0;
+  double rec_inference_ms = 0.0;
+  double rec_decode_ms = 0.0;
+  double total_ms = 0.0;
+  int text_regions = 0;
+  bool hardware_det_preprocess = false;
+};
+
 class PlateRecognizer {
  public:
   using Config = ModelSessionConfig;
@@ -38,6 +52,14 @@ class PlateRecognizer {
   bool run(const std::string &image_path, const Box &roi,
            const InferOptions &options, AlgorithmResult *result,
            std::string *error = nullptr);
+  bool runFrame(const Frame &frame, const InferOptions &options,
+                AlgorithmResult *result, std::string *error = nullptr);
+  bool runFrameProfiled(const Frame &frame, const InferOptions &options,
+                        AlgorithmResult *result, OcrProfile *profile,
+                        std::string *error = nullptr);
+  bool runFrame(const Frame &frame, const Box &roi,
+                const InferOptions &options, AlgorithmResult *result,
+                std::string *error = nullptr);
   bool recognize(const std::string &image_path, const InferOptions &options,
                  AlgorithmResult *result, std::string *error = nullptr);
   bool recognizeCrop(const std::string &image_path, const Box &roi,

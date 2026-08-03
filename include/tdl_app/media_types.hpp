@@ -29,6 +29,7 @@ struct VoInterfaceType {
 };
 
 struct VoInterfaceSync {
+  static constexpr int P720_480_60 = 10;
   static constexpr int P720_1280_60 = 21;
   static constexpr int P1080_1920_60 = 22;
   static constexpr int P480_800_60 = 23;

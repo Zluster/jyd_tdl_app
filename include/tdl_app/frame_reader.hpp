@@ -23,6 +23,8 @@ class FrameReader {
 
   bool open(std::string *error = nullptr);
   bool read(Frame *frame, std::string *error = nullptr);
+  // Return the current VI/VPSS frame as soon as an algorithm is finished.
+  void releaseFrame();
   void close();
   bool isOpen() const;
 

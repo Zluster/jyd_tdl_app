@@ -99,7 +99,7 @@ struct MediaIpcOpenVoRequest {
   std::int32_t height = 640;
   std::int32_t pixel_format = PixelFormat::NV12;
   std::int32_t interface_type = VoInterfaceType::Mipi;
-  std::int32_t interface_sync = VoInterfaceSync::P720_1280_60;
+  std::int32_t interface_sync = VoInterfaceSync::P720_480_60;
   std::int32_t display_buf_len = 3;
   std::int32_t frame_rate = 25;
   std::int32_t channel_x = 0;

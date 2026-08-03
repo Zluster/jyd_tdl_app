@@ -13,7 +13,6 @@
 #include "cvi_comm_video.h"
 #include "cvi_comm_vpss.h"
 #include "sensor_cfg.h"
-#include "tdl_app/sensor_media.hpp"
 #include "tdl_app/media_types.hpp"
 
 namespace tdl_app {
@@ -155,24 +154,6 @@ inline VPSS_GRP_ATTR_S makeVpssGrpAttr(const SNS_CFG_S &sns_cfg, int index,
   attr.u32MaxW = sns_cfg.u32ImageWigth[index];
   attr.u32MaxH = sns_cfg.u32ImageHeight[index];
   attr.u8VpssDev = 1;
-  return attr;
-}
-
-inline VPSS_CHN_ATTR_S makeVpssChnAttr(
-    const SensorMedia::VpssOutputConfig &config) {
-  VPSS_CHN_ATTR_S attr;
-  std::memset(&attr, 0, sizeof(attr));
-  attr.u32Width = static_cast<CVI_U32>(config.output_width);
-  attr.u32Height = static_cast<CVI_U32>(config.output_height);
-  attr.enVideoFormat = VIDEO_FORMAT_LINEAR;
-  attr.enPixelFormat = static_cast<PIXEL_FORMAT_E>(config.output_pixel_format);
-  attr.stFrameRate.s32SrcFrameRate = -1;
-  attr.stFrameRate.s32DstFrameRate = -1;
-  attr.u32Depth = 1;
-  attr.bMirror = CVI_FALSE;
-  attr.bFlip = CVI_FALSE;
-  attr.stAspectRatio.enMode = ASPECT_RATIO_NONE;
-  attr.stNormalize.bEnable = CVI_FALSE;
   return attr;
 }
 

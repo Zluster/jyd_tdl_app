@@ -3,6 +3,7 @@
 #include <cstring>
 
 #include "cvi_common.h"
+#include "cvi_comm_video.h"
 #include "cvi_vo.h"
 
 namespace tdl_app {
@@ -11,6 +12,20 @@ namespace {
 void setError(std::string *error, const std::string &message) {
   if (error) {
     *error = message;
+  }
+}
+
+ROTATION_E toRotation(int rotation) {
+  switch (rotation) {
+    case 90:
+      return ROTATION_90;
+    case 180:
+      return ROTATION_180;
+    case 270:
+      return ROTATION_270;
+    case 0:
+    default:
+      return ROTATION_0;
   }
 }
 
@@ -27,20 +42,45 @@ bool VoOutput::open(std::string *error) {
     return true;
   }
 
-  VO_PUB_ATTR_S pub_attr;
-  std::memset(&pub_attr, 0, sizeof(pub_attr));
-  pub_attr.enIntfType = static_cast<VO_INTF_TYPE_E>(config_.interface_type);
-  pub_attr.enIntfSync = static_cast<VO_INTF_SYNC_E>(config_.interface_sync);
-
-  int ret = CVI_VO_SetPubAttr(config_.device, &pub_attr);
-  if (ret != CVI_SUCCESS) {
-    setError(error, "CVI_VO_SetPubAttr failed, ret=" + std::to_string(ret));
-    return false;
-  }
-  ret = CVI_VO_Enable(config_.device);
-  if (ret != CVI_SUCCESS) {
-    setError(error, "CVI_VO_Enable failed, ret=" + std::to_string(ret));
-    return false;
+  int ret;
+  if (config_.preserve_hardware_on_close) {
+    // U-Boot owns panel/DSI startup. AliOS has no VO context after boot,
+    // however, so register the configured full-screen output once before
+    // enabling it. Without this, its inherited logo window remains 320x240
+    // and rejects the 720x480 video layer rectangle.
+    if (!CVI_VO_IsEnabled(config_.device)) {
+      VO_PUB_ATTR_S pub_attr;
+      std::memset(&pub_attr, 0, sizeof(pub_attr));
+      pub_attr.enIntfType = static_cast<VO_INTF_TYPE_E>(config_.interface_type);
+      pub_attr.enIntfSync = static_cast<VO_INTF_SYNC_E>(config_.interface_sync);
+      ret = CVI_VO_SetPubAttr(config_.device, &pub_attr);
+      if (ret != CVI_SUCCESS) {
+        setError(error, "CVI_VO_SetPubAttr for U-Boot handoff failed, ret=" +
+                            std::to_string(ret));
+        return false;
+      }
+      ret = CVI_VO_Enable(config_.device);
+      if (ret != CVI_SUCCESS) {
+        setError(error, "CVI_VO_Enable for U-Boot handoff failed, ret=" +
+                            std::to_string(ret));
+        return false;
+      }
+    }
+  } else {
+    VO_PUB_ATTR_S pub_attr;
+    std::memset(&pub_attr, 0, sizeof(pub_attr));
+    pub_attr.enIntfType = static_cast<VO_INTF_TYPE_E>(config_.interface_type);
+    pub_attr.enIntfSync = static_cast<VO_INTF_SYNC_E>(config_.interface_sync);
+    ret = CVI_VO_SetPubAttr(config_.device, &pub_attr);
+    if (ret != CVI_SUCCESS) {
+      setError(error, "CVI_VO_SetPubAttr failed, ret=" + std::to_string(ret));
+      return false;
+    }
+    ret = CVI_VO_Enable(config_.device);
+    if (ret != CVI_SUCCESS) {
+      setError(error, "CVI_VO_Enable failed, ret=" + std::to_string(ret));
+      return false;
+    }
   }
   device_enabled_ = true;
 
@@ -89,6 +129,16 @@ bool VoOutput::open(std::string *error) {
     close();
     return false;
   }
+
+  ret = CVI_VO_SetChnRotation(config_.layer, config_.channel,
+                              toRotation(config_.rotation));
+  if (ret != CVI_SUCCESS) {
+    setError(error, "CVI_VO_SetChnRotation failed, ret=" +
+                        std::to_string(ret));
+    close();
+    return false;
+  }
+
   ret = CVI_VO_EnableChn(config_.layer, config_.channel);
   if (ret != CVI_SUCCESS) {
     setError(error, "CVI_VO_EnableChn failed, ret=" + std::to_string(ret));
@@ -100,6 +150,10 @@ bool VoOutput::open(std::string *error) {
 }
 
 void VoOutput::close() {
+  if (config_.preserve_hardware_on_close && channel_enabled_ &&
+      layer_enabled_ && device_enabled_) {
+    return;
+  }
   if (channel_enabled_) {
     CVI_VO_DisableChn(config_.layer, config_.channel);
     channel_enabled_ = false;
