@@ -32,9 +32,9 @@ static const char* source_name(mmf_camera_source_t source) {
 }
 
 static int log_outputs(void) {
-  mmf_camera_output_desc_t outputs[8];
+  mmf_camera_output_desc_t outputs[10];
   size_t count = 0;
-  mmf_result_t ret = mmf_camera_list_outputs(outputs, 8, &count);
+  mmf_result_t ret = mmf_camera_list_outputs(outputs, 10, &count);
   if (ret != MMF_OK) {
     printf("list outputs failed: %d %s\n", ret, mmf_system_last_error());
     return -1;

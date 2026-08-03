@@ -13,7 +13,8 @@ extern std::string g_last_error;
 void set_last_error(const std::string& error);
 mmf_result_t ok_or_error(bool ok, const std::string& error);
 mmf_cvi::CameraSourceId to_native_source(mmf_camera_source_t source);
-bool source_to_vpss(mmf_camera_source_t source, int* group, int* channel);
+bool source_to_vpss(mmf_camera_source_t source, mmf_camera_device_t device,
+                    int* group, int* channel);
 mmf_scale_mode_t from_vpss_scale(const VPSS_CHN_ATTR_S& attr);
 void apply_vpss_scale(mmf_scale_mode_t mode, VPSS_CHN_ATTR_S* attr);
 mmf_pixel_format_t from_native_pixfmt(int format);

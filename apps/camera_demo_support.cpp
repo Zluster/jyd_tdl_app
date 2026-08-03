@@ -16,6 +16,11 @@
 namespace camera_demo_support {
 namespace {
 
+int captureGroupForDevice(int device) {
+  return device == 1 ? tdl_app::DualOsLayout::kRearVpssGroup
+                     : tdl_app::DualOsLayout::kCaptureVpssGroup;
+}
+
 std::string toLower(std::string value) {
   for (char &ch : value) {
     if (ch >= 'A' && ch <= 'Z') {
@@ -55,7 +60,7 @@ bool setCameraPreset(CommonOptions *opt, const std::string &preset,
   opt->backend = "vpss";
 
   if (lower == "ai") {
-    opt->group = tdl_app::DualOsLayout::kCaptureVpssGroup;
+    opt->group = captureGroupForDevice(opt->device);
     opt->channel = tdl_app::DualOsLayout::kAiChannel;
     opt->width = tdl_app::DualOsLayout::kAiWidth;
     opt->height = tdl_app::DualOsLayout::kAiHeight;
@@ -63,7 +68,7 @@ bool setCameraPreset(CommonOptions *opt, const std::string &preset,
     return true;
   }
   if (lower == "live") {
-    opt->group = tdl_app::DualOsLayout::kCaptureVpssGroup;
+    opt->group = captureGroupForDevice(opt->device);
     opt->channel = tdl_app::DualOsLayout::kLiveChannel;
     opt->width = tdl_app::DualOsLayout::kLiveWidth;
     opt->height = tdl_app::DualOsLayout::kLiveHeight;
@@ -71,7 +76,7 @@ bool setCameraPreset(CommonOptions *opt, const std::string &preset,
     return true;
   }
   if (lower == "main") {
-    opt->group = tdl_app::DualOsLayout::kCaptureVpssGroup;
+    opt->group = captureGroupForDevice(opt->device);
     opt->channel = tdl_app::DualOsLayout::kMainChannel;
     opt->width = tdl_app::DualOsLayout::kMainWidth;
     opt->height = tdl_app::DualOsLayout::kMainHeight;
@@ -79,7 +84,7 @@ bool setCameraPreset(CommonOptions *opt, const std::string &preset,
     return true;
   }
   if (lower == "subrgb") {
-    opt->group = tdl_app::DualOsLayout::kCaptureVpssGroup;
+    opt->group = captureGroupForDevice(opt->device);
     opt->channel = tdl_app::DualOsLayout::kSubRgbChannel;
     opt->width = tdl_app::DualOsLayout::kSubRgbWidth;
     opt->height = tdl_app::DualOsLayout::kSubRgbHeight;
@@ -94,17 +99,24 @@ bool setCameraPreset(CommonOptions *opt, const std::string &preset,
     opt->pixel_format = tdl_app::DualOsLayout::kDisplayPixelFormat;
     return true;
   }
+  if (lower == "rgb") {
+    opt->group = captureGroupForDevice(opt->device);
+    opt->channel = tdl_app::DualOsLayout::kRgbChannel;
+    opt->width = tdl_app::DualOsLayout::kRgbWidth;
+    opt->height = tdl_app::DualOsLayout::kRgbHeight;
+    opt->pixel_format = tdl_app::DualOsLayout::kRgbPixelFormat;
+    return true;
+  }
 
   if (error) {
     *error = "unknown camera preset: " + preset +
-             " (expected ai|live|main|subrgb|screen)";
+             " (expected ai|live|main|subrgb|screen|rgb)";
   }
   return false;
 }
 
 std::string describeCameraPreset(const CommonOptions &opt) {
-  if (opt.backend == "vpss" &&
-      opt.group == tdl_app::DualOsLayout::kCaptureVpssGroup) {
+  if (opt.backend == "vpss" && opt.group == captureGroupForDevice(opt.device)) {
     if (opt.channel == tdl_app::DualOsLayout::kAiChannel &&
         opt.width == tdl_app::DualOsLayout::kAiWidth &&
         opt.height == tdl_app::DualOsLayout::kAiHeight) {
@@ -132,6 +144,12 @@ std::string describeCameraPreset(const CommonOptions &opt) {
       opt.width == tdl_app::DualOsLayout::kDisplaySourceWidth &&
       opt.height == tdl_app::DualOsLayout::kDisplaySourceHeight) {
     return "screen";
+  }
+  if (opt.backend == "vpss" && opt.group == captureGroupForDevice(opt.device) &&
+      opt.channel == tdl_app::DualOsLayout::kRgbChannel &&
+      opt.width == tdl_app::DualOsLayout::kRgbWidth &&
+      opt.height == tdl_app::DualOsLayout::kRgbHeight) {
+    return "rgb";
   }
 
   std::ostringstream oss;
@@ -175,6 +193,12 @@ bool parseCommonArgs(int argc, char **argv, int *index, CommonOptions *opt,
     const char *v = valueForArg(argc, argv, index, "--device", error);
     if (!v) return false;
     opt->device = std::atoi(v);
+    if (opt->device != 0 && opt->device != 1) {
+      if (error) {
+        *error = "--device must be 0 (front) or 1 (rear)";
+      }
+      return false;
+    }
   } else if (arg == "--group") {
     const char *v = valueForArg(argc, argv, index, "--group", error);
     if (!v) return false;
@@ -251,6 +275,11 @@ tdl_app::Camera::Config makeCameraConfig(const CommonOptions &opt) {
                               opt.pixel_format, opt.timeout_ms);
   }
   camera_config.device = opt.device;
+  if (camera_config.backend == tdl_app::Camera::Backend::Vpss &&
+      camera_config.group == tdl_app::DualOsLayout::kCaptureVpssGroup &&
+      opt.device == 1) {
+    camera_config.group = tdl_app::DualOsLayout::kRearVpssGroup;
+  }
   return camera_config;
 }
 
@@ -461,5 +490,3 @@ void dumpCameraDiagnostics() {
 }
 
 }  // namespace camera_demo_support
-
-

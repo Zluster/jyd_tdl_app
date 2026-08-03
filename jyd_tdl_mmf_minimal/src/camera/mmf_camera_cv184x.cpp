@@ -41,6 +41,7 @@ struct mmf_camera {
   explicit mmf_camera(const mmf_camera_config_t& cfg)
       : config(cfg),
         camera(mmf_cvi::Camera::forSource(to_native_source(cfg.source),
+                                          static_cast<int>(cfg.device),
                                           static_cast<int>(cfg.timeout_ms))) {}
   mmf_camera_config_t config;
   mmf_cvi::Camera camera;
@@ -256,14 +257,11 @@ mmf_result_t mmf_camera_get_default_config(mmf_camera_source_t source,
     return MMF_EINVAL;
   std::memset(config, 0, sizeof(*config));
   config->source = source;
+  config->device = MMF_CAMERA_DEVICE_FRONT;
   config->timeout_ms = 1000;
   switch (source) {
     case MMF_CAMERA_SRC_MAIN:
-      config->width = mmf_cvi::DualOsLayout::kMainWidth;
-      config->height = mmf_cvi::DualOsLayout::kMainHeight;
-      config->pixel_format = MMF_PIXFMT_NV12;
-      config->scale_mode = MMF_SCALE_STRETCH;
-      break;
+      return MMF_ENOTSUP;
     case MMF_CAMERA_SRC_AI:
       config->width = mmf_cvi::DualOsLayout::kAiWidth;
       config->height = mmf_cvi::DualOsLayout::kAiHeight;
@@ -288,6 +286,12 @@ mmf_result_t mmf_camera_get_default_config(mmf_camera_source_t source,
       config->pixel_format = MMF_PIXFMT_NV12;
       config->scale_mode = MMF_SCALE_FIT_BLACK;
       break;
+    case MMF_CAMERA_SRC_RGB:
+      config->width = mmf_cvi::DualOsLayout::kRgbWidth;
+      config->height = mmf_cvi::DualOsLayout::kRgbHeight;
+      config->pixel_format = MMF_PIXFMT_RGB888_PLANAR;
+      config->scale_mode = MMF_SCALE_STRETCH;
+      break;
     default:
       return MMF_EINVAL;
   }
@@ -297,6 +301,13 @@ mmf_result_t mmf_camera_get_default_config(mmf_camera_source_t source,
 mmf_result_t mmf_camera_open(const mmf_camera_config_t* config, mmf_camera_t** camera) {
   if (config == nullptr || camera == nullptr)
     return MMF_EINVAL;
+  if (config->device != MMF_CAMERA_DEVICE_FRONT &&
+      config->device != MMF_CAMERA_DEVICE_REAR) {
+    return MMF_EINVAL;
+  }
+  if (config->source == MMF_CAMERA_SRC_MAIN) {
+    return MMF_ENOTSUP;
+  }
   std::unique_ptr<mmf_camera_t> ptr(new mmf_camera_t(*config));
   std::string error;
   if (!ptr->camera.open(&error)) {
@@ -320,16 +331,29 @@ mmf_result_t mmf_camera_get_status(mmf_camera_t* camera, mmf_camera_status_t* st
   std::memset(status, 0, sizeof(*status));
   status->opened = camera->opened ? MMF_TRUE : MMF_FALSE;
   status->sensor_online = MMF_TRUE;
+  status->sensor_id = camera->config.device;
   status->active_config = camera->config;
   return MMF_OK;
 }
 
 mmf_result_t mmf_camera_list_outputs(mmf_camera_output_desc_t* outputs, size_t capacity,
                                      size_t* count) {
-  static const mmf_camera_source_t sources[] = {MMF_CAMERA_SRC_MAIN, MMF_CAMERA_SRC_AI,
-                                                MMF_CAMERA_SRC_LIVE, MMF_CAMERA_SRC_SUBRGB,
-                                                MMF_CAMERA_SRC_SCREEN};
-  static const char* names[] = {"main", "ai", "live", "subrgb", "screen"};
+  static const struct {
+    mmf_camera_source_t source;
+    mmf_camera_device_t device;
+    const char* name;
+  } sources[] = {
+      {MMF_CAMERA_SRC_AI, MMF_CAMERA_DEVICE_FRONT, "ai"},
+      {MMF_CAMERA_SRC_LIVE, MMF_CAMERA_DEVICE_FRONT, "front_live"},
+      {MMF_CAMERA_SRC_SUBRGB, MMF_CAMERA_DEVICE_FRONT, "subrgb"},
+      {MMF_CAMERA_SRC_SCREEN, MMF_CAMERA_DEVICE_FRONT, "screen"},
+      {MMF_CAMERA_SRC_RGB, MMF_CAMERA_DEVICE_FRONT, "rgb"},
+      {MMF_CAMERA_SRC_AI, MMF_CAMERA_DEVICE_REAR, "rear_ai"},
+      {MMF_CAMERA_SRC_LIVE, MMF_CAMERA_DEVICE_REAR, "rear_live"},
+      {MMF_CAMERA_SRC_SUBRGB, MMF_CAMERA_DEVICE_REAR, "rear_subrgb"},
+      {MMF_CAMERA_SRC_SCREEN, MMF_CAMERA_DEVICE_REAR, "rear_screen"},
+      {MMF_CAMERA_SRC_RGB, MMF_CAMERA_DEVICE_REAR, "rear_rgb"},
+  };
   if (count != nullptr)
     *count = sizeof(sources) / sizeof(sources[0]);
   if (outputs == nullptr)
@@ -338,22 +362,20 @@ mmf_result_t mmf_camera_list_outputs(mmf_camera_output_desc_t* outputs, size_t c
     return MMF_EINVAL;
   for (size_t i = 0; i < sizeof(sources) / sizeof(sources[0]); ++i) {
     mmf_camera_config_t cfg;
-    mmf_camera_get_default_config(sources[i], &cfg);
+    mmf_camera_get_default_config(sources[i].source, &cfg);
+    cfg.device = sources[i].device;
     std::memset(&outputs[i], 0, sizeof(outputs[i]));
-    outputs[i].source = sources[i];
-    outputs[i].name = names[i];
+    outputs[i].source = sources[i].source;
+    outputs[i].device = sources[i].device;
+    outputs[i].name = sources[i].name;
     outputs[i].width = cfg.width;
     outputs[i].height = cfg.height;
     outputs[i].pixel_format = cfg.pixel_format;
     outputs[i].scale_mode = cfg.scale_mode;
     outputs[i].depth = 2;
     outputs[i].available = MMF_TRUE;
-    outputs[i].vpss_group = sources[i] == MMF_CAMERA_SRC_SCREEN ? 1 : 0;
-    outputs[i].vpss_channel = sources[i] == MMF_CAMERA_SRC_MAIN     ? 0
-                              : sources[i] == MMF_CAMERA_SRC_AI     ? 1
-                              : sources[i] == MMF_CAMERA_SRC_LIVE   ? 2
-                              : sources[i] == MMF_CAMERA_SRC_SUBRGB ? 3
-                                                                    : 0;
+    (void)source_to_vpss(sources[i].source, sources[i].device,
+                         &outputs[i].vpss_group, &outputs[i].vpss_channel);
     VPSS_CHN_ATTR_S attr;
     std::memset(&attr, 0, sizeof(attr));
     if (CVI_VPSS_GetChnAttr(outputs[i].vpss_group, outputs[i].vpss_channel, &attr) == CVI_SUCCESS) {
@@ -416,7 +438,7 @@ mmf_result_t mmf_camera_set_scale_mode(mmf_camera_source_t source, mmf_scale_mod
   }
   int group = 0;
   int channel = 0;
-  if (!source_to_vpss(source, &group, &channel))
+  if (!source_to_vpss(source, MMF_CAMERA_DEVICE_FRONT, &group, &channel))
     return MMF_EINVAL;
   VPSS_CHN_ATTR_S attr;
   std::memset(&attr, 0, sizeof(attr));
@@ -439,7 +461,7 @@ mmf_result_t mmf_camera_get_scale_mode(mmf_camera_source_t source, mmf_scale_mod
     return MMF_EINVAL;
   int group = 0;
   int channel = 0;
-  if (!source_to_vpss(source, &group, &channel))
+  if (!source_to_vpss(source, MMF_CAMERA_DEVICE_FRONT, &group, &channel))
     return MMF_EINVAL;
   VPSS_CHN_ATTR_S attr;
   std::memset(&attr, 0, sizeof(attr));
@@ -603,27 +625,32 @@ mmf_result_t mmf_camera_get_wb(mmf_camera_wb_t* wb) {
 static mmf_result_t set_all_capture_orientation(bool mirror, bool flip, bool set_mirror,
                                                 bool set_flip) {
   const int channels[] = {
-      mmf_cvi::DualOsLayout::kMainChannel,
       mmf_cvi::DualOsLayout::kAiChannel,
       mmf_cvi::DualOsLayout::kLiveChannel,
       mmf_cvi::DualOsLayout::kSubRgbChannel,
   };
-  for (size_t i = 0; i < sizeof(channels) / sizeof(channels[0]); ++i) {
-    VPSS_CHN_ATTR_S attr;
-    std::memset(&attr, 0, sizeof(attr));
-    int ret = CVI_VPSS_GetChnAttr(mmf_cvi::DualOsLayout::kCaptureVpssGroup, channels[i], &attr);
-    if (ret != CVI_SUCCESS) {
-      set_last_error("CVI_VPSS_GetChnAttr orientation failed, ret=" + std::to_string(ret));
-      return MMF_EIO;
-    }
-    if (set_mirror)
-      attr.bMirror = mirror ? CVI_TRUE : CVI_FALSE;
-    if (set_flip)
-      attr.bFlip = flip ? CVI_TRUE : CVI_FALSE;
-    ret = CVI_VPSS_SetChnAttr(mmf_cvi::DualOsLayout::kCaptureVpssGroup, channels[i], &attr);
-    if (ret != CVI_SUCCESS) {
-      set_last_error("CVI_VPSS_SetChnAttr orientation failed, ret=" + std::to_string(ret));
-      return MMF_EIO;
+  const int groups[] = {
+      mmf_cvi::DualOsLayout::kCaptureVpssGroup,
+      mmf_cvi::DualOsLayout::kRearVpssGroup,
+  };
+  for (size_t group = 0; group < sizeof(groups) / sizeof(groups[0]); ++group) {
+    for (size_t i = 0; i < sizeof(channels) / sizeof(channels[0]); ++i) {
+      VPSS_CHN_ATTR_S attr;
+      std::memset(&attr, 0, sizeof(attr));
+      int ret = CVI_VPSS_GetChnAttr(groups[group], channels[i], &attr);
+      if (ret != CVI_SUCCESS) {
+        set_last_error("CVI_VPSS_GetChnAttr orientation failed, ret=" + std::to_string(ret));
+        return MMF_EIO;
+      }
+      if (set_mirror)
+        attr.bMirror = mirror ? CVI_TRUE : CVI_FALSE;
+      if (set_flip)
+        attr.bFlip = flip ? CVI_TRUE : CVI_FALSE;
+      ret = CVI_VPSS_SetChnAttr(groups[group], channels[i], &attr);
+      if (ret != CVI_SUCCESS) {
+        set_last_error("CVI_VPSS_SetChnAttr orientation failed, ret=" + std::to_string(ret));
+        return MMF_EIO;
+      }
     }
   }
   return MMF_OK;
@@ -639,7 +666,7 @@ mmf_result_t mmf_camera_get_flip(mmf_bool_t* enable) {
   VPSS_CHN_ATTR_S attr;
   std::memset(&attr, 0, sizeof(attr));
   int ret = CVI_VPSS_GetChnAttr(mmf_cvi::DualOsLayout::kCaptureVpssGroup,
-                                mmf_cvi::DualOsLayout::kMainChannel, &attr);
+                                mmf_cvi::DualOsLayout::kLiveChannel, &attr);
   if (ret != CVI_SUCCESS)
     return MMF_EIO;
   *enable = attr.bFlip ? MMF_TRUE : MMF_FALSE;
@@ -656,7 +683,7 @@ mmf_result_t mmf_camera_get_mirror(mmf_bool_t* enable) {
   VPSS_CHN_ATTR_S attr;
   std::memset(&attr, 0, sizeof(attr));
   int ret = CVI_VPSS_GetChnAttr(mmf_cvi::DualOsLayout::kCaptureVpssGroup,
-                                mmf_cvi::DualOsLayout::kMainChannel, &attr);
+                                mmf_cvi::DualOsLayout::kLiveChannel, &attr);
   if (ret != CVI_SUCCESS)
     return MMF_EIO;
   *enable = attr.bMirror ? MMF_TRUE : MMF_FALSE;

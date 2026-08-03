@@ -5,7 +5,7 @@
 
 namespace mmf_cvi {
 
-enum class CameraSourceId { Ai, Live, Main, SubRgb, Screen };
+enum class CameraSourceId { Ai, Live, SubRgb, Screen, Rgb };
 
 bool ensureMmfRuntimeInitialized(std::string* error = nullptr);
 void setError(std::string* error, const std::string& message);
@@ -27,6 +27,7 @@ class Camera {
   Camera(const Camera&) = delete;
   Camera& operator=(const Camera&) = delete;
   static Config forSource(CameraSourceId source, int timeout_ms = 1000);
+  static Config forSource(CameraSourceId source, int camera_device, int timeout_ms);
   bool open(std::string* error = nullptr);
   bool read(Frame* frame, std::string* error = nullptr);
   void releaseFrame();
@@ -42,7 +43,7 @@ class Camera {
 
 class Display {
  public:
-  enum class Input { None, Live, Ai, Main, SubRgb, Screen };
+  enum class Input { None, Live, Ai, SubRgb, Screen };
   struct Config {
     int device = DualOsLayout::kVoDevice;
     int layer = 0;

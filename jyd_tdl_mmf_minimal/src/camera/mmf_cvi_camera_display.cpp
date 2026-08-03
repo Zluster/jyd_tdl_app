@@ -1,6 +1,167 @@
 #include "mmf_cv184x_common.hpp"
 
+#include "cvi_comm_video.h"
+#include "cvi_sys.h"
+#include "cvi_vb.h"
+
 namespace mmf_cvi {
+namespace {
+
+uint8_t clampToByte(int value) {
+  return static_cast<uint8_t>(value < 0 ? 0 : (value > 255 ? 255 : value));
+}
+
+bool isRgbPlanar(PIXEL_FORMAT_E format) {
+  return format == PIXEL_FORMAT_RGB_888_PLANAR ||
+         format == PIXEL_FORMAT_BGR_888_PLANAR;
+}
+
+struct TemporaryNv12Frame {
+  VIDEO_FRAME_INFO_S frame{};
+  VB_BLK block = VB_INVALID_HANDLE;
+
+  void release() {
+    for (int plane = 0; plane < 2; ++plane) {
+      if (frame.stVFrame.pu8VirAddr[plane] != nullptr) {
+        CVI_SYS_Munmap(frame.stVFrame.pu8VirAddr[plane],
+                       frame.stVFrame.u32Length[plane]);
+        frame.stVFrame.pu8VirAddr[plane] = nullptr;
+      }
+    }
+    if (block != VB_INVALID_HANDLE) {
+      CVI_VB_ReleaseBlock(block);
+      block = VB_INVALID_HANDLE;
+    }
+    std::memset(&frame, 0, sizeof(frame));
+  }
+
+  ~TemporaryNv12Frame() { release(); }
+};
+
+bool convertRgbPlanarToNv12(const Frame& source, TemporaryNv12Frame* destination,
+                            std::string* error) {
+  if (destination == nullptr || source.native == nullptr) {
+    setError(error, "RGB-to-NV12 conversion received an invalid frame");
+    return false;
+  }
+
+  const auto* input = static_cast<const VIDEO_FRAME_INFO_S*>(source.native);
+  const VIDEO_FRAME_S& in = input->stVFrame;
+  if (!isRgbPlanar(in.enPixelFormat) || in.u32Width == 0 || in.u32Height == 0 ||
+      (in.u32Width & 1U) != 0 || (in.u32Height & 1U) != 0) {
+    setError(error, "RGB-to-NV12 conversion requires an even-sized RGB planar frame");
+    return false;
+  }
+  for (int plane = 0; plane < 3; ++plane) {
+    if (in.u64PhyAddr[plane] == 0 || in.u32Length[plane] == 0 ||
+        in.u32Stride[plane] < in.u32Width) {
+      setError(error, "RGB-to-NV12 conversion received invalid RGB planar metadata");
+      return false;
+    }
+  }
+
+  VB_CAL_CONFIG_S calc;
+  COMMON_GetPicBufferConfig(in.u32Width, in.u32Height, PIXEL_FORMAT_NV12,
+                            DATA_BITWIDTH_8, COMPRESS_MODE_NONE, DEFAULT_ALIGN, &calc);
+
+  VIDEO_FRAME_S& out = destination->frame.stVFrame;
+  out.enCompressMode = COMPRESS_MODE_NONE;
+  out.enPixelFormat = PIXEL_FORMAT_NV12;
+  out.enVideoFormat = VIDEO_FORMAT_LINEAR;
+  out.enColorGamut = COLOR_GAMUT_BT709;
+  out.enDynamicRange = DYNAMIC_RANGE_SDR8;
+  out.u32Width = in.u32Width;
+  out.u32Height = in.u32Height;
+  out.u32Stride[0] = calc.u32MainStride;
+  out.u32Stride[1] = calc.u32CStride;
+  out.u32Length[0] = calc.u32MainYSize;
+  out.u32Length[1] = calc.u32MainCSize;
+
+  destination->block = CVI_VB_GetBlock(VB_INVALID_POOLID, calc.u32VBSize);
+  if (destination->block == VB_INVALID_HANDLE) {
+    setError(error, "CVI_VB_GetBlock for RGB-to-NV12 snapshot failed");
+    return false;
+  }
+  destination->frame.u32PoolId = CVI_VB_Handle2PoolId(destination->block);
+  out.u64PhyAddr[0] = CVI_VB_Handle2PhysAddr(destination->block);
+  out.u64PhyAddr[1] = out.u64PhyAddr[0] + ALIGN(calc.u32MainYSize, calc.u16AddrAlign);
+  out.pu8VirAddr[0] = static_cast<CVI_U8*>(CVI_SYS_MmapCache(out.u64PhyAddr[0], out.u32Length[0]));
+  out.pu8VirAddr[1] = static_cast<CVI_U8*>(CVI_SYS_MmapCache(out.u64PhyAddr[1], out.u32Length[1]));
+  if (out.pu8VirAddr[0] == nullptr || out.pu8VirAddr[1] == nullptr) {
+    setError(error, "CVI_SYS_MmapCache for RGB-to-NV12 snapshot failed");
+    return false;
+  }
+
+  uint8_t* rgb[3] = {nullptr, nullptr, nullptr};
+  for (int plane = 0; plane < 3; ++plane) {
+    rgb[plane] = static_cast<uint8_t*>(CVI_SYS_Mmap(in.u64PhyAddr[plane], in.u32Length[plane]));
+    if (rgb[plane] == nullptr) {
+      for (int mapped = 0; mapped < plane; ++mapped) {
+        CVI_SYS_Munmap(rgb[mapped], in.u32Length[mapped]);
+      }
+      setError(error, "CVI_SYS_Mmap for RGB planar source failed");
+      return false;
+    }
+    CVI_SYS_IonInvalidateCache(in.u64PhyAddr[plane], rgb[plane], in.u32Length[plane]);
+  }
+
+  std::memset(out.pu8VirAddr[0], 0, out.u32Length[0]);
+  std::memset(out.pu8VirAddr[1], 128, out.u32Length[1]);
+  const bool bgr = in.enPixelFormat == PIXEL_FORMAT_BGR_888_PLANAR;
+  const auto readRgb = [&rgb, &in, bgr](uint32_t x, uint32_t y, int* r, int* g, int* b) {
+    const uint32_t offset0 = y * in.u32Stride[0] + x;
+    const uint32_t offset1 = y * in.u32Stride[1] + x;
+    const uint32_t offset2 = y * in.u32Stride[2] + x;
+    if (bgr) {
+      *b = rgb[0][offset0];
+      *g = rgb[1][offset1];
+      *r = rgb[2][offset2];
+    } else {
+      *r = rgb[0][offset0];
+      *g = rgb[1][offset1];
+      *b = rgb[2][offset2];
+    }
+  };
+
+  for (uint32_t y = 0; y < in.u32Height; ++y) {
+    uint8_t* y_row = out.pu8VirAddr[0] + y * out.u32Stride[0];
+    for (uint32_t x = 0; x < in.u32Width; ++x) {
+      int r, g, b;
+      readRgb(x, y, &r, &g, &b);
+      y_row[x] = clampToByte((77 * r + 150 * g + 29 * b + 128) >> 8);
+    }
+  }
+  for (uint32_t y = 0; y < in.u32Height; y += 2) {
+    uint8_t* uv_row = out.pu8VirAddr[1] + (y / 2) * out.u32Stride[1];
+    for (uint32_t x = 0; x < in.u32Width; x += 2) {
+      int r_sum = 0, g_sum = 0, b_sum = 0;
+      for (uint32_t dy = 0; dy < 2; ++dy) {
+        for (uint32_t dx = 0; dx < 2; ++dx) {
+          int r, g, b;
+          readRgb(x + dx, y + dy, &r, &g, &b);
+          r_sum += r;
+          g_sum += g;
+          b_sum += b;
+        }
+      }
+      const int r = (r_sum + 2) / 4;
+      const int g = (g_sum + 2) / 4;
+      const int b = (b_sum + 2) / 4;
+      uv_row[x] = clampToByte(((-43 * r - 85 * g + 128 * b + 128) >> 8) + 128);
+      uv_row[x + 1] = clampToByte(((128 * r - 107 * g - 21 * b + 128) >> 8) + 128);
+    }
+  }
+
+  for (int plane = 0; plane < 3; ++plane) {
+    CVI_SYS_Munmap(rgb[plane], in.u32Length[plane]);
+  }
+  CVI_SYS_IonFlushCache(out.u64PhyAddr[0], out.pu8VirAddr[0], out.u32Length[0]);
+  CVI_SYS_IonFlushCache(out.u64PhyAddr[1], out.pu8VirAddr[1], out.u32Length[1]);
+  return true;
+}
+
+}  // namespace
+
 void setError(std::string* error, const std::string& message) {
   if (error)
     *error = message;
@@ -49,25 +210,24 @@ Camera::~Camera() {
   close();
 }
 Camera::Config Camera::forSource(CameraSourceId source, int timeout_ms) {
+  return forSource(source, 0, timeout_ms);
+}
+
+Camera::Config Camera::forSource(CameraSourceId source, int camera_device, int timeout_ms) {
   Config c;
   c.timeout_ms = timeout_ms;
   switch (source) {
-    case CameraSourceId::Main:
-      c.group = DualOsLayout::kCaptureVpssGroup;
-      c.channel = DualOsLayout::kMainChannel;
-      c.width = DualOsLayout::kMainWidth;
-      c.height = DualOsLayout::kMainHeight;
-      c.pixel_format = PixelFormat::NV12;
-      break;
     case CameraSourceId::Ai:
-      c.group = DualOsLayout::kCaptureVpssGroup;
+      c.group = camera_device == 1 ? DualOsLayout::kRearVpssGroup
+                                   : DualOsLayout::kCaptureVpssGroup;
       c.channel = DualOsLayout::kAiChannel;
       c.width = DualOsLayout::kAiWidth;
       c.height = DualOsLayout::kAiHeight;
       c.pixel_format = PixelFormat::RGB888_PLANAR;
       break;
     case CameraSourceId::SubRgb:
-      c.group = DualOsLayout::kCaptureVpssGroup;
+      c.group = camera_device == 1 ? DualOsLayout::kRearVpssGroup
+                                   : DualOsLayout::kCaptureVpssGroup;
       c.channel = DualOsLayout::kSubRgbChannel;
       c.width = DualOsLayout::kSubRgbWidth;
       c.height = DualOsLayout::kSubRgbHeight;
@@ -80,9 +240,18 @@ Camera::Config Camera::forSource(CameraSourceId source, int timeout_ms) {
       c.height = DualOsLayout::kScreenHeight;
       c.pixel_format = PixelFormat::NV12;
       break;
+    case CameraSourceId::Rgb:
+      c.group = camera_device == 1 ? DualOsLayout::kRearVpssGroup
+                                   : DualOsLayout::kCaptureVpssGroup;
+      c.channel = DualOsLayout::kRgbChannel;
+      c.width = DualOsLayout::kRgbWidth;
+      c.height = DualOsLayout::kRgbHeight;
+      c.pixel_format = PixelFormat::RGB888_PLANAR;
+      break;
     case CameraSourceId::Live:
     default:
-      c.group = DualOsLayout::kCaptureVpssGroup;
+      c.group = camera_device == 1 ? DualOsLayout::kRearVpssGroup
+                                   : DualOsLayout::kCaptureVpssGroup;
       c.channel = DualOsLayout::kLiveChannel;
       c.width = DualOsLayout::kLiveWidth;
       c.height = DualOsLayout::kLiveHeight;
@@ -136,9 +305,20 @@ bool Camera::snapshot(const std::string& path, std::string* error) {
   Frame frame;
   if (!read(&frame, error))
     return false;
+  TemporaryNv12Frame converted;
+  Frame encode_frame = frame;
+  const auto* native = static_cast<const VIDEO_FRAME_INFO_S*>(frame.native);
+  if (isRgbPlanar(native->stVFrame.enPixelFormat)) {
+    if (!convertRgbPlanarToNv12(frame, &converted, error)) {
+      releaseFrame();
+      return false;
+    }
+    encode_frame.native = &converted.frame;
+    encode_frame.format = PIXEL_FORMAT_NV12;
+  }
   VencChannel venc(VencChannel::mjpeg(0, frame.width, frame.height, 0, 25, 25, 92));
   VencChannel::EncodedPacket packet;
-  bool ok = venc.open(error) && venc.encode(frame, &packet, error);
+  bool ok = venc.open(error) && venc.encode(encode_frame, &packet, error);
   if (ok) {
     FILE* fp = std::fopen(path.c_str(), "wb");
     if (!fp) {
@@ -292,8 +472,6 @@ bool Display::open(std::string* error) {
 CameraSourceId Display::toCameraSource(Input input) {
   if (input == Input::Ai)
     return CameraSourceId::Ai;
-  if (input == Input::Main)
-    return CameraSourceId::Main;
   if (input == Input::SubRgb)
     return CameraSourceId::SubRgb;
   if (input == Input::Screen)
@@ -331,8 +509,8 @@ bool Display::hideLive(std::string* error) {
   return true;
 }
 bool Display::snapshot(const std::string& path, int timeout_ms, std::string* error) {
-  Camera camera(
-      Camera::forSource(toCameraSource(input_ == Input::None ? Input::Live : input_), timeout_ms));
+  const Input snapshot_input = input_ == Input::None ? Input::Live : input_;
+  Camera camera(Camera::forSource(toCameraSource(snapshot_input), timeout_ms));
   return camera.snapshot(path, error);
 }
 void Display::close() {

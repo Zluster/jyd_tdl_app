@@ -25,40 +25,51 @@ mmf_cvi::CameraSourceId to_native_source(mmf_camera_source_t source) {
       return mmf_cvi::CameraSourceId::Ai;
     case MMF_CAMERA_SRC_LIVE:
       return mmf_cvi::CameraSourceId::Live;
-    case MMF_CAMERA_SRC_MAIN:
-      return mmf_cvi::CameraSourceId::Main;
     case MMF_CAMERA_SRC_SUBRGB:
       return mmf_cvi::CameraSourceId::SubRgb;
     case MMF_CAMERA_SRC_SCREEN:
       return mmf_cvi::CameraSourceId::Screen;
+    case MMF_CAMERA_SRC_RGB:
+      return mmf_cvi::CameraSourceId::Rgb;
   }
   return mmf_cvi::CameraSourceId::Live;
 }
 
-bool source_to_vpss(mmf_camera_source_t source, int* group, int* channel) {
+bool source_to_vpss(mmf_camera_source_t source, mmf_camera_device_t device,
+                    int* group, int* channel) {
   if (group == nullptr || channel == nullptr) {
     return false;
   }
+  if (device != MMF_CAMERA_DEVICE_FRONT && device != MMF_CAMERA_DEVICE_REAR) {
+    return false;
+  }
+  if (source == MMF_CAMERA_SRC_MAIN) {
+    return false;
+  }
   switch (source) {
-    case MMF_CAMERA_SRC_MAIN:
-      *group = mmf_cvi::DualOsLayout::kCaptureVpssGroup;
-      *channel = mmf_cvi::DualOsLayout::kMainChannel;
-      return true;
     case MMF_CAMERA_SRC_AI:
-      *group = mmf_cvi::DualOsLayout::kCaptureVpssGroup;
+      *group = device == MMF_CAMERA_DEVICE_REAR ? mmf_cvi::DualOsLayout::kRearVpssGroup
+                                                 : mmf_cvi::DualOsLayout::kCaptureVpssGroup;
       *channel = mmf_cvi::DualOsLayout::kAiChannel;
       return true;
     case MMF_CAMERA_SRC_LIVE:
-      *group = mmf_cvi::DualOsLayout::kCaptureVpssGroup;
+      *group = device == MMF_CAMERA_DEVICE_REAR ? mmf_cvi::DualOsLayout::kRearVpssGroup
+                                                : mmf_cvi::DualOsLayout::kCaptureVpssGroup;
       *channel = mmf_cvi::DualOsLayout::kLiveChannel;
       return true;
     case MMF_CAMERA_SRC_SUBRGB:
-      *group = mmf_cvi::DualOsLayout::kCaptureVpssGroup;
+      *group = device == MMF_CAMERA_DEVICE_REAR ? mmf_cvi::DualOsLayout::kRearVpssGroup
+                                                 : mmf_cvi::DualOsLayout::kCaptureVpssGroup;
       *channel = mmf_cvi::DualOsLayout::kSubRgbChannel;
       return true;
     case MMF_CAMERA_SRC_SCREEN:
       *group = mmf_cvi::DualOsLayout::kDisplayVpssGroup;
       *channel = mmf_cvi::DualOsLayout::kDisplayChannel;
+      return true;
+    case MMF_CAMERA_SRC_RGB:
+      *group = device == MMF_CAMERA_DEVICE_REAR ? mmf_cvi::DualOsLayout::kRearVpssGroup
+                                                 : mmf_cvi::DualOsLayout::kCaptureVpssGroup;
+      *channel = mmf_cvi::DualOsLayout::kRgbChannel;
       return true;
   }
   return false;

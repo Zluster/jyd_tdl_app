@@ -22,6 +22,8 @@ static mmf_camera_source_t parse_source(const char* name) {
     return MMF_CAMERA_SRC_AI;
   if (strcmp(name, "subrgb") == 0)
     return MMF_CAMERA_SRC_SUBRGB;
+  if (strcmp(name, "rgb") == 0)
+    return MMF_CAMERA_SRC_RGB;
   if (strcmp(name, "screen") == 0)
     return MMF_CAMERA_SRC_SCREEN;
   return MMF_CAMERA_SRC_LIVE;
@@ -39,6 +41,8 @@ static const char* source_name(mmf_camera_source_t source) {
       return "subrgb";
     case MMF_CAMERA_SRC_SCREEN:
       return "screen";
+    case MMF_CAMERA_SRC_RGB:
+      return "rgb";
   }
   return "live";
 }
@@ -78,6 +82,8 @@ int main(int argc, char** argv) {
   mmf_display_t* display = 0;
   mmf_camera_source_t source = argc >= 2 ? parse_source(argv[1]) : MMF_CAMERA_SRC_LIVE;
   int enable_osd = argc >= 3 ? atoi(argv[2]) : 1;
+  mmf_camera_device_t device = argc >= 4 ? (mmf_camera_device_t)atoi(argv[3])
+                                          : MMF_CAMERA_DEVICE_FRONT;
   const char* osd_path = "/tmp/mmf_display_osd.ppm";
   mmf_system_config_t sys = {MMF_TRUE, MMF_TRUE, 3000};
 
@@ -91,8 +97,9 @@ int main(int argc, char** argv) {
     mmf_system_deinit();
     return 1;
   }
-  if (mmf_display_bind_camera(display, source) != MMF_OK) {
-    printf("display bind %s failed: %s\n", source_name(source), mmf_system_last_error());
+  if (mmf_display_bind_camera_device(display, source, device) != MMF_OK) {
+    printf("display bind %s dev=%d failed: %s\n", source_name(source), device,
+           mmf_system_last_error());
     mmf_display_close(display);
     mmf_system_deinit();
     return 2;
@@ -113,13 +120,13 @@ int main(int argc, char** argv) {
     }
   }
 
-  printf("display started: source=%s osd=%d\n", source_name(source), enable_osd);
+  printf("display started: source=%s dev=%d osd=%d\n", source_name(source), device, enable_osd);
   printf("press Ctrl+C to stop\n");
   while (!g_stop) {
     mmf_display_status_t status;
     if (mmf_display_get_status(display, &status) == MMF_OK) {
-      printf("display status: showing=%d mode=%d source=%s\n", status.showing, status.mode,
-             source_name(status.bound_camera_source));
+      printf("display status: showing=%d mode=%d source=%s dev=%d\n", status.showing,
+             status.mode, source_name(status.bound_camera_source), status.bound_camera_device);
     }
     sleep(3);
   }

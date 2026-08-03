@@ -15,10 +15,17 @@ typedef enum {
   MMF_CAMERA_SRC_MAIN = 2,
   MMF_CAMERA_SRC_SUBRGB = 3,
   MMF_CAMERA_SRC_SCREEN = 4,
+  MMF_CAMERA_SRC_RGB = 5,
 } mmf_camera_source_t;
+
+typedef enum {
+  MMF_CAMERA_DEVICE_FRONT = 0,
+  MMF_CAMERA_DEVICE_REAR = 1,
+} mmf_camera_device_t;
 
 typedef struct {
   mmf_camera_source_t source;
+  mmf_camera_device_t device;
   uint32_t width;
   uint32_t height;
   mmf_pixel_format_t pixel_format;
@@ -35,6 +42,7 @@ typedef struct {
 
 typedef struct {
   mmf_camera_source_t source;
+  mmf_camera_device_t device;
   const char* name;
   int32_t vpss_group;
   int32_t vpss_channel;

@@ -62,7 +62,7 @@ struct TerminalGuard {
 void printUsage() {
   std::cout
       << "Usage:\n"
-      << "  sophpi_camera_demo [--source live|ai|main|subrgb|screen]\n"
+      << "  sophpi_camera_demo [--source live|ai|main|subrgb|screen|rgb]\n"
       << "                     [--album-dir DIR]\n"
       << "                     [--screen-width N] [--screen-height N]\n";
 }

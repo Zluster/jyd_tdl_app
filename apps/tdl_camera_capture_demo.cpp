@@ -20,7 +20,7 @@ struct Options {
 void printUsage() {
   std::cout
       << "Usage:\n"
-      << "  tdl_camera_capture_demo [--source live|ai|main|subrgb|screen]\n"
+      << "  tdl_camera_capture_demo [--source live|ai|main|subrgb|screen|rgb]\n"
       << "                          [default: dual-os MMF frame source]\n"
       << "                          [run from packaged runtime after '. ./env.sh']\n"
       << "                          [--frames N]\n"

@@ -27,6 +27,8 @@ static mmf_camera_source_t parse_source(const char* name) {
     return MMF_CAMERA_SRC_LIVE;
   if (strcmp(name, "subrgb") == 0)
     return MMF_CAMERA_SRC_SUBRGB;
+  if (strcmp(name, "rgb") == 0)
+    return MMF_CAMERA_SRC_RGB;
   if (strcmp(name, "screen") == 0)
     return MMF_CAMERA_SRC_SCREEN;
   return MMF_CAMERA_SRC_LIVE;
@@ -52,22 +54,24 @@ static int system_once(void) {
 }
 
 static int list_outputs(void) {
-  mmf_camera_output_desc_t outputs[8];
+  mmf_camera_output_desc_t outputs[10];
   size_t count = 0;
-  mmf_result_t ret = mmf_camera_list_outputs(outputs, 8, &count);
+  mmf_result_t ret = mmf_camera_list_outputs(outputs, 10, &count);
   if (ret != MMF_OK) {
     printf("list outputs failed: %d\n", ret);
     return 1;
   }
   for (size_t i = 0; i < count; ++i) {
-    printf("%s grp=%d chn=%d %ux%u fmt=%d scale=%d depth=%u available=%d\n", outputs[i].name,
-           outputs[i].vpss_group, outputs[i].vpss_channel, outputs[i].width, outputs[i].height,
-           outputs[i].pixel_format, outputs[i].scale_mode, outputs[i].depth, outputs[i].available);
+    printf("%s dev=%d grp=%d chn=%d %ux%u fmt=%d scale=%d depth=%u available=%d\n",
+           outputs[i].name, outputs[i].device, outputs[i].vpss_group,
+           outputs[i].vpss_channel, outputs[i].width, outputs[i].height,
+           outputs[i].pixel_format, outputs[i].scale_mode, outputs[i].depth,
+           outputs[i].available);
   }
   return 0;
 }
 
-static int snapshot_source(const char* source_name, const char* path) {
+static int snapshot_source(const char* source_name, mmf_camera_device_t device, const char* path) {
   if (strcmp(source_name, "screen") == 0) {
     mmf_display_config_t display_cfg;
     mmf_display_t* display = NULL;
@@ -99,13 +103,15 @@ static int snapshot_source(const char* source_name, const char* path) {
     printf("default config failed: %d\n", ret);
     return 1;
   }
+  cfg.device = device;
   ret = mmf_camera_open(&cfg, &camera);
   if (ret != MMF_OK) {
     printf("camera open failed: %d %s\n", ret, mmf_system_last_error());
     return 1;
   }
   ret = mmf_camera_snapshot(camera, path, MMF_CODEC_JPEG);
-  printf("snapshot %s -> %s: %s (%d)\n", source_name, path, result_name(ret), ret);
+  printf("snapshot %s dev=%d -> %s: %s (%d)\n", source_name, device, path,
+         result_name(ret), ret);
   if (ret != MMF_OK) {
     printf("error: %s\n", mmf_system_last_error());
   }
@@ -919,8 +925,11 @@ int main(int argc, char** argv) {
   if (strcmp(argv[1], "system") == 0) {
     return system_once();
   }
+  if (strcmp(argv[1], "snapshot") == 0 && argc >= 5) {
+    return snapshot_source(argv[2], (mmf_camera_device_t)atoi(argv[3]), argv[4]);
+  }
   if (strcmp(argv[1], "snapshot") == 0 && argc >= 4) {
-    return snapshot_source(argv[2], argv[3]);
+    return snapshot_source(argv[2], MMF_CAMERA_DEVICE_FRONT, argv[3]);
   }
   if (strcmp(argv[1], "frame") == 0) {
     mmf_camera_t* camera = NULL;
@@ -1015,7 +1024,7 @@ int main(int argc, char** argv) {
   printf("  %s system\n", argv[0]);
   printf("  %s list\n", argv[0]);
   printf("  %s frame [main|ai|live|subrgb|screen]\n", argv[0]);
-  printf("  %s snapshot main|ai|live|subrgb|screen out.jpg\n", argv[0]);
+  printf("  %s snapshot ai|live|subrgb|screen|rgb [device:0|1] out.jpg\n", argv[0]);
   printf("  %s audio-read [channels]\n", argv[0]);
   printf("  %s audio-3a-global\n", argv[0]);
   printf("  %s audio-3a\n", argv[0]);

@@ -15,24 +15,22 @@ struct mmf_display {
   mmf_rect_t overlay_rect{};
   bool overlay_active = false;
   bool live_input_bound = false;
+  mmf_cvi::MediaChannel live_input_source{};
+  mmf_cvi::MediaChannel live_input_destination{};
   mmf_display_status_t status{};
 };
 
 namespace {
 
-mmf_cvi::Display::Input to_display_input(mmf_camera_source_t source) {
+mmf_cvi::Display::Input to_display_input(mmf_camera_source_t source,
+                                         mmf_camera_device_t device) {
+  (void)device;
   switch (source) {
-    case MMF_CAMERA_SRC_AI:
-      return mmf_cvi::Display::Input::Ai;
-    case MMF_CAMERA_SRC_MAIN:
-      return mmf_cvi::Display::Input::Main;
-    case MMF_CAMERA_SRC_SUBRGB:
-      return mmf_cvi::Display::Input::SubRgb;
     case MMF_CAMERA_SRC_LIVE:
     case MMF_CAMERA_SRC_SCREEN:
       return mmf_cvi::Display::Input::Screen;
     default:
-      return mmf_cvi::Display::Input::Live;
+      return mmf_cvi::Display::Input::None;
   }
 }
 
@@ -41,13 +39,25 @@ mmf_cvi::MediaChannel display_output_channel() {
                                      mmf_cvi::DualOsLayout::kDisplayChannel);
 }
 
-mmf_result_t bind_live_display_input(mmf_display_t* display) {
-  if (display->live_input_bound)
+mmf_result_t bind_live_display_input(mmf_display_t* display,
+                                     const mmf_cvi::Camera::Config& camera) {
+  const mmf_cvi::MediaChannel source_channel =
+      mmf_cvi::MediaChannel::vpss(camera.group, camera.channel);
+  const mmf_cvi::MediaChannel destination_channel = display_output_channel();
+  if (display->live_input_bound && display->live_input_source.device == source_channel.device &&
+      display->live_input_source.channel == source_channel.channel &&
+      display->live_input_destination.device == destination_channel.device &&
+      display->live_input_destination.channel == destination_channel.channel) {
     return MMF_OK;
-  const MMF_CHN_S source = mmf_cvi::toMmfChannel(
-      mmf_cvi::MediaChannel::vpss(mmf_cvi::DualOsLayout::kCaptureVpssGroup,
-                                  mmf_cvi::DualOsLayout::kLiveChannel));
-  const MMF_CHN_S destination = mmf_cvi::toMmfChannel(display_output_channel());
+  }
+  if (display->live_input_bound) {
+    const MMF_CHN_S old_source = mmf_cvi::toMmfChannel(display->live_input_source);
+    const MMF_CHN_S destination = mmf_cvi::toMmfChannel(display->live_input_destination);
+    (void)CVI_SYS_UnBind(&old_source, &destination);
+    display->live_input_bound = false;
+  }
+  const MMF_CHN_S source = mmf_cvi::toMmfChannel(source_channel);
+  const MMF_CHN_S destination = mmf_cvi::toMmfChannel(destination_channel);
   const int ret = CVI_SYS_Bind(&source, &destination);
   if (ret != CVI_SUCCESS) {
     set_last_error("CVI_SYS_Bind live->display VPSS failed, ret=" +
@@ -55,18 +65,20 @@ mmf_result_t bind_live_display_input(mmf_display_t* display) {
     return MMF_EIO;
   }
   display->live_input_bound = true;
+  display->live_input_source = source_channel;
+  display->live_input_destination = destination_channel;
   return MMF_OK;
 }
 
 void unbind_live_display_input(mmf_display_t* display) {
   if (!display->live_input_bound)
     return;
-  const MMF_CHN_S source = mmf_cvi::toMmfChannel(
-      mmf_cvi::MediaChannel::vpss(mmf_cvi::DualOsLayout::kCaptureVpssGroup,
-                                  mmf_cvi::DualOsLayout::kLiveChannel));
-  const MMF_CHN_S destination = mmf_cvi::toMmfChannel(display_output_channel());
+  const MMF_CHN_S source = mmf_cvi::toMmfChannel(display->live_input_source);
+  const MMF_CHN_S destination = mmf_cvi::toMmfChannel(display->live_input_destination);
   (void)CVI_SYS_UnBind(&source, &destination);
   display->live_input_bound = false;
+  display->live_input_source = mmf_cvi::MediaChannel{};
+  display->live_input_destination = mmf_cvi::MediaChannel{};
 }
 
 void purge_osd_region(uint32_t handle) {
@@ -75,7 +87,7 @@ void purge_osd_region(uint32_t handle) {
   }
 
   const int capture_channels[] = {
-      mmf_cvi::DualOsLayout::kMainChannel,
+      mmf_cvi::DualOsLayout::kRgbChannel,
       mmf_cvi::DualOsLayout::kAiChannel,
       mmf_cvi::DualOsLayout::kLiveChannel,
       mmf_cvi::DualOsLayout::kSubRgbChannel,
@@ -85,6 +97,14 @@ void purge_osd_region(uint32_t handle) {
     std::memset(&chn, 0, sizeof(chn));
     chn.enModId = CVI_ID_VPSS;
     chn.s32DevId = mmf_cvi::DualOsLayout::kCaptureVpssGroup;
+    chn.s32ChnId = capture_channels[i];
+    (void)CVI_RGN_DetachFromChn(static_cast<RGN_HANDLE>(handle), &chn);
+  }
+  for (size_t i = 0; i < sizeof(capture_channels) / sizeof(capture_channels[0]); ++i) {
+    MMF_CHN_S chn;
+    std::memset(&chn, 0, sizeof(chn));
+    chn.enModId = CVI_ID_VPSS;
+    chn.s32DevId = mmf_cvi::DualOsLayout::kRearVpssGroup;
     chn.s32ChnId = capture_channels[i];
     (void)CVI_RGN_DetachFromChn(static_cast<RGN_HANDLE>(handle), &chn);
   }
@@ -153,7 +173,8 @@ static mmf_result_t show_image_via_osd(mmf_display_t* display, const char* path,
     if (display->status.mode == MMF_DISPLAY_MODE_CAMERA_BIND) {
       int group = 0;
       int channel = 0;
-      if (source_to_vpss(display->status.bound_camera_source, &group, &channel)) {
+      if (source_to_vpss(display->status.bound_camera_source,
+                         display->status.bound_camera_device, &group, &channel)) {
         osd_channel = mmf_cvi::MediaChannel::vpss(group, channel);
       }
     }
@@ -325,19 +346,34 @@ mmf_result_t mmf_display_set_window(mmf_display_t* display, const mmf_rect_t* wi
 }
 
 mmf_result_t mmf_display_bind_camera(mmf_display_t* display, mmf_camera_source_t source) {
+  return mmf_display_bind_camera_device(display, source, MMF_CAMERA_DEVICE_FRONT);
+}
+
+mmf_result_t mmf_display_bind_camera_device(mmf_display_t* display,
+                                            mmf_camera_source_t source,
+                                            mmf_camera_device_t device) {
   if (display == nullptr)
     return MMF_EINVAL;
+  if (device != MMF_CAMERA_DEVICE_FRONT && device != MMF_CAMERA_DEVICE_REAR)
+    return MMF_EINVAL;
+  if (source != MMF_CAMERA_SRC_LIVE && source != MMF_CAMERA_SRC_SCREEN)
+    return MMF_ENOTSUP;
   const bool use_live_input =
       source == MMF_CAMERA_SRC_LIVE || source == MMF_CAMERA_SRC_SCREEN;
   if (use_live_input) {
-    const mmf_result_t ret = bind_live_display_input(display);
+    const mmf_cvi::Camera::Config camera =
+        mmf_cvi::Camera::forSource(source == MMF_CAMERA_SRC_SCREEN
+                                       ? mmf_cvi::CameraSourceId::Live
+                                       : to_native_source(source),
+                                   static_cast<int>(device), 1000);
+    const mmf_result_t ret = bind_live_display_input(display, camera);
     if (ret != MMF_OK)
       return ret;
   } else {
     unbind_live_display_input(display);
   }
   std::string error;
-  bool ok = display->display.show(to_display_input(source), &error);
+  bool ok = display->display.show(to_display_input(source, device), &error);
   if (!ok) {
     if (use_live_input)
       unbind_live_display_input(display);
@@ -346,6 +382,7 @@ mmf_result_t mmf_display_bind_camera(mmf_display_t* display, mmf_camera_source_t
   display->status.showing = MMF_TRUE;
   display->status.mode = MMF_DISPLAY_MODE_CAMERA_BIND;
   display->status.bound_camera_source = source;
+  display->status.bound_camera_device = device;
   return MMF_OK;
 }
 

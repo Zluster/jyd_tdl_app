@@ -41,6 +41,7 @@ typedef struct {
   uint32_t channel;
   uint64_t frame_count;
   mmf_camera_source_t bound_camera_source;
+  mmf_camera_device_t bound_camera_device;
   mmf_rect_t window;
 } mmf_display_status_t;
 
@@ -67,6 +68,9 @@ mmf_result_t mmf_display_get_status(mmf_display_t* display, mmf_display_status_t
 mmf_result_t mmf_display_set_window(mmf_display_t* display, const mmf_rect_t* window,
                                     mmf_scale_mode_t scale_mode, uint32_t bg_color);
 mmf_result_t mmf_display_bind_camera(mmf_display_t* display, mmf_camera_source_t source);
+mmf_result_t mmf_display_bind_camera_device(mmf_display_t* display,
+                                            mmf_camera_source_t source,
+                                            mmf_camera_device_t device);
 mmf_result_t mmf_display_unbind(mmf_display_t* display);
 mmf_result_t mmf_display_show_frame(mmf_display_t* display, const mmf_video_frame_t* frame,
                                     const mmf_display_show_options_t* options);

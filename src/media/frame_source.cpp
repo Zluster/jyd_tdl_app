@@ -10,6 +10,7 @@
 #include "cvi_vi.h"
 #include "cvi_vpss.h"
 #include "cvi_errno.h"
+#include "tdl_app/layout.hpp"
 #include "tdl_app/sys_context.hpp"
 
 namespace tdl_app {
@@ -23,6 +24,14 @@ void setError(std::string *error, const std::string &message) {
 
 const char *backendName(CameraSource::Backend backend) {
   return backend == CameraSource::Backend::Vi ? "VI" : "VPSS";
+}
+
+CameraSource::Config normalizeCameraConfig(CameraSource::Config config) {
+  if (config.backend == CameraSource::Backend::Vpss && config.device == 1 &&
+      config.group == DualOsLayout::kCaptureVpssGroup) {
+    config.group = DualOsLayout::kRearVpssGroup;
+  }
+  return config;
 }
 
 std::string hexCode(int ret) {
@@ -79,12 +88,16 @@ void ImageFileSource::close() { consumed_ = true; }
 
 class CameraSource::Impl {
  public:
-  explicit Impl(Config config) : config_(config) {}
+  explicit Impl(Config config) : config_(normalizeCameraConfig(config)) {}
 
   ~Impl() { close(); }
 
   bool open(std::string *error) {
     close();
+    if (config_.device != 0 && config_.device != 1) {
+      setError(error, "camera device must be 0 (front) or 1 (rear)");
+      return false;
+    }
     if (!ensureMmfRuntimeInitialized(error)) {
       return false;
     }
