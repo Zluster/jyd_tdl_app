@@ -6,7 +6,9 @@
 #include <vector>
 
 #include "cvi_buffer.h"
-#include "tdl_app/advanced.hpp"
+#include "tdl_app/sys_context.hpp"
+#include "tdl_app/vdec_channel.hpp"
+#include "tdl_app/video_buffer.hpp"
 
 namespace {
 

@@ -42,3 +42,4 @@
 ## Additional Guides
 
 - [算法测试与 model_tool 分析指南](ALGORITHM_TESTING_GUIDE_CN.md)
+- [视觉算法逐项测试矩阵](VISUAL_ALGORITHM_TEST_MATRIX_CN.md)

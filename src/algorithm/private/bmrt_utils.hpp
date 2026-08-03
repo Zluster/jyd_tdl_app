@@ -1,13 +1,16 @@
 #pragma once
 
 #include <algorithm>
+#include <array>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -16,6 +19,9 @@
 
 #include "bmlib_runtime.h"
 #include "bmruntime_interface.h"
+#include "cvi_buffer.h"
+#include "cvi_comm_vpss.h"
+#include "cvi_vpss.h"
 #include "tpu_fp16.h"
 
 #include "tdl_app/algorithm_engine.hpp"
@@ -172,6 +178,22 @@ struct OutputTensor {
   std::vector<float> data;
 };
 
+struct LaunchProfile {
+  double input_prepare_ms = 0.0;
+  double output_prepare_ms = 0.0;
+  double bmrt_launch_ms = 0.0;
+  double output_convert_ms = 0.0;
+  double total_ms = 0.0;
+};
+
+inline double elapsedMs(std::chrono::steady_clock::time_point begin,
+                        std::chrono::steady_clock::time_point end) {
+  return static_cast<double>(
+             std::chrono::duration_cast<std::chrono::microseconds>(end - begin)
+                 .count()) /
+         1000.0;
+}
+
 class Session {
  public:
   Session() = default;
@@ -248,6 +270,7 @@ class Session {
   }
 
   void close() {
+    releaseDeviceOutputs();
     if (runtime_) {
       bmrt_destroy(runtime_);
       runtime_ = nullptr;
@@ -266,7 +289,9 @@ class Session {
   }
 
   bool launch(const std::vector<float> &input_tensor,
-              std::vector<OutputTensor> *outputs, std::string *error) const {
+              std::vector<OutputTensor> *outputs, std::string *error,
+              LaunchProfile *profile = nullptr) const {
+    const auto total_begin = std::chrono::steady_clock::now();
     if (!opened_) {
       setError(error, "runtime session is not initialized");
       return false;
@@ -287,6 +312,7 @@ class Session {
     const int input_zero_point =
         net_info_->input_zero_point ? net_info_->input_zero_point[0] : 0;
 
+    const auto input_begin = std::chrono::steady_clock::now();
     if (input_dtype_ == BM_FLOAT32) {
       input_ptrs[0] = const_cast<float *>(input_tensor.data());
     } else if (input_dtype_ == BM_INT8) {
@@ -311,7 +337,266 @@ class Session {
       setError(error, "runtime does not support this input dtype");
       return false;
     }
+    if (profile) {
+      profile->input_prepare_ms =
+          elapsedMs(input_begin, std::chrono::steady_clock::now());
+    }
 
+    return launchPreparedInternal(input_ptrs[0], outputs, error, profile,
+                                  total_begin);
+  }
+
+  bool launchPrepared(const void *input_data, std::vector<OutputTensor> *outputs,
+                      std::string *error,
+                      LaunchProfile *profile = nullptr) const {
+    const auto total_begin = std::chrono::steady_clock::now();
+    if (!opened_) {
+      setError(error, "runtime session is not initialized");
+      return false;
+    }
+    if (!input_data) {
+      setError(error, "prepared input pointer is null");
+      return false;
+    }
+    if (!outputs) {
+      setError(error, "output tensor vector is null");
+      return false;
+    }
+    if (profile) {
+      profile->input_prepare_ms = 0.0;
+    }
+    return launchPreparedInternal(input_data, outputs, error, profile,
+                                  total_begin);
+  }
+
+  // The input is already device-backed by the VPSS preprocessor. Output
+  // buffers are allocated once and reused for the lifetime of this session.
+  bool launchDevice(bm_device_mem_t input_memory,
+                    std::vector<OutputTensor> *outputs, std::string *error,
+                    LaunchProfile *profile = nullptr) {
+    const auto total_begin = std::chrono::steady_clock::now();
+    if (!opened_) {
+      setError(error, "runtime session is not initialized");
+      return false;
+    }
+    if (input_memory.size == 0) {
+      setError(error, "device input memory is empty");
+      return false;
+    }
+    if (!outputs) {
+      setError(error, "output tensor vector is null");
+      return false;
+    }
+    if (!ensureDeviceOutputs(error)) {
+      return false;
+    }
+
+    bm_tensor_t input{};
+    bmrt_tensor_with_device(&input, input_memory, input_dtype_,
+                            net_info_->stages[0].input_shapes[0]);
+    std::vector<bm_tensor_t> device_outputs(
+        static_cast<size_t>(net_info_->output_num), bm_tensor_t{});
+    for (int i = 0; i < net_info_->output_num; ++i) {
+      bmrt_tensor_with_device(&device_outputs[static_cast<size_t>(i)],
+                              device_outputs_[static_cast<size_t>(i)],
+                              net_info_->output_dtypes[i],
+                              net_info_->stages[0].output_shapes[i]);
+    }
+    if (profile) {
+      profile->input_prepare_ms = 0.0;
+      profile->output_prepare_ms = 0.0;
+    }
+
+    const auto launch_begin = std::chrono::steady_clock::now();
+    if (!bmrt_launch_tensor_ex(runtime_, net_name_.c_str(), &input, 1,
+                               device_outputs.data(), net_info_->output_num,
+                               true, false)) {
+      setError(error, "bmrt_launch_tensor_ex failed");
+      return false;
+    }
+    if (bm_thread_sync(handle_) != BM_SUCCESS) {
+      setError(error, "bm_thread_sync failed");
+      return false;
+    }
+    if (profile) {
+      profile->bmrt_launch_ms =
+          elapsedMs(launch_begin, std::chrono::steady_clock::now());
+    }
+
+    const auto output_convert_begin = std::chrono::steady_clock::now();
+    outputs->clear();
+    outputs->reserve(static_cast<size_t>(net_info_->output_num));
+    for (int i = 0; i < net_info_->output_num; ++i) {
+      const bm_tensor_t &tensor = device_outputs[static_cast<size_t>(i)];
+      const size_t bytes = shapeElementCount(tensor.shape) *
+                           bmrt_data_type_size(net_info_->output_dtypes[i]);
+      std::vector<uint8_t> raw(bytes);
+      if (bm_memcpy_d2s(handle_, raw.data(), tensor.device_mem) != BM_SUCCESS) {
+        setError(error, "bm_memcpy_d2s failed for device output");
+        return false;
+      }
+      if (!appendDecodedOutput(i, tensor.shape, raw.data(), outputs, error)) {
+        return false;
+      }
+    }
+    if (profile) {
+      const auto total_end = std::chrono::steady_clock::now();
+      profile->output_convert_ms =
+          elapsedMs(output_convert_begin, total_end);
+      profile->total_ms = elapsedMs(total_begin, total_end);
+    }
+    return true;
+  }
+
+  const bm_net_info_t *netInfo() const { return net_info_; }
+  int inputHeight() const { return input_height_; }
+  int inputWidth() const { return input_width_; }
+  bool nchwLayout() const { return nchw_layout_; }
+  bool opened() const { return opened_; }
+  bm_data_type_t inputDtype() const { return input_dtype_; }
+  float inputScale() const {
+    return net_info_ && net_info_->input_scales ? net_info_->input_scales[0]
+                                                : 1.0f;
+  }
+  int inputZeroPoint() const {
+    return net_info_ && net_info_->input_zero_point
+               ? net_info_->input_zero_point[0]
+               : 0;
+  }
+  bm_handle_t handle() const { return handle_; }
+
+ private:
+  static size_t shapeElementCount(const bm_shape_t &shape) {
+    size_t count = 1;
+    for (int d = 0; d < shape.num_dims; ++d) {
+      count *= static_cast<size_t>(shape.dims[d]);
+    }
+    return count;
+  }
+
+  bool ensureDeviceOutputs(std::string *error) {
+    if (device_outputs_.size() ==
+        static_cast<size_t>(net_info_->output_num)) {
+      return true;
+    }
+    releaseDeviceOutputs();
+    device_outputs_.resize(static_cast<size_t>(net_info_->output_num));
+    for (int i = 0; i < net_info_->output_num; ++i) {
+      size_t bytes = net_info_->max_output_bytes[i];
+      if (bytes == 0) {
+        bytes = shapeElementCount(net_info_->stages[0].output_shapes[i]) *
+                bmrt_data_type_size(net_info_->output_dtypes[i]);
+      }
+      if (bytes == 0 ||
+          bm_malloc_device_byte(handle_, &device_outputs_[static_cast<size_t>(i)],
+                                bytes) != BM_SUCCESS) {
+        setError(error, "bm_malloc_device_byte failed for runtime output");
+        releaseDeviceOutputs();
+        return false;
+      }
+    }
+    return true;
+  }
+
+  void releaseDeviceOutputs() {
+    if (!handle_) {
+      device_outputs_.clear();
+      return;
+    }
+    for (bm_device_mem_t &memory : device_outputs_) {
+      if (memory.size > 0) {
+        bm_free_device(handle_, memory);
+        memory = bm_device_mem_t{};
+      }
+    }
+    device_outputs_.clear();
+  }
+
+  bool appendDecodedOutput(int output_index, const bm_shape_t &shape,
+                           const uint8_t *raw,
+                           std::vector<OutputTensor> *outputs,
+                           std::string *error) const {
+    if (!raw) {
+      setError(error, "raw output buffer is null");
+      return false;
+    }
+    const size_t element_count = shapeElementCount(shape);
+    OutputTensor out;
+    out.shape = shape;
+    out.data.resize(element_count, 0.0f);
+    const float output_scale =
+        net_info_->output_scales ? net_info_->output_scales[output_index] : 1.0f;
+    const int output_zero_point = net_info_->output_zero_point
+                                      ? net_info_->output_zero_point[output_index]
+                                      : 0;
+    if (net_info_->output_dtypes[output_index] == BM_FLOAT32) {
+      const float *values = reinterpret_cast<const float *>(raw);
+      out.data.assign(values, values + element_count);
+    } else if (net_info_->output_dtypes[output_index] == BM_FLOAT16) {
+      const fp16 *values = reinterpret_cast<const fp16 *>(raw);
+      for (size_t j = 0; j < element_count; ++j) {
+        out.data[j] = fp16_to_fp32(values[j]).fval;
+      }
+    } else if (net_info_->output_dtypes[output_index] == BM_BFLOAT16) {
+      const bf16 *values = reinterpret_cast<const bf16 *>(raw);
+      for (size_t j = 0; j < element_count; ++j) {
+        out.data[j] = bf16_to_fp32(values[j]).fval;
+      }
+    } else if (net_info_->output_dtypes[output_index] == BM_INT8) {
+      const int8_t *values = reinterpret_cast<const int8_t *>(raw);
+      for (size_t j = 0; j < element_count; ++j) {
+        out.data[j] =
+            (static_cast<int>(values[j]) - output_zero_point) * output_scale;
+      }
+    } else if (net_info_->output_dtypes[output_index] == BM_UINT8) {
+      const uint8_t *values = reinterpret_cast<const uint8_t *>(raw);
+      for (size_t j = 0; j < element_count; ++j) {
+        out.data[j] =
+            (static_cast<int>(values[j]) - output_zero_point) * output_scale;
+      }
+    } else if (net_info_->output_dtypes[output_index] == BM_INT16) {
+      const int16_t *values = reinterpret_cast<const int16_t *>(raw);
+      for (size_t j = 0; j < element_count; ++j) {
+        out.data[j] =
+            (static_cast<int>(values[j]) - output_zero_point) * output_scale;
+      }
+    } else if (net_info_->output_dtypes[output_index] == BM_UINT16) {
+      const uint16_t *values = reinterpret_cast<const uint16_t *>(raw);
+      for (size_t j = 0; j < element_count; ++j) {
+        out.data[j] =
+            (static_cast<int>(values[j]) - output_zero_point) * output_scale;
+      }
+    } else if (net_info_->output_dtypes[output_index] == BM_INT32) {
+      const int32_t *values = reinterpret_cast<const int32_t *>(raw);
+      for (size_t j = 0; j < element_count; ++j) {
+        out.data[j] =
+            (static_cast<float>(values[j]) - output_zero_point) * output_scale;
+      }
+    } else if (net_info_->output_dtypes[output_index] == BM_UINT32) {
+      const uint32_t *values = reinterpret_cast<const uint32_t *>(raw);
+      for (size_t j = 0; j < element_count; ++j) {
+        out.data[j] =
+            (static_cast<float>(values[j]) - output_zero_point) * output_scale;
+      }
+    } else {
+      setError(error, "runtime does not support this output dtype");
+      return false;
+    }
+    outputs->push_back(std::move(out));
+    return true;
+  }
+
+  bool launchPreparedInternal(const void *input_data,
+                              std::vector<OutputTensor> *outputs,
+                              std::string *error, LaunchProfile *profile,
+                              std::chrono::steady_clock::time_point total_begin)
+      const {
+    const bm_shape_t input_shape = net_info_->stages[0].input_shapes[0];
+    void *input_ptrs[1] = {const_cast<void *>(input_data)};
+    bm_shape_t input_shapes[1];
+    input_shapes[0] = input_shape;
+
+    const auto output_prepare_begin = std::chrono::steady_clock::now();
     std::vector<std::vector<uint8_t>> output_bytes(
         static_cast<size_t>(net_info_->output_num), std::vector<uint8_t>());
     std::vector<void *> output_ptrs(static_cast<size_t>(net_info_->output_num),
@@ -325,14 +610,24 @@ class Session {
           output_bytes[static_cast<size_t>(i)].data();
       std::memset(&output_shapes[static_cast<size_t>(i)], 0, sizeof(bm_shape_t));
     }
+    if (profile) {
+      profile->output_prepare_ms =
+          elapsedMs(output_prepare_begin, std::chrono::steady_clock::now());
+    }
 
+    const auto launch_begin = std::chrono::steady_clock::now();
     if (!bmrt_launch_data(runtime_, net_name_.c_str(), input_ptrs, input_shapes,
                           1, output_ptrs.data(), output_shapes.data(),
                           net_info_->output_num, true)) {
       setError(error, "bmrt_launch_data failed");
       return false;
     }
+    if (profile) {
+      profile->bmrt_launch_ms =
+          elapsedMs(launch_begin, std::chrono::steady_clock::now());
+    }
 
+    const auto output_convert_begin = std::chrono::steady_clock::now();
     outputs->clear();
     outputs->reserve(static_cast<size_t>(net_info_->output_num));
     for (int i = 0; i < net_info_->output_num; ++i) {
@@ -415,27 +710,27 @@ class Session {
       }
       outputs->push_back(std::move(out));
     }
+    if (profile) {
+      const auto total_end = std::chrono::steady_clock::now();
+      profile->output_convert_ms = elapsedMs(output_convert_begin, total_end);
+      profile->total_ms = elapsedMs(total_begin, total_end);
+    }
 
     return true;
   }
 
-  const bm_net_info_t *netInfo() const { return net_info_; }
-  int inputHeight() const { return input_height_; }
-  int inputWidth() const { return input_width_; }
-  bool nchwLayout() const { return nchw_layout_; }
-  bool opened() const { return opened_; }
-
- private:
   bm_handle_t handle_ = nullptr;
   void *runtime_ = nullptr;
   const bm_net_info_t *net_info_ = nullptr;
   std::string net_name_;
+  std::vector<bm_device_mem_t> device_outputs_;
   int input_height_ = 0;
   int input_width_ = 0;
   bool nchw_layout_ = true;
   bm_data_type_t input_dtype_ = BM_FLOAT32;
   bool opened_ = false;
 };
+
 
 }  // namespace bmrt_runtime
 }  // namespace tdl_app

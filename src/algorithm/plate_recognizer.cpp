@@ -100,6 +100,39 @@ bool PlateRecognizer::run(const std::string &image_path, const Box &roi,
   return recognizeCrop(image_path, roi, options, result, error);
 }
 
+bool PlateRecognizer::runFrame(const Frame &frame, const InferOptions &options,
+                               AlgorithmResult *result, std::string *error) {
+  if (!model_) {
+    if (error) {
+      *error = "plate recognizer is not initialized";
+    }
+    return false;
+  }
+  return model_->predictFrame(frame, options, result, error);
+}
+
+bool PlateRecognizer::runFrameProfiled(const Frame &frame,
+                                       const InferOptions &options,
+                                       AlgorithmResult *result,
+                                       OcrProfile *profile,
+                                       std::string *error) {
+  if (!model_) {
+    if (error) *error = "plate recognizer is not initialized";
+    return false;
+  }
+  return model_->predictFrameProfiled(frame, options, result, profile, error);
+}
+
+bool PlateRecognizer::runFrame(const Frame &frame, const Box &roi,
+                               const InferOptions &options,
+                               AlgorithmResult *result, std::string *error) {
+  if (!model_) {
+    if (error) *error = "plate recognizer is not initialized";
+    return false;
+  }
+  return model_->predictFrameCrop(frame, roi, options, result, error);
+}
+
 bool PlateRecognizer::recognize(const std::string &image_path,
                                 const InferOptions &options,
                                 AlgorithmResult *result,

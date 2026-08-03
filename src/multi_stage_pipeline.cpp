@@ -27,6 +27,23 @@ void setError(std::string *error, const std::string &message) {
   }
 }
 
+// Keep the MMF/VPSS frame valid for all stages and release it on every return.
+class FrameLease {
+ public:
+  explicit FrameLease(FrameSource *source) : source_(source) {}
+  ~FrameLease() {
+    if (source_) {
+      source_->releaseFrame();
+    }
+  }
+
+  FrameLease(const FrameLease &) = delete;
+  FrameLease &operator=(const FrameLease &) = delete;
+
+ private:
+  FrameSource *source_ = nullptr;
+};
+
 enum class StageKind {
   FrameModel,
   FaceAttributeCrop,
@@ -129,6 +146,7 @@ class MultiStagePipeline::Impl {
     if (!source_->read(&frame, error)) {
       return false;
     }
+    FrameLease frame_lease(source_.get());
 
     result->primary = AlgorithmResult{};
     result->stages.clear();
@@ -153,12 +171,6 @@ class MultiStagePipeline::Impl {
         }
         result->stages.push_back(std::move(stage_result));
         continue;
-      }
-
-      if (frame.image_path.empty()) {
-        setError(error,
-                 "crop-based multi-stage pipeline currently requires image_path input");
-        return false;
       }
 
       std::vector<const StageResult *> source_results;
@@ -187,12 +199,19 @@ class MultiStagePipeline::Impl {
           bool ok = false;
           if (stage.kind == StageKind::FaceAttributeCrop &&
               stage.face_attribute_model) {
-            ok = stage.face_attribute_model->predictCrop(frame.image_path, roi, options,
-                                                         &stage_result.output, error);
+            if (frame.native) {
+              ok = stage.face_attribute_model->predictFrameCrop(
+                  frame, roi, options, &stage_result.output, error);
+            } else if (!frame.image_path.empty()) {
+              ok = stage.face_attribute_model->predictCrop(
+                  frame.image_path, roi, options, &stage_result.output, error);
+            }
           } else if (stage.kind == StageKind::PlateRecognizerCrop &&
                      stage.plate_recognizer_model) {
-            ok = stage.plate_recognizer_model->predictCrop(
-                frame.image_path, roi, options, &stage_result.output, error);
+            if (!frame.image_path.empty()) {
+              ok = stage.plate_recognizer_model->predictCrop(
+                  frame.image_path, roi, options, &stage_result.output, error);
+            }
           }
           if (!ok) {
             return false;
@@ -302,11 +321,6 @@ void MultiStagePipeline::setCamera(const Camera::Config &config) {
 void MultiStagePipeline::setMmf(const Mmf::Config &config) {
   impl_->setBootstrap(
       std::unique_ptr<PipelineBootstrap>(new MmfBootstrap(config)));
-}
-
-void MultiStagePipeline::setSensorMedia(const SensorMedia::Config &config) {
-  impl_->setBootstrap(std::unique_ptr<PipelineBootstrap>(
-      new SensorMediaBootstrap(config)));
 }
 
 void MultiStagePipeline::clearBootstrap() { impl_->clearBootstrap(); }

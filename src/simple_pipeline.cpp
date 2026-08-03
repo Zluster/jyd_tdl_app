@@ -145,11 +145,6 @@ void Pipeline::setMmf(const Mmf::Config &config) {
       new MmfBootstrap(config)));
 }
 
-void Pipeline::setSensorMedia(const SensorMedia::Config &config) {
-  impl_->setBootstrap(std::unique_ptr<PipelineBootstrap>(
-      new SensorMediaBootstrap(config)));
-}
-
 void Pipeline::clearBootstrap() {
   impl_->clearBootstrap();
 }

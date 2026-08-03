@@ -8,7 +8,35 @@ else
   SCRIPT_DIR=$(cd "$(dirname "${SCRIPT_PATH}")" && pwd)
   PROJECT_ROOT=$(cd "${SCRIPT_DIR}/.." && pwd)
 fi
-THIRD_PARTY_DIR="${TDL_APP_THIRD_PARTY_DIR:-${PROJECT_ROOT}/third_party/cv184x}"
+TDL_APP_PROFILE="${TDL_APP_PROFILE:-dual_os}"
+THIRD_PARTY_DIR="${TDL_APP_THIRD_PARTY_DIR:-}"
+if [ -z "${THIRD_PARTY_DIR}" ]; then
+  case "${TDL_APP_PROFILE}" in
+    dual_os)
+      if [ -d "/home/jyd/zwz/sophpi/tdl_app_sdk/third_party/cv184x/dual_os" ]; then
+        THIRD_PARTY_DIR="/home/jyd/zwz/sophpi/tdl_app_sdk/third_party/cv184x/dual_os"
+      elif [ -d "${PROJECT_ROOT}/third_party/cv184x/dual_os" ]; then
+        THIRD_PARTY_DIR="${PROJECT_ROOT}/third_party/cv184x/dual_os"
+      elif [ -d "${PROJECT_ROOT}/third_party/cv184x" ]; then
+        THIRD_PARTY_DIR="${PROJECT_ROOT}/third_party/cv184x"
+      fi
+      ;;
+    single_os)
+      if [ -d "/home/jyd/zwz/sophpi/tdl_app_sdk/third_party/cv184x/single_os" ]; then
+        THIRD_PARTY_DIR="/home/jyd/zwz/sophpi/tdl_app_sdk/third_party/cv184x/single_os"
+      elif [ -d "${PROJECT_ROOT}/third_party/cv184x/single_os" ]; then
+        THIRD_PARTY_DIR="${PROJECT_ROOT}/third_party/cv184x/single_os"
+      elif [ -d "${PROJECT_ROOT}/third_party/cv184x" ]; then
+        THIRD_PARTY_DIR="${PROJECT_ROOT}/third_party/cv184x"
+      fi
+      ;;
+    *)
+      echo "Unsupported TDL_APP_PROFILE: ${TDL_APP_PROFILE}" >&2
+      echo "Use TDL_APP_PROFILE=dual_os or TDL_APP_PROFILE=single_os" >&2
+      exit 1
+      ;;
+  esac
+fi
 DEFAULT_PKG_DIR="${PROJECT_ROOT}/package/tdl_app_sdk_cv184x"
 FALLBACK_PKG_DIR="${PROJECT_ROOT}/package_user/tdl_app_sdk_cv184x"
 
@@ -36,16 +64,42 @@ if [ ! -d "${RESOLVED_INSTALL_DIR}" ]; then
   exit 1
 fi
 
+if [ ! -d "${THIRD_PARTY_DIR}" ]; then
+  echo "Missing third-party bundle: ${THIRD_PARTY_DIR}" >&2
+  echo "Set TDL_APP_THIRD_PARTY_DIR or export TDL_APP_PROFILE correctly" >&2
+  exit 1
+fi
+
 rm -rf "${RESOLVED_PKG_DIR}"
-mkdir -p "${RESOLVED_PKG_DIR}/bin" "${RESOLVED_PKG_DIR}/lib" "${RESOLVED_PKG_DIR}/models" "${RESOLVED_PKG_DIR}/configs" "${RESOLVED_PKG_DIR}/firmware" "${RESOLVED_PKG_DIR}/assets"
+mkdir -p "${RESOLVED_PKG_DIR}/bin" "${RESOLVED_PKG_DIR}/lib" "${RESOLVED_PKG_DIR}/models" "${RESOLVED_PKG_DIR}/configs" "${RESOLVED_PKG_DIR}/firmware" "${RESOLVED_PKG_DIR}/assets" "${RESOLVED_PKG_DIR}/docs"
 
 cp -a "${RESOLVED_INSTALL_DIR}/bin/." "${RESOLVED_PKG_DIR}/bin/" 2>/dev/null || true
 cp -a "${RESOLVED_INSTALL_DIR}/lib/." "${RESOLVED_PKG_DIR}/lib/" 2>/dev/null || true
 cp -a "${RESOLVED_INSTALL_DIR}/configs/." "${RESOLVED_PKG_DIR}/configs/" 2>/dev/null || true
 cp -a "${THIRD_PARTY_DIR}/lib/." "${RESOLVED_PKG_DIR}/lib/"
 cp -a "${THIRD_PARTY_DIR}/models/." "${RESOLVED_PKG_DIR}/models/"
+# Project-specific models override/extend the base Dual-OS bundle. This is
+# where converted PP-OCR, dense landmark and application models are stored.
+PROJECT_MODELS_DIR="${PROJECT_ROOT}/third_party/cv184x/models"
+if [ -d "${PROJECT_MODELS_DIR}" ]; then
+  cp -a "${PROJECT_MODELS_DIR}/." "${RESOLVED_PKG_DIR}/models/"
+fi
 cp -a "${THIRD_PARTY_DIR}/firmware/." "${RESOLVED_PKG_DIR}/firmware/" 2>/dev/null || true
 cp -a "${PROJECT_ROOT}/assets/." "${RESOLVED_PKG_DIR}/assets/" 2>/dev/null || true
+
+# Do not repackage retired experimental self-learning components merely because
+# an incremental install directory or the vendor model bundle still contains
+# their old artifacts.
+rm -f "${RESOLVED_PKG_DIR}/bin/tdl_self_learning_detector_demo" \
+  "${RESOLVED_PKG_DIR}/bin/tdl_self_learning_classifier_camera_demo" \
+  "${RESOLVED_PKG_DIR}/models/cv184x/feature_mobileclip2_B_img_224_224_INT8_cv184x.bmodel" \
+  "${RESOLVED_PKG_DIR}/models/cv184x/feature_mobileclip2_B_text_1_77_INT8_cv184x.bmodel"
+rm -rf "${RESOLVED_PKG_DIR}/source"
+
+cp "${PROJECT_ROOT}/docs/ALGORITHM_TESTING_GUIDE_CN.md" \
+  "${RESOLVED_PKG_DIR}/docs/" 2>/dev/null || true
+cp "${PROJECT_ROOT}/docs/VISUAL_ALGORITHM_TEST_MATRIX_CN.md" \
+  "${RESOLVED_PKG_DIR}/docs/" 2>/dev/null || true
 
 cat > "${RESOLVED_PKG_DIR}/env.sh" <<'EOF'
 #!/bin/sh
@@ -110,6 +164,24 @@ DIR=$(cd "$(dirname "$0")" && pwd)
 exec "${DIR}/bin/tdl_keypoint_demo" "$@"
 EOF
 chmod +x "${RESOLVED_PKG_DIR}/run_keypoint_demo.sh"
+
+cat > "${RESOLVED_PKG_DIR}/run_pose_classifier_demo.sh" <<'EOF'
+#!/bin/sh
+set -eu
+DIR=$(cd "$(dirname "$0")" && pwd)
+. "${DIR}/env.sh"
+exec "${DIR}/bin/tdl_pose_classifier_demo" "$@"
+EOF
+chmod +x "${RESOLVED_PKG_DIR}/run_pose_classifier_demo.sh"
+
+cat > "${RESOLVED_PKG_DIR}/run_single_object_tracker_demo.sh" <<'EOF'
+#!/bin/sh
+set -eu
+DIR=$(cd "$(dirname "$0")" && pwd)
+. "${DIR}/env.sh"
+exec "${DIR}/bin/tdl_single_object_tracker_demo" "$@"
+EOF
+chmod +x "${RESOLVED_PKG_DIR}/run_single_object_tracker_demo.sh"
 
 cat > "${RESOLVED_PKG_DIR}/run_semantic_seg_demo.sh" <<'EOF'
 #!/bin/sh
@@ -238,6 +310,8 @@ EOF
 chmod +x "${RESOLVED_PKG_DIR}/run_pp_ocr_demo.sh"
 
 tar cf - -C "$(dirname "${RESOLVED_PKG_DIR}")" "$(basename "${RESOLVED_PKG_DIR}")" | gzip -9 > "${RESOLVED_PKG_DIR}.tar.gz"
+echo "TDL_APP_PROFILE=${TDL_APP_PROFILE}"
+echo "TDL_APP_THIRD_PARTY_DIR=${THIRD_PARTY_DIR}"
 echo "Install dir: ${RESOLVED_INSTALL_DIR}"
 echo "Package dir: ${RESOLVED_PKG_DIR}"
 echo "Package: ${RESOLVED_PKG_DIR}.tar.gz"

@@ -2,13 +2,17 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cctype>
 #include <cstdint>
 #include <cstring>
+#include <iomanip>
+#include <iostream>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <numeric>
 #include <string>
 #include <utility>
@@ -17,8 +21,7 @@
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
-#include "bmlib_runtime.h"
-#include "bmruntime_interface.h"
+#include "algorithm/private/vpss_preprocessor.hpp"
 
 namespace tdl_app {
 namespace {
@@ -188,6 +191,21 @@ T clampCast(float value) {
 
 class NnYolov8::CustomRuntime {
  public:
+  struct LaunchProfile {
+    double bmrt_ms = 0.0;
+    double output_copy_decode_ms = 0.0;
+  };
+
+  struct ProfileStats {
+    int count = 0;
+    double preprocess_ms = 0.0;
+    double launch_total_ms = 0.0;
+    double bmrt_ms = 0.0;
+    double output_copy_decode_ms = 0.0;
+    double decode_nms_ms = 0.0;
+    double total_ms = 0.0;
+  };
+
   struct OutputBranch {
     int stride = 0;
     int feat_w = 0;
@@ -196,6 +214,14 @@ class NnYolov8::CustomRuntime {
     int cls_index = -1;
     int angle_index = -1;
     int cls_offset = 0;
+  };
+
+  struct RawOutput {
+    bm_shape_t shape{};
+    bm_data_type_t dtype = BM_FLOAT32;
+    float scale = 1.0f;
+    int zero_point = 0;
+    std::vector<uint8_t> data;
   };
 
   CustomRuntime() = default;
@@ -279,12 +305,61 @@ class NnYolov8::CustomRuntime {
       return false;
     }
 
+    descriptor_ = descriptor;
+    if (net_info_->stages[0].input_shapes[0].dims[1] == kInputChannels &&
+        (input_dtype_ == BM_INT8 || input_dtype_ == BM_UINT8)) {
+      bmrt_runtime::VpssPreprocessor::Config vpss_config;
+      vpss_config.width = input_width_;
+      vpss_config.height = input_height_;
+      vpss_config.rgb = toUpper(descriptor.input_type) != "BGR";
+      vpss_config.keep_aspect_ratio = true;
+      vpss_config.padding = {{114, 114, 114}};
+      vpss_config.input_dtype = input_dtype_;
+      // The legacy uint8 path passes model pixels through unchanged.
+      vpss_config.input_scale =
+          input_dtype_ == BM_UINT8
+              ? 1.0f
+              : (net_info_->input_scales ? net_info_->input_scales[0] : 1.0f);
+      vpss_config.input_zero_point =
+          input_dtype_ == BM_UINT8
+              ? 0
+              : (net_info_->input_zero_point ? net_info_->input_zero_point[0]
+                                              : 0);
+      vpss_config.mean = {{0.0f, 0.0f, 0.0f}};
+      vpss_config.scale = {{1.0f, 1.0f, 1.0f}};
+      std::unique_ptr<bmrt_runtime::VpssPreprocessor> preprocessor(
+          new bmrt_runtime::VpssPreprocessor());
+      if (preprocessor->open(handle_, vpss_config, &hardware_error_)) {
+        hardware_preprocessor_ = std::move(preprocessor);
+        if (!allocateOutputBuffers(error)) {
+          return false;
+        }
+      }
+    } else {
+      hardware_error_ = "require NCHW int8/uint8 model input";
+    }
+
     opened_ = true;
     return true;
   }
 
   bool inferImage(const std::string &image_path, const InferOptions &options,
                   AlgorithmResult *result, std::string *error) {
+    std::lock_guard<std::mutex> lock(infer_mutex_);
+    if (!opened_) {
+      setError(error, "custom YOLOv8 runtime is not initialized");
+      return false;
+    }
+    cv::Mat image = cv::imread(image_path, cv::IMREAD_COLOR);
+    if (image.empty()) {
+      setError(error, "failed to read image: " + image_path);
+      return false;
+    }
+    return inferMat(image, options, result, error);
+  }
+
+  bool inferMat(const cv::Mat &image, const InferOptions &options,
+                AlgorithmResult *result, std::string *error) {
     if (!opened_) {
       setError(error, "custom YOLOv8 runtime is not initialized");
       return false;
@@ -293,10 +368,8 @@ class NnYolov8::CustomRuntime {
       setError(error, "result pointer is null");
       return false;
     }
-
-    cv::Mat image = cv::imread(image_path, cv::IMREAD_COLOR);
     if (image.empty()) {
-      setError(error, "failed to read image: " + image_path);
+      setError(error, "input image is empty");
       return false;
     }
 
@@ -319,8 +392,79 @@ class NnYolov8::CustomRuntime {
     return true;
   }
 
+  bool inferFrame(const Frame &frame, const InferOptions &options,
+                  AlgorithmResult *result, std::string *error) {
+    std::lock_guard<std::mutex> lock(infer_mutex_);
+    if (!opened_) {
+      setError(error, "custom YOLOv8 runtime is not initialized");
+      return false;
+    }
+    if (!result || !frame.native) {
+      setError(error, "YOLOv8 frame/result pointer is null");
+      return false;
+    }
+    if (!hardware_preprocessor_) {
+      const std::string reason = hardware_error_.empty()
+                                     ? "VPSS preprocessor is unavailable"
+                                     : hardware_error_;
+      setError(error, "YOLOv8 VPSS input is unavailable: " + reason);
+      return false;
+    }
+    auto *video = static_cast<VIDEO_FRAME_INFO_S *>(frame.native);
+    const int source_width = static_cast<int>(video->stVFrame.u32Width);
+    const int source_height = static_cast<int>(video->stVFrame.u32Height);
+    if (source_width <= 0 || source_height <= 0) {
+      setError(error, "YOLOv8 source frame dimensions are invalid");
+      return false;
+    }
+    const bool profile_enabled = profileEnabled();
+    const auto total_begin = std::chrono::steady_clock::now();
+    const float ratio = std::min(
+        static_cast<float>(input_height_) / source_height,
+        static_cast<float>(input_width_) / source_width);
+    const int resized_width = static_cast<int>(std::round(source_width * ratio));
+    const int resized_height = static_cast<int>(std::round(source_height * ratio));
+    const int top = (input_height_ - resized_height) / 2;
+    const int left = (input_width_ - resized_width) / 2;
+    const auto preprocess_begin = std::chrono::steady_clock::now();
+    if (!hardware_preprocessor_->preprocess(video, error)) {
+      return false;
+    }
+    const auto preprocess_end = std::chrono::steady_clock::now();
+
+    std::vector<RawOutput> outputs;
+    LaunchProfile launch_profile;
+    const auto launch_begin = std::chrono::steady_clock::now();
+    if (!launchDevice(hardware_preprocessor_->inputMemory(), &outputs,
+                      error,
+                      profile_enabled ? &launch_profile : nullptr)) {
+      return false;
+    }
+    const auto launch_end = std::chrono::steady_clock::now();
+    *result = AlgorithmResult{};
+    result->labels = labels_;
+    const auto decode_begin = std::chrono::steady_clock::now();
+    result->boxes = decodeRaw(outputs, source_width, source_height, ratio, top,
+                              left, options.threshold, options.iou_threshold);
+    const auto decode_end = std::chrono::steady_clock::now();
+    if (profile_enabled) {
+      profile_.count++;
+      profile_.preprocess_ms += elapsedMs(preprocess_begin, preprocess_end);
+      profile_.launch_total_ms += elapsedMs(launch_begin, launch_end);
+      profile_.bmrt_ms += launch_profile.bmrt_ms;
+      profile_.output_copy_decode_ms += launch_profile.output_copy_decode_ms;
+      profile_.decode_nms_ms += elapsedMs(decode_begin, decode_end);
+      profile_.total_ms += elapsedMs(total_begin, decode_end);
+    }
+    return true;
+  }
+
  private:
   void close() {
+    printProfile();
+    profile_ = ProfileStats{};
+    hardware_preprocessor_.reset();
+    releaseOutputBuffers();
     if (runtime_) {
       bmrt_destroy(runtime_);
       runtime_ = nullptr;
@@ -333,6 +477,40 @@ class NnYolov8::CustomRuntime {
     net_info_ = nullptr;
     branches_.clear();
     num_classes_ = 0;
+  }
+
+  bool allocateOutputBuffers(std::string *error) {
+    releaseOutputBuffers();
+    output_memories_.resize(static_cast<size_t>(output_count_));
+    for (int i = 0; i < output_count_; ++i) {
+      size_t bytes = net_info_->max_output_bytes[i];
+      if (bytes == 0) {
+        bytes = bmrt_shape_count(&net_info_->stages[0].output_shapes[i]) *
+                bmrt_data_type_size(net_info_->output_dtypes[i]);
+      }
+      if (bytes == 0 ||
+          bm_malloc_device_byte(handle_, &output_memories_[static_cast<size_t>(i)],
+                                bytes) != BM_SUCCESS) {
+        setError(error, "bm_malloc_device_byte failed for YOLOv8 output");
+        releaseOutputBuffers();
+        return false;
+      }
+    }
+    return true;
+  }
+
+  void releaseOutputBuffers() {
+    if (!handle_) {
+      output_memories_.clear();
+      return;
+    }
+    for (bm_device_mem_t &memory : output_memories_) {
+      if (memory.size > 0) {
+        bm_free_device(handle_, memory);
+        memory = bm_device_mem_t{};
+      }
+    }
+    output_memories_.clear();
   }
 
   bool buildBranches(std::string *error) {
@@ -566,6 +744,102 @@ class NnYolov8::CustomRuntime {
     return true;
   }
 
+  bool launchDevice(bm_device_mem_t input_memory,
+                    std::vector<RawOutput> *outputs, std::string *error,
+                    LaunchProfile *profile) {
+    if (output_memories_.size() != static_cast<size_t>(output_count_)) {
+      setError(error, "YOLOv8 output buffers are not initialized");
+      return false;
+    }
+    bm_tensor_t input_tensor{};
+    bmrt_tensor_with_device(&input_tensor, input_memory, input_dtype_,
+                            net_info_->stages[0].input_shapes[0]);
+    std::vector<bm_tensor_t> device_outputs(
+        static_cast<size_t>(output_count_), bm_tensor_t{});
+    for (int i = 0; i < output_count_; ++i) {
+      bmrt_tensor_with_device(&device_outputs[static_cast<size_t>(i)],
+                              output_memories_[static_cast<size_t>(i)],
+                              net_info_->output_dtypes[i],
+                              net_info_->stages[0].output_shapes[i]);
+    }
+    const auto bmrt_begin = std::chrono::steady_clock::now();
+    if (!bmrt_launch_tensor_ex(runtime_, net_name_.c_str(), &input_tensor, 1,
+                               device_outputs.data(), output_count_, true,
+                               false)) {
+      setError(error, "bmrt_launch_tensor_ex failed");
+      return false;
+    }
+    if (bm_thread_sync(handle_) != BM_SUCCESS) {
+      setError(error, "bm_thread_sync failed");
+      return false;
+    }
+    if (profile) {
+      profile->bmrt_ms = elapsedMs(bmrt_begin, std::chrono::steady_clock::now());
+    }
+
+    const auto output_copy_decode_begin = std::chrono::steady_clock::now();
+    outputs->clear();
+    outputs->reserve(static_cast<size_t>(output_count_));
+    for (int i = 0; i < output_count_; ++i) {
+      const bm_shape_t &shape = device_outputs[static_cast<size_t>(i)].shape;
+      size_t element_count = 1;
+      for (int d = 0; d < shape.num_dims; ++d) {
+        element_count *= static_cast<size_t>(shape.dims[d]);
+      }
+      const size_t bytes =
+          element_count * bmrt_data_type_size(net_info_->output_dtypes[i]);
+      RawOutput output;
+      output.shape = shape;
+      output.dtype = net_info_->output_dtypes[i];
+      output.scale = net_info_->output_scales ? net_info_->output_scales[i] : 1.0f;
+      output.zero_point =
+          net_info_->output_zero_point ? net_info_->output_zero_point[i] : 0;
+      output.data.resize(bytes);
+      if (bm_memcpy_d2s(handle_, output.data.data(),
+                         device_outputs[static_cast<size_t>(i)].device_mem) !=
+          BM_SUCCESS) {
+        setError(error, "bm_memcpy_d2s failed for YOLOv8 output");
+        return false;
+      }
+      outputs->push_back(std::move(output));
+    }
+    if (profile) {
+      profile->output_copy_decode_ms =
+          elapsedMs(output_copy_decode_begin, std::chrono::steady_clock::now());
+    }
+    return true;
+  }
+
+  static bool profileEnabled() {
+    const char *value = std::getenv("TDL_BENCH_PROFILE");
+    return value && value[0] != '\0' && value[0] != '0';
+  }
+
+  static double elapsedMs(std::chrono::steady_clock::time_point begin,
+                          std::chrono::steady_clock::time_point end) {
+    return static_cast<double>(
+               std::chrono::duration_cast<std::chrono::microseconds>(end - begin)
+                   .count()) /
+           1000.0;
+  }
+
+  void printProfile() const {
+    if (!profileEnabled() || profile_.count <= 0) {
+      return;
+    }
+    const double count = static_cast<double>(profile_.count);
+    std::cerr << std::fixed << std::setprecision(3)
+              << "[profile] yolov8 avg over " << profile_.count
+              << " runs: total=" << profile_.total_ms / count
+              << " ms, vpss_preprocess=" << profile_.preprocess_ms / count
+              << " ms, bmrt_sync=" << profile_.bmrt_ms / count
+              << " ms, output_copy="
+              << profile_.output_copy_decode_ms / count
+              << " ms, decode_nms=" << profile_.decode_nms_ms / count
+              << " ms, launch_total=" << profile_.launch_total_ms / count
+              << " ms\n";
+  }
+
   std::vector<float> decodeDfl(const std::vector<float> &bbox, int anchor_index,
                                int anchor_count) const {
     std::vector<float> values(4, 0.0f);
@@ -720,6 +994,150 @@ class NnYolov8::CustomRuntime {
     return nonMaxSuppression(boxes, iou_threshold);
   }
 
+  static bool isQuantized(const RawOutput &output) {
+    return output.dtype == BM_INT8 || output.dtype == BM_UINT8;
+  }
+
+  static int rawQuantizedValue(const RawOutput &output, size_t index) {
+    if (output.dtype == BM_INT8) {
+      return static_cast<int>(reinterpret_cast<const int8_t *>(output.data.data())[index]);
+    }
+    return static_cast<int>(output.data[index]);
+  }
+
+  static float rawValue(const RawOutput &output, size_t index) {
+    if (output.dtype == BM_INT8 || output.dtype == BM_UINT8) {
+      return (rawQuantizedValue(output, index) - output.zero_point) * output.scale;
+    }
+    if (output.dtype == BM_FLOAT32) {
+      return reinterpret_cast<const float *>(output.data.data())[index];
+    }
+    return 0.0f;
+  }
+
+  std::vector<float> decodeDflRaw(const RawOutput &bbox, int anchor_index,
+                                  int anchor_count) const {
+    std::vector<float> values(4, 0.0f);
+    for (int side = 0; side < 4; ++side) {
+      const int offset = side * kRegMax;
+      float max_logit = -std::numeric_limits<float>::infinity();
+      for (int i = 0; i < kRegMax; ++i) {
+        const float logit = rawValue(
+            bbox, static_cast<size_t>((offset + i) * anchor_count + anchor_index));
+        max_logit = std::max(max_logit, logit);
+      }
+      float sum = 0.0f;
+      float weighted = 0.0f;
+      for (int i = 0; i < kRegMax; ++i) {
+        const float logit = rawValue(
+            bbox, static_cast<size_t>((offset + i) * anchor_count + anchor_index));
+        const float expv = std::exp(logit - max_logit);
+        sum += expv;
+        weighted += expv * static_cast<float>(i);
+      }
+      values[side] = sum > 0.0f ? weighted / sum : 0.0f;
+    }
+    return values;
+  }
+
+  std::vector<Box> decodeRaw(const std::vector<RawOutput> &outputs,
+                             int image_width, int image_height, float ratio,
+                             int top, int left, float threshold,
+                             float iou_threshold) const {
+    std::vector<Box> boxes;
+    const float inverse_threshold =
+        threshold <= 0.0f ? -std::numeric_limits<float>::infinity()
+                          : (threshold >= 1.0f
+                                 ? std::numeric_limits<float>::infinity()
+                                 : std::log(threshold / (1.0f - threshold)));
+
+    for (const auto &branch : branches_) {
+      const RawOutput &bbox_out = outputs[branch.bbox_index];
+      const RawOutput &cls_out = outputs[branch.cls_index];
+      const RawOutput *angle_out = obb_mode_ ? &outputs[branch.angle_index] : nullptr;
+      const int anchor_count = branch.feat_w * branch.feat_h;
+      const bool quantized_classes = isQuantized(cls_out) && cls_out.scale > 0.0f;
+      int quantized_threshold = std::numeric_limits<int>::min();
+      if (quantized_classes) {
+        quantized_threshold = static_cast<int>(std::lround(
+            inverse_threshold / cls_out.scale + cls_out.zero_point));
+        const int low = cls_out.dtype == BM_INT8 ? -128 : 0;
+        const int high = cls_out.dtype == BM_INT8 ? 127 : 255;
+        quantized_threshold = std::max(low, std::min(high, quantized_threshold));
+      }
+
+      for (int anchor = 0; anchor < anchor_count; ++anchor) {
+        int best_class = -1;
+        float best_logit = -std::numeric_limits<float>::infinity();
+        int best_quantized = std::numeric_limits<int>::min();
+        for (int cls = 0; cls < num_classes_; ++cls) {
+          const int channel = branch.cls_offset + cls;
+          const size_t index = static_cast<size_t>(channel * anchor_count + anchor);
+          if (quantized_classes) {
+            const int value = rawQuantizedValue(cls_out, index);
+            if (value > best_quantized) {
+              best_quantized = value;
+              best_class = cls;
+            }
+          } else {
+            const float value = rawValue(cls_out, index);
+            if (value > best_logit) {
+              best_logit = value;
+              best_class = cls;
+            }
+          }
+        }
+        if (best_class < 0 ||
+            (quantized_classes ? best_quantized < quantized_threshold
+                               : best_logit < inverse_threshold)) {
+          continue;
+        }
+        if (quantized_classes) {
+          best_logit =
+              (best_quantized - cls_out.zero_point) * cls_out.scale;
+        }
+        const float score = sigmoid(best_logit);
+        if (score < threshold) {
+          continue;
+        }
+
+        const std::vector<float> distances =
+            decodeDflRaw(bbox_out, anchor, anchor_count);
+        const int anchor_y = anchor / branch.feat_w;
+        const int anchor_x = anchor % branch.feat_w;
+        const float grid_x = static_cast<float>(anchor_x) + 0.5f;
+        const float grid_y = static_cast<float>(anchor_y) + 0.5f;
+        const float x1 = (grid_x - distances[0]) * branch.stride;
+        const float y1 = (grid_y - distances[1]) * branch.stride;
+        const float x2 = (grid_x + distances[2]) * branch.stride;
+        const float y2 = (grid_y + distances[3]) * branch.stride;
+
+        Box box;
+        if (obb_mode_ && angle_out) {
+          const float angle =
+              (sigmoid(rawValue(*angle_out, static_cast<size_t>(anchor))) - 0.25f) *
+              static_cast<float>(CV_PI);
+          box = decodeOrientedBox(distances, angle, grid_x, grid_y, branch,
+                                  image_width, image_height, ratio, top, left,
+                                  best_class, score);
+        } else {
+          box.class_id = best_class;
+          box.score = score;
+          box.x1 = std::max(0.0f, std::min((x1 - left) / ratio,
+                                            static_cast<float>(image_width)));
+          box.y1 = std::max(0.0f, std::min((y1 - top) / ratio,
+                                            static_cast<float>(image_height)));
+          box.x2 = std::max(0.0f, std::min((x2 - left) / ratio,
+                                            static_cast<float>(image_width)));
+          box.y2 = std::max(0.0f, std::min((y2 - top) / ratio,
+                                            static_cast<float>(image_height)));
+        }
+        boxes.push_back(box);
+      }
+    }
+    return nonMaxSuppression(boxes, iou_threshold);
+  }
+
   bm_handle_t handle_ = nullptr;
   void *runtime_ = nullptr;
   const bm_net_info_t *net_info_ = nullptr;
@@ -729,8 +1147,15 @@ class NnYolov8::CustomRuntime {
   int output_count_ = 0;
   int num_classes_ = 0;
   bm_data_type_t input_dtype_ = BM_UINT8;
+  ModelDescriptor descriptor_;
   std::vector<std::string> labels_;
   std::vector<OutputBranch> branches_;
+  std::unique_ptr<bmrt_runtime::VpssPreprocessor>
+      hardware_preprocessor_;
+  std::vector<bm_device_mem_t> output_memories_;
+  std::string hardware_error_;
+  std::mutex infer_mutex_;
+  ProfileStats profile_;
   bool obb_mode_ = false;
   bool opened_ = false;
 };
@@ -774,6 +1199,9 @@ bool NnYolov8::shouldUseCustomRuntime() const {
 }
 
 bool NnYolov8::load(EngineConfig config, std::string *error) {
+  // Release the previous VPSS group/model before accepting a new config.
+  initialized_ = false;
+  custom_runtime_.reset();
   config_ = std::move(config);
   if (!loadDescriptor(error)) {
     return false;
@@ -789,6 +1217,9 @@ bool NnYolov8::load(EngineConfig config, std::string *error) {
   if (!custom_runtime_->open(config_, descriptor_, error)) {
     custom_runtime_.reset();
     return false;
+  }
+  if (error) {
+    error->clear();
   }
   initialized_ = true;
   return true;
@@ -812,15 +1243,22 @@ bool NnYolov8::predict(const std::string &image_path, const InferOptions &option
 
 bool NnYolov8::predictFrame(const Frame &frame, const InferOptions &options,
                             AlgorithmResult *result, std::string *error) {
-  if (!custom_runtime_ || !initialized_) {
+  if (!initialized_) {
     setError(error, "model is not initialized");
     return false;
   }
-  if (frame.image_path.empty()) {
-    setError(error, "custom YOLOv8 runtime currently supports image_path only");
+  if (!custom_runtime_) {
+    setError(error, "model is not initialized");
     return false;
   }
-  return custom_runtime_->inferImage(frame.image_path, options, result, error);
+  if (!frame.image_path.empty()) {
+    return custom_runtime_->inferImage(frame.image_path, options, result, error);
+  }
+  if (frame.native) {
+    return custom_runtime_->inferFrame(frame, options, result, error);
+  }
+  setError(error, "YOLOv8 frame has neither native data nor image_path");
+  return false;
 }
 
 }  // namespace tdl_app

@@ -1,7 +1,11 @@
+#include <cstdio>
 #include <cstdlib>
 #include <iostream>
 #include <string>
 #include <vector>
+
+#include <opencv2/imgcodecs.hpp>
+#include <opencv2/imgproc.hpp>
 
 #include "image_demo_support.hpp"
 #include "tdl_app/tdl_app.hpp"
@@ -19,6 +23,32 @@ struct Options {
   std::vector<SampleSpec> adds;
   int top_k = 3;
 };
+
+bool saveTopKOverlay(
+    const std::string &input, const std::string &output,
+    const tdl_app::SelfLearningClassificationResult &result,
+    std::string *error) {
+  cv::Mat image = cv::imread(input, cv::IMREAD_COLOR);
+  if (image.empty()) {
+    if (error) *error = "failed to read self-learning query image";
+    return false;
+  }
+  int y = 36;
+  for (size_t index = 0; index < result.classes.size(); ++index) {
+    const auto &item = result.classes[index];
+    const std::string text = std::to_string(index + 1) + ". " + item.label +
+                             cv::format(" %.3f (%d)", item.score,
+                                        item.sample_count);
+    cv::putText(image, text, cv::Point(14, y), cv::FONT_HERSHEY_SIMPLEX,
+                0.75, cv::Scalar(0, 255, 0), 2, cv::LINE_AA);
+    y += 34;
+  }
+  if (!cv::imwrite(output, image)) {
+    if (error) *error = "failed to write self-learning top-k overlay";
+    return false;
+  }
+  return true;
+}
 
 void printUsage() {
   std::cout
@@ -154,7 +184,20 @@ int main(int argc, char **argv) {
                 << " score=" << item.score
                 << " samples=" << item.sample_count << "\n";
     }
+    if (!opt.common.output.empty()) {
+      if (!saveTopKOverlay(opt.common.image, opt.common.output, result,
+                           &error)) {
+        std::cerr << "save failed: " << error << "\n";
+        return 6;
+      }
+      std::cout << "saved: " << opt.common.output << "\n";
+    }
   }
 
-  return 0;
+  // The CV184X BMRT feature runtime can fault during process-global teardown
+  // after this one-shot file demo has already released every result. Flush the
+  // user-visible output and bypass that runtime shutdown path.
+  std::cout.flush();
+  std::fflush(nullptr);
+  std::_Exit(0);
 }

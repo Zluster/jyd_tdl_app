@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -9,7 +10,7 @@
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
-#include "algorithm/private/bmrt_utils.hpp"
+#include "algorithm/private/vpss_preprocessor.hpp"
 
 namespace tdl_app {
 namespace {
@@ -19,6 +20,26 @@ void addAttribute(AlgorithmResult *result, const std::string &name, float value)
   attr.name = name;
   attr.value = value;
   result->attributes.push_back(attr);
+}
+
+bool toVpssRoi(const Box &box, int image_width, int image_height,
+               bmrt_runtime::VpssPreprocessor::Roi *roi,
+               std::string *error) {
+  if (!roi || image_width <= 0 || image_height <= 0 || box.x2 <= box.x1 ||
+      box.y2 <= box.y1) {
+    bmrt_runtime::setError(error, "face attribute ROI is invalid");
+    return false;
+  }
+
+  const int x = std::max(0, std::min(static_cast<int>(box.x1), image_width - 1));
+  const int y = std::max(0, std::min(static_cast<int>(box.y1), image_height - 1));
+  const int right = std::max(x + 1, std::min(static_cast<int>(box.x2), image_width));
+  const int bottom = std::max(y + 1, std::min(static_cast<int>(box.y2), image_height));
+  roi->x = x;
+  roi->y = y;
+  roi->width = right - x;
+  roi->height = bottom - y;
+  return true;
 }
 
 }  // namespace
@@ -34,11 +55,37 @@ class NnFaceAttribute::CustomRuntime {
     mean_ = bmrt_runtime::expandChannelValues(descriptor.mean, 0.0f);
     scale_ =
         bmrt_runtime::expandChannelValues(descriptor.scale, 0.00392156862745098f);
-    return mapOutputs();
+    if (!mapOutputs()) {
+      return false;
+    }
+    if (session_.nchwLayout() &&
+        (session_.inputDtype() == BM_INT8 ||
+         session_.inputDtype() == BM_UINT8)) {
+      bmrt_runtime::VpssPreprocessor::Config vpss_config;
+      vpss_config.width = session_.inputWidth();
+      vpss_config.height = session_.inputHeight();
+      vpss_config.rgb = bmrt_runtime::wantsRgbInput(descriptor_, true);
+      vpss_config.input_dtype = session_.inputDtype();
+      vpss_config.input_scale = session_.inputScale();
+      vpss_config.input_zero_point = session_.inputZeroPoint();
+      for (int i = 0; i < 3; ++i) {
+        vpss_config.mean[static_cast<size_t>(i)] = mean_[static_cast<size_t>(i)];
+        vpss_config.scale[static_cast<size_t>(i)] = scale_[static_cast<size_t>(i)];
+      }
+      std::unique_ptr<bmrt_runtime::VpssPreprocessor> preprocessor(
+          new bmrt_runtime::VpssPreprocessor());
+      if (preprocessor->open(session_.handle(), vpss_config, &hardware_error_)) {
+        hardware_preprocessor_ = std::move(preprocessor);
+      }
+    } else {
+      hardware_error_ = "require NCHW int8/uint8 model input";
+    }
+    return true;
   }
 
   bool inferImage(const std::string &image_path, const Box *roi,
                   AlgorithmResult *result, std::string *error) {
+    std::lock_guard<std::mutex> lock(infer_mutex_);
     if (!result) {
       bmrt_runtime::setError(error, "result pointer is null");
       return false;
@@ -70,6 +117,44 @@ class NnFaceAttribute::CustomRuntime {
       return false;
     }
 
+    *result = AlgorithmResult{};
+    decode(outputs, result);
+    return true;
+  }
+
+  bool inferFrame(const Frame &frame, const Box *roi, AlgorithmResult *result,
+                  std::string *error) {
+    std::lock_guard<std::mutex> lock(infer_mutex_);
+    if (!result || !frame.native) {
+      bmrt_runtime::setError(error, "face attribute frame/result pointer is null");
+      return false;
+    }
+    if (!hardware_preprocessor_) {
+      const std::string reason = hardware_error_.empty()
+                                     ? "VPSS preprocessor is unavailable"
+                                     : hardware_error_;
+      bmrt_runtime::setError(error,
+                             "face attribute VPSS input is unavailable: " + reason);
+      return false;
+    }
+    const auto *video = static_cast<const VIDEO_FRAME_INFO_S *>(frame.native);
+    bmrt_runtime::VpssPreprocessor::Roi hardware_roi;
+    if (roi &&
+        !toVpssRoi(*roi, static_cast<int>(video->stVFrame.u32Width),
+                   static_cast<int>(video->stVFrame.u32Height), &hardware_roi,
+                   error)) {
+      return false;
+    }
+    if (!hardware_preprocessor_->preprocess(frame.native,
+                                             roi ? &hardware_roi : nullptr,
+                                             error)) {
+      return false;
+    }
+    std::vector<bmrt_runtime::OutputTensor> outputs;
+    if (!session_.launchDevice(hardware_preprocessor_->inputMemory(), &outputs,
+                               error)) {
+      return false;
+    }
     *result = AlgorithmResult{};
     decode(outputs, result);
     return true;
@@ -167,6 +252,10 @@ class NnFaceAttribute::CustomRuntime {
   std::vector<float> mean_;
   std::vector<float> scale_;
   bmrt_runtime::Session session_;
+  std::unique_ptr<bmrt_runtime::VpssPreprocessor>
+      hardware_preprocessor_;
+  std::string hardware_error_;
+  std::mutex infer_mutex_;
   int gender_index_ = -1;
   int age_index_ = -1;
   int glass_index_ = -1;
@@ -200,6 +289,8 @@ bool NnFaceAttribute::loadDescriptor(std::string *error) {
 }
 
 bool NnFaceAttribute::load(EngineConfig config, std::string *error) {
+  initialized_ = false;
+  custom_runtime_.reset();
   config_ = std::move(config);
   if (!loadDescriptor(error)) {
     return false;
@@ -234,12 +325,32 @@ bool NnFaceAttribute::predictFrame(const Frame &frame,
     bmrt_runtime::setError(error, "model is not initialized");
     return false;
   }
-  if (frame.image_path.empty()) {
-    bmrt_runtime::setError(error,
-                           "face attribute runtime currently supports image_path only");
+  if (!frame.image_path.empty()) {
+    return custom_runtime_->inferImage(frame.image_path, nullptr, result, error);
+  }
+  if (frame.native) {
+    return custom_runtime_->inferFrame(frame, nullptr, result, error);
+  }
+  bmrt_runtime::setError(error,
+                         "face attribute frame has neither native data nor image_path");
+  return false;
+}
+
+bool NnFaceAttribute::predictFrameCrop(const Frame &frame, const Box &roi,
+                                       const InferOptions &options,
+                                       AlgorithmResult *result,
+                                       std::string *error) {
+  (void)options;
+  if (!custom_runtime_ || !initialized_) {
+    bmrt_runtime::setError(error, "model is not initialized");
     return false;
   }
-  return custom_runtime_->inferImage(frame.image_path, nullptr, result, error);
+  if (!frame.native) {
+    bmrt_runtime::setError(error,
+                           "face attribute crop requires a native frame");
+    return false;
+  }
+  return custom_runtime_->inferFrame(frame, &roi, result, error);
 }
 
 bool NnFaceAttribute::predictCrop(const std::string &image_path, const Box &roi,

@@ -45,6 +45,9 @@ std::string defaultModelForTask(TaskType task) {
 class AlgorithmEngine::Impl {
  public:
   bool initialize(const EngineConfig &config, std::string *error) {
+    // A new engine configuration must not retain the previous model/VPSS group.
+    runtime_model_.reset();
+    runtime_key_.clear();
     config_ = config;
     if (!config.bmrt_firmware.empty()) {
       setenv("BMRUNTIME_USING_FIRMWARE", config.bmrt_firmware.c_str(), 0);
@@ -148,6 +151,9 @@ class AlgorithmEngine::Impl {
       return true;
     }
 
+    // Keep at most one model-owned VPSS group alive in this engine.
+    runtime_model_.reset();
+    runtime_key_.clear();
     std::shared_ptr<NnBase> next_runtime;
     next_runtime = private_runtime_factory::createRuntime(runtime_name,
                                                           model_type, error);

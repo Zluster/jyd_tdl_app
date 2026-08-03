@@ -5,9 +5,11 @@
 #include <cstdlib>
 #include <cctype>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <utility>
 #include <vector>
@@ -15,6 +17,7 @@
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
+#include "algorithm/private/vpss_preprocessor.hpp"
 #include "bmlib_runtime.h"
 #include "bmruntime_interface.h"
 
@@ -22,6 +25,17 @@ namespace tdl_app {
 namespace {
 
 constexpr int kInputChannels = 3;
+
+bool featureTraceEnabled() {
+  const char *value = std::getenv("TDL_FEATURE_TRACE");
+  return value && value[0] != '\0' && value[0] != '0';
+}
+
+void featureTrace(const char *message) {
+  if (featureTraceEnabled()) {
+    std::fprintf(stderr, "[feature] %s\n", message);
+  }
+}
 
 void setError(std::string *error, const std::string &message) {
   if (error) {
@@ -89,6 +103,25 @@ bool wantsRgbInput(const ModelDescriptor &descriptor) {
 bool wantsL2Normalize(const ModelDescriptor &descriptor) {
   const std::string value = toUpper(descriptor.normalize);
   return value == "L2" || value == "TRUE" || value == "1";
+}
+
+bool toVpssRoi(const Box &box, int image_width, int image_height,
+               bmrt_runtime::VpssPreprocessor::Roi *roi,
+               std::string *error) {
+  if (!roi || image_width <= 0 || image_height <= 0 || box.x2 <= box.x1 ||
+      box.y2 <= box.y1) {
+    setError(error, "feature ROI is invalid");
+    return false;
+  }
+  const int x = std::max(0, std::min(static_cast<int>(box.x1), image_width - 1));
+  const int y = std::max(0, std::min(static_cast<int>(box.y1), image_height - 1));
+  const int right = std::max(x + 1, std::min(static_cast<int>(box.x2), image_width));
+  const int bottom = std::max(y + 1, std::min(static_cast<int>(box.y2), image_height));
+  roi->x = x;
+  roi->y = y;
+  roi->width = right - x;
+  roi->height = bottom - y;
+  return true;
 }
 
 float quantizeInputValue(float value, float input_scale,
@@ -167,10 +200,24 @@ class NnFeature::CustomRuntime {
     }
 
     descriptor_ = descriptor;
+    // The W4BF16 CLIP export is validated for file-image feature banks.  Its
+    // camera path is disabled below until a compact INT8 feature model exists.
+    host_launch_from_device_ =
+        descriptor_.model_type == "FEATURE_CLIP_IMAGE";
+    if (featureTraceEnabled()) {
+      std::fprintf(stderr,
+                   "[feature] open model_type=%s input=%dx%d dtype=%d "
+                   "host_launch=%d\n",
+                   descriptor_.model_type.c_str(), input_width_, input_height_,
+                   static_cast<int>(net_info_->input_dtypes[0]),
+                   host_launch_from_device_ ? 1 : 0);
+    }
     mean_ = expandChannelValues(descriptor.mean, 0.0f);
     scale_ = expandChannelValues(descriptor.scale, 1.0f);
     l2_normalize_ = wantsL2Normalize(descriptor);
     input_dtype_ = net_info_->input_dtypes[0];
+    // Offline image inference does not need VPSS. Defer its device-side
+    // allocation until a native camera frame is actually processed.
     opened_ = true;
     return true;
   }
@@ -178,6 +225,7 @@ class NnFeature::CustomRuntime {
   bool inferImage(const std::string &image_path, const InferOptions &options,
                   AlgorithmResult *result, std::string *error) {
     (void)options;
+    std::lock_guard<std::mutex> lock(infer_mutex_);
     if (!opened_) {
       setError(error, "feature runtime is not initialized");
       return false;
@@ -187,19 +235,22 @@ class NnFeature::CustomRuntime {
       return false;
     }
 
-    cv::Mat image = cv::imread(image_path, cv::IMREAD_COLOR);
-    if (image.empty()) {
-      setError(error, "failed to read image: " + image_path);
-      return false;
+    if (cached_image_path_ != image_path || cached_image_tensor_.empty()) {
+      cv::Mat image = cv::imread(image_path, cv::IMREAD_COLOR);
+      if (image.empty()) {
+        setError(error, "failed to read image: " + image_path);
+        return false;
+      }
+      preprocess(image, &cached_image_tensor_);
+      cached_image_path_ = image_path;
     }
-
-    std::vector<float> input_tensor;
-    preprocess(image, &input_tensor);
+    featureTrace("image feature input prepared");
 
     std::vector<float> embedding;
-    if (!launch(input_tensor, &embedding, error)) {
+    if (!launch(cached_image_tensor_, &embedding, error)) {
       return false;
     }
+    featureTrace("image feature launch complete");
 
     if (l2_normalize_) {
       normalizeEmbedding(&embedding);
@@ -207,21 +258,182 @@ class NnFeature::CustomRuntime {
 
     *result = AlgorithmResult{};
     result->feature = std::move(embedding);
+    if (featureTraceEnabled()) {
+      std::fprintf(stderr, "[feature] image feature dimensions=%zu\n",
+                   result->feature.size());
+    }
+    featureTrace("image feature result returned");
+    return true;
+  }
+
+  bool inferFrame(const Frame &frame, const Box *roi, AlgorithmResult *result,
+                  std::string *error) {
+    std::lock_guard<std::mutex> lock(infer_mutex_);
+    if (!opened_) {
+      setError(error, "feature runtime is not initialized");
+      return false;
+    }
+    if (!result) {
+      setError(error, "result pointer is null");
+      return false;
+    }
+    if (!frame.native) {
+      setError(error, "feature frame has no native VIDEO_FRAME_INFO_S");
+      return false;
+    }
+    if (!ensureHardwarePreprocessor(error)) {
+      return false;
+    }
+    if (host_launch_from_device_) {
+      setError(error,
+               "FEATURE_CLIP_IMAGE camera inference is unsupported on CV184X; "
+               "use it for offline feature banks or provide a compact INT8 "
+               "generic embedding bmodel");
+      return false;
+    }
+    const auto *video = static_cast<const VIDEO_FRAME_INFO_S *>(frame.native);
+    bmrt_runtime::VpssPreprocessor::Roi hardware_roi;
+    if (roi &&
+        !toVpssRoi(*roi, static_cast<int>(video->stVFrame.u32Width),
+                   static_cast<int>(video->stVFrame.u32Height), &hardware_roi,
+                   error)) {
+      return false;
+    }
+    if (!hardware_preprocessor_->preprocess(frame.native,
+                                             roi ? &hardware_roi : nullptr,
+                                             error)) {
+      return false;
+    }
+    featureTrace("VPSS feature preprocess complete");
+
+    std::vector<float> embedding;
+    bool launched = false;
+    if (host_launch_from_device_) {
+      const bm_shape_t input_shape = net_info_->stages[0].input_shapes[0];
+      const size_t input_bytes =
+          bmrt_shape_count(&input_shape) * bmrt_data_type_size(input_dtype_);
+      host_frame_input_bytes_.resize(input_bytes);
+      if (input_bytes == 0 ||
+          bm_memcpy_d2s(handle_, host_frame_input_bytes_.data(),
+                         hardware_preprocessor_->inputMemory()) != BM_SUCCESS) {
+        setError(error, "bm_memcpy_d2s failed for VPSS feature input");
+        return false;
+      }
+      featureTrace("VPSS feature input copied to host");
+      launched = launchQuantized(host_frame_input_bytes_, &embedding, error);
+    } else {
+      launched = launchDevice(hardware_preprocessor_->inputMemory(), &embedding,
+                              error);
+    }
+    if (!launched) {
+      return false;
+    }
+    if (l2_normalize_) {
+      normalizeEmbedding(&embedding);
+    }
+    featureTrace("VPSS feature embedding normalized");
+    *result = AlgorithmResult{};
+    result->feature = std::move(embedding);
+    featureTrace("VPSS feature result returned");
     return true;
   }
 
  private:
+  bool ensureHardwarePreprocessor(std::string *error) {
+    if (hardware_preprocessor_) return true;
+    if (!nchw_layout_ ||
+        (input_dtype_ != BM_INT8 && input_dtype_ != BM_UINT8)) {
+      setError(error,
+               "feature model does not support VPSS input; require NCHW int8/uint8");
+      return false;
+    }
+    bmrt_runtime::VpssPreprocessor::Config vpss_config;
+    vpss_config.width = input_width_;
+    vpss_config.height = input_height_;
+    vpss_config.rgb = wantsRgbInput(descriptor_);
+    vpss_config.input_dtype = input_dtype_;
+    vpss_config.input_scale =
+        net_info_->input_scales ? net_info_->input_scales[0] : 1.0f;
+    vpss_config.input_zero_point = net_info_->input_zero_point
+                                       ? net_info_->input_zero_point[0]
+                                       : 0;
+    for (int i = 0; i < kInputChannels; ++i) {
+      vpss_config.mean[static_cast<size_t>(i)] = mean_[static_cast<size_t>(i)];
+      vpss_config.scale[static_cast<size_t>(i)] = scale_[static_cast<size_t>(i)];
+    }
+    std::unique_ptr<bmrt_runtime::VpssPreprocessor> vpss(
+        new bmrt_runtime::VpssPreprocessor());
+    if (!vpss->open(handle_, vpss_config, error)) return false;
+    hardware_preprocessor_ = std::move(vpss);
+    if (!allocateOutputBuffers(error)) {
+      hardware_preprocessor_.reset();
+      return false;
+    }
+    featureTrace("VPSS feature preprocessor opened");
+    return true;
+  }
+
   void close() {
+    featureTrace("feature close begin");
+    hardware_preprocessor_.reset();
+    featureTrace("feature VPSS released");
+    releaseOutputBuffers();
+    cached_image_path_.clear();
+    cached_image_tensor_.clear();
+    host_input_bytes_.clear();
+    host_frame_input_bytes_.clear();
+    host_output_bytes_.clear();
+    host_output_ptrs_.clear();
+    host_output_shapes_.clear();
     if (runtime_) {
+      featureTrace("feature BMRT destroy begin");
       bmrt_destroy(runtime_);
       runtime_ = nullptr;
+      featureTrace("feature BMRT destroyed");
     }
     if (handle_) {
+      featureTrace("feature device free begin");
       bm_dev_free(handle_);
       handle_ = nullptr;
+      featureTrace("feature device freed");
     }
     net_info_ = nullptr;
     opened_ = false;
+    featureTrace("feature close end");
+  }
+
+  bool allocateOutputBuffers(std::string *error) {
+    releaseOutputBuffers();
+    output_memories_.resize(static_cast<size_t>(net_info_->output_num));
+    for (int i = 0; i < net_info_->output_num; ++i) {
+      size_t bytes = net_info_->max_output_bytes[i];
+      if (bytes == 0) {
+        bytes = bmrt_shape_count(&net_info_->stages[0].output_shapes[i]) *
+                bmrt_data_type_size(net_info_->output_dtypes[i]);
+      }
+      if (bytes == 0 ||
+          bm_malloc_device_byte(handle_, &output_memories_[static_cast<size_t>(i)],
+                                bytes) != BM_SUCCESS) {
+        setError(error, "bm_malloc_device_byte failed for feature output");
+        releaseOutputBuffers();
+        return false;
+      }
+    }
+    return true;
+  }
+
+  void releaseOutputBuffers() {
+    if (!handle_) {
+      output_memories_.clear();
+      return;
+    }
+    for (bm_device_mem_t &memory : output_memories_) {
+      if (memory.size > 0) {
+        bm_free_device(handle_, memory);
+        memory = bm_device_mem_t{};
+      }
+    }
+    output_memories_.clear();
   }
 
   void preprocess(const cv::Mat &image, std::vector<float> *tensor) const {
@@ -301,14 +513,16 @@ class NnFeature::CustomRuntime {
     }
 
     std::vector<std::vector<uint8_t>> output_bytes(
-        net_info_->output_num, std::vector<uint8_t>());
-    std::vector<void *> output_ptrs(net_info_->output_num, nullptr);
+        static_cast<size_t>(net_info_->output_num));
+    std::vector<void *> output_ptrs(static_cast<size_t>(net_info_->output_num),
+                                    nullptr);
     std::vector<bm_shape_t> output_shapes(static_cast<size_t>(net_info_->output_num),
                                           bm_shape_t{});
     for (int i = 0; i < net_info_->output_num; ++i) {
-      output_bytes[i].resize(net_info_->max_output_bytes[i]);
-      output_ptrs[i] = output_bytes[i].data();
-      std::memset(&output_shapes[i], 0, sizeof(output_shapes[i]));
+      output_bytes[static_cast<size_t>(i)].resize(net_info_->max_output_bytes[i]);
+      output_ptrs[static_cast<size_t>(i)] = output_bytes[static_cast<size_t>(i)].data();
+      std::memset(&output_shapes[static_cast<size_t>(i)], 0,
+                  sizeof(output_shapes[static_cast<size_t>(i)]));
     }
 
     if (!bmrt_launch_data(runtime_, net_name_.c_str(), input_ptrs, input_shapes,
@@ -321,8 +535,10 @@ class NnFeature::CustomRuntime {
     embedding->clear();
     for (int i = 0; i < net_info_->output_num; ++i) {
       size_t element_count = 1;
-      for (int d = 0; d < output_shapes[i].num_dims; ++d) {
-        element_count *= static_cast<size_t>(output_shapes[i].dims[d]);
+      const bm_shape_t &output_shape =
+          output_shapes[static_cast<size_t>(i)];
+      for (int d = 0; d < output_shape.num_dims; ++d) {
+        element_count *= static_cast<size_t>(output_shape.dims[d]);
       }
       const float output_scale =
           net_info_->output_scales ? net_info_->output_scales[i] : 1.0f;
@@ -333,18 +549,21 @@ class NnFeature::CustomRuntime {
       embedding->resize(current + element_count);
       if (net_info_->output_dtypes[i] == BM_FLOAT32) {
         const float *raw =
-            reinterpret_cast<const float *>(output_bytes[i].data());
+            reinterpret_cast<const float *>(
+                output_bytes[static_cast<size_t>(i)].data());
         std::copy(raw, raw + element_count, embedding->begin() + current);
       } else if (net_info_->output_dtypes[i] == BM_INT8) {
         const int8_t *raw =
-            reinterpret_cast<const int8_t *>(output_bytes[i].data());
+            reinterpret_cast<const int8_t *>(
+                output_bytes[static_cast<size_t>(i)].data());
         for (size_t j = 0; j < element_count; ++j) {
           (*embedding)[current + j] =
               (static_cast<int>(raw[j]) - output_zero_point) * output_scale;
         }
       } else if (net_info_->output_dtypes[i] == BM_UINT8) {
         const uint8_t *raw =
-            reinterpret_cast<const uint8_t *>(output_bytes[i].data());
+            reinterpret_cast<const uint8_t *>(
+                output_bytes[static_cast<size_t>(i)].data());
         for (size_t j = 0; j < element_count; ++j) {
           (*embedding)[current + j] =
               (static_cast<int>(raw[j]) - output_zero_point) * output_scale;
@@ -354,6 +573,171 @@ class NnFeature::CustomRuntime {
         return false;
       }
     }
+    return true;
+  }
+
+  bool launchDevice(bm_device_mem_t input_memory,
+                    std::vector<float> *embedding, std::string *error) {
+    const bm_shape_t input_shape = net_info_->stages[0].input_shapes[0];
+    bm_tensor_t input_tensor{};
+    bmrt_tensor_with_device(&input_tensor, input_memory, input_dtype_, input_shape);
+    if (output_memories_.size() !=
+        static_cast<size_t>(net_info_->output_num)) {
+      setError(error, "feature output buffers are not initialized");
+      return false;
+    }
+    std::vector<bm_tensor_t> device_outputs(
+        static_cast<size_t>(net_info_->output_num), bm_tensor_t{});
+    for (int i = 0; i < net_info_->output_num; ++i) {
+      bmrt_tensor_with_device(
+          &device_outputs[static_cast<size_t>(i)],
+          output_memories_[static_cast<size_t>(i)], net_info_->output_dtypes[i],
+          net_info_->stages[0].output_shapes[i]);
+    }
+
+    if (!bmrt_launch_tensor_ex(runtime_, net_name_.c_str(), &input_tensor, 1,
+                               device_outputs.data(), net_info_->output_num,
+                               true, false)) {
+      setError(error, "bmrt_launch_tensor_ex failed");
+      return false;
+    }
+    if (bm_thread_sync(handle_) != BM_SUCCESS) {
+      setError(error, "bm_thread_sync failed");
+      return false;
+    }
+
+    embedding->clear();
+    for (int i = 0; i < net_info_->output_num; ++i) {
+      const bm_shape_t &shape = device_outputs[static_cast<size_t>(i)].shape;
+      size_t element_count = 1;
+      for (int d = 0; d < shape.num_dims; ++d) {
+        element_count *= static_cast<size_t>(shape.dims[d]);
+      }
+      const size_t output_bytes =
+          element_count * bmrt_data_type_size(net_info_->output_dtypes[i]);
+      std::vector<uint8_t> raw(output_bytes);
+      if (bm_memcpy_d2s(handle_, raw.data(),
+                         device_outputs[static_cast<size_t>(i)].device_mem) !=
+          BM_SUCCESS) {
+        setError(error, "bm_memcpy_d2s failed for feature output");
+        return false;
+      }
+
+      const float output_scale =
+          net_info_->output_scales ? net_info_->output_scales[i] : 1.0f;
+      const int output_zero_point =
+          net_info_->output_zero_point ? net_info_->output_zero_point[i] : 0;
+      const size_t current = embedding->size();
+      embedding->resize(current + element_count);
+      if (net_info_->output_dtypes[i] == BM_FLOAT32) {
+        const float *values = reinterpret_cast<const float *>(raw.data());
+        std::copy(values, values + element_count, embedding->begin() + current);
+      } else if (net_info_->output_dtypes[i] == BM_INT8) {
+        const int8_t *values = reinterpret_cast<const int8_t *>(raw.data());
+        for (size_t j = 0; j < element_count; ++j) {
+          (*embedding)[current + j] =
+              (static_cast<int>(values[j]) - output_zero_point) * output_scale;
+        }
+      } else if (net_info_->output_dtypes[i] == BM_UINT8) {
+        const uint8_t *values = reinterpret_cast<const uint8_t *>(raw.data());
+        for (size_t j = 0; j < element_count; ++j) {
+          (*embedding)[current + j] =
+              (static_cast<int>(values[j]) - output_zero_point) * output_scale;
+        }
+      } else {
+        setError(error, "feature runtime does not support this output dtype");
+        return false;
+      }
+    }
+    return true;
+  }
+
+  bool launchQuantized(const std::vector<uint8_t> &input,
+                       std::vector<float> *embedding, std::string *error) {
+    if (input_dtype_ != BM_INT8 && input_dtype_ != BM_UINT8) {
+      setError(error, "quantized host launch requires int8/uint8 input");
+      return false;
+    }
+    const bm_shape_t input_shape = net_info_->stages[0].input_shapes[0];
+    const size_t expected =
+        bmrt_shape_count(&input_shape) * bmrt_data_type_size(input_dtype_);
+    if (expected == 0 || input.size() != expected) {
+      setError(error, "VPSS feature input size does not match model input");
+      return false;
+    }
+    void *input_ptrs[1] = {const_cast<uint8_t *>(input.data())};
+    bm_shape_t input_shapes[1] = {input_shape};
+    host_output_bytes_.resize(static_cast<size_t>(net_info_->output_num));
+    host_output_ptrs_.resize(static_cast<size_t>(net_info_->output_num));
+    host_output_shapes_.resize(static_cast<size_t>(net_info_->output_num));
+    for (int i = 0; i < net_info_->output_num; ++i) {
+      host_output_bytes_[static_cast<size_t>(i)].resize(
+          net_info_->max_output_bytes[i]);
+      host_output_ptrs_[static_cast<size_t>(i)] =
+          host_output_bytes_[static_cast<size_t>(i)].data();
+      std::memset(&host_output_shapes_[static_cast<size_t>(i)], 0,
+                  sizeof(host_output_shapes_[static_cast<size_t>(i)]));
+    }
+    featureTrace("BMRT host launch from VPSS input");
+    if (!bmrt_launch_data(runtime_, net_name_.c_str(), input_ptrs, input_shapes,
+                          1, host_output_ptrs_.data(), host_output_shapes_.data(),
+                          net_info_->output_num, true)) {
+      setError(error, "bmrt_launch_data failed for VPSS feature input");
+      return false;
+    }
+    featureTrace("BMRT host launch complete");
+    embedding->clear();
+    for (int i = 0; i < net_info_->output_num; ++i) {
+      const bm_shape_t &shape = host_output_shapes_[static_cast<size_t>(i)];
+      if (featureTraceEnabled()) {
+        std::fprintf(stderr, "[feature] host output %d dims=%d", i,
+                     shape.num_dims);
+        for (int d = 0; d < shape.num_dims && d < BM_MAX_DIMS_NUM; ++d) {
+          std::fprintf(stderr, " %d", shape.dims[d]);
+        }
+        std::fprintf(stderr, "\n");
+      }
+      if (shape.num_dims <= 0 || shape.num_dims > BM_MAX_DIMS_NUM) {
+        setError(error, "BMRT returned an invalid feature output shape");
+        return false;
+      }
+      size_t element_count = 1;
+      for (int d = 0; d < shape.num_dims; ++d) {
+        element_count *= static_cast<size_t>(shape.dims[d]);
+      }
+      if (element_count == 0 ||
+          element_count * bmrt_data_type_size(net_info_->output_dtypes[i]) >
+              host_output_bytes_[static_cast<size_t>(i)].size()) {
+        setError(error, "BMRT feature output size is invalid");
+        return false;
+      }
+      const size_t current = embedding->size();
+      embedding->resize(current + element_count);
+      const float output_scale =
+          net_info_->output_scales ? net_info_->output_scales[i] : 1.0f;
+      const int output_zero_point =
+          net_info_->output_zero_point ? net_info_->output_zero_point[i] : 0;
+      const uint8_t *raw = host_output_bytes_[static_cast<size_t>(i)].data();
+      if (net_info_->output_dtypes[i] == BM_FLOAT32) {
+        const float *values = reinterpret_cast<const float *>(raw);
+        std::copy(values, values + element_count, embedding->begin() + current);
+      } else if (net_info_->output_dtypes[i] == BM_INT8) {
+        const int8_t *values = reinterpret_cast<const int8_t *>(raw);
+        for (size_t j = 0; j < element_count; ++j) {
+          (*embedding)[current + j] =
+              (static_cast<int>(values[j]) - output_zero_point) * output_scale;
+        }
+      } else if (net_info_->output_dtypes[i] == BM_UINT8) {
+        for (size_t j = 0; j < element_count; ++j) {
+          (*embedding)[current + j] =
+              (static_cast<int>(raw[j]) - output_zero_point) * output_scale;
+        }
+      } else {
+        setError(error, "feature runtime does not support this output dtype");
+        return false;
+      }
+    }
+    featureTrace("VPSS feature host output parsed");
     return true;
   }
 
@@ -386,6 +770,18 @@ class NnFeature::CustomRuntime {
   bool nchw_layout_ = true;
   bool l2_normalize_ = false;
   bm_data_type_t input_dtype_ = BM_FLOAT32;
+  std::unique_ptr<bmrt_runtime::VpssPreprocessor>
+      hardware_preprocessor_;
+  std::vector<bm_device_mem_t> output_memories_;
+  std::string cached_image_path_;
+  std::vector<float> cached_image_tensor_;
+  std::vector<uint8_t> host_input_bytes_;
+  std::vector<uint8_t> host_frame_input_bytes_;
+  std::vector<std::vector<uint8_t>> host_output_bytes_;
+  std::vector<void *> host_output_ptrs_;
+  std::vector<bm_shape_t> host_output_shapes_;
+  std::mutex infer_mutex_;
+  bool host_launch_from_device_ = false;
   bool opened_ = false;
 };
 
@@ -412,14 +808,21 @@ bool NnFeature::loadDescriptor(std::string *error) {
 }
 
 bool NnFeature::load(EngineConfig config, std::string *error) {
+  // Release the previous model and its private VPSS group before reloading.
+  initialized_ = false;
+  custom_runtime_.reset();
   config_ = std::move(config);
   if (!loadDescriptor(error)) {
     return false;
   }
+
   custom_runtime_.reset(new CustomRuntime());
   if (!custom_runtime_->open(config_, descriptor_, error)) {
     custom_runtime_.reset();
     return false;
+  }
+  if (error) {
+    error->clear();
   }
   initialized_ = true;
   return true;
@@ -443,15 +846,38 @@ bool NnFeature::predict(const std::string &image_path, const InferOptions &optio
 
 bool NnFeature::predictFrame(const Frame &frame, const InferOptions &options,
                              AlgorithmResult *result, std::string *error) {
+  if (!initialized_) {
+    setError(error, "model is not initialized");
+    return false;
+  }
+  if (!custom_runtime_) {
+    setError(error, "model is not initialized");
+    return false;
+  }
+  if (frame.native) {
+    return custom_runtime_->inferFrame(frame, nullptr, result, error);
+  }
+  if (!frame.image_path.empty()) {
+    return custom_runtime_->inferImage(frame.image_path, options, result, error);
+  }
+  setError(error, "feature frame has neither native data nor image_path");
+  return false;
+}
+
+bool NnFeature::predictFrameCrop(const Frame &frame, const Box &roi,
+                                 const InferOptions &options,
+                                 AlgorithmResult *result,
+                                 std::string *error) {
+  (void)options;
   if (!initialized_ || !custom_runtime_) {
     setError(error, "model is not initialized");
     return false;
   }
-  if (frame.image_path.empty()) {
-    setError(error, "feature runtime currently supports image_path only");
+  if (!frame.native) {
+    setError(error, "feature crop requires a native frame");
     return false;
   }
-  return custom_runtime_->inferImage(frame.image_path, options, result, error);
+  return custom_runtime_->inferFrame(frame, &roi, result, error);
 }
 
 }  // namespace tdl_app

@@ -1,6 +1,7 @@
 #include "tdl_app/single_object_tracker.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -15,176 +16,23 @@
 #include <opencv2/imgproc.hpp>
 
 #include "algorithm/private/bmrt_utils.hpp"
-#include "algorithm/private/tdl_sdk_utils.hpp"
+#include "algorithm/private/vpss_preprocessor.hpp"
 #include "cvi_comm_video.h"
-#include "cvi_sys.h"
+#include "tdl_app/frame_source.hpp"
 #include "tdl_app/model_descriptor.hpp"
 
 namespace tdl_app {
 namespace {
 
 constexpr int kTrackerInputChannels = 3;
-constexpr float kContextAmount = 0.5f;
-constexpr float kTemplateScale = 2.0f;
-constexpr float kSearchScale = 4.0f;
-constexpr float kWindowInfluence = 0.40f;
-constexpr float kPenaltyK = 0.05f;
-constexpr float kTrackLr = 0.35f;
-
-bool trackerDebugEnabled() {
-  const char *value = std::getenv("TDL_APP_TRACK_DEBUG");
-  if (!value) {
-    return false;
-  }
-  return std::string(value) != "0";
-}
-
-bool frameToBgrMat(const Frame &frame, cv::Mat *image, std::string *error) {
-  if (!frame.native) {
-    private_tdl_sdk::setError(error, "frame has no native VIDEO_FRAME_INFO_S buffer");
-    return false;
-  }
-
-  const auto *video = static_cast<VIDEO_FRAME_INFO_S *>(frame.native);
-  const auto &vf = video->stVFrame;
-  const int width = static_cast<int>(vf.u32Width);
-  const int height = static_cast<int>(vf.u32Height);
-  const int format = static_cast<int>(vf.enPixelFormat);
-  if (width <= 0 || height <= 0) {
-    private_tdl_sdk::setError(error, "invalid frame size");
-    return false;
-  }
-
-  std::size_t map_size = 0;
-  for (int i = 0; i < 3; ++i) {
-    map_size += vf.u32Length[i];
-  }
-  if (map_size == 0) {
-    private_tdl_sdk::setError(error, "frame buffer length is zero");
-    return false;
-  }
-
-  auto *mapped =
-      static_cast<unsigned char *>(CVI_SYS_Mmap(vf.u64PhyAddr[0], map_size));
-  if (!mapped) {
-    private_tdl_sdk::setError(error, "CVI_SYS_Mmap failed");
-    return false;
-  }
-  CVI_SYS_IonInvalidateCache(vf.u64PhyAddr[0], mapped, map_size);
-
-  bool ok = true;
-  if (format == PIXEL_FORMAT_BGR_888 || format == PIXEL_FORMAT_RGB_888) {
-    cv::Mat output(height, width, CV_8UC3);
-    for (int y = 0; y < height; ++y) {
-      const unsigned char *src = mapped + y * vf.u32Stride[0];
-      unsigned char *dst = output.ptr<unsigned char>(y);
-      if (format == PIXEL_FORMAT_BGR_888) {
-        std::memcpy(dst, src, static_cast<size_t>(width) * 3);
-      } else {
-        for (int x = 0; x < width; ++x) {
-          dst[x * 3 + 0] = src[x * 3 + 2];
-          dst[x * 3 + 1] = src[x * 3 + 1];
-          dst[x * 3 + 2] = src[x * 3 + 0];
-        }
-      }
-    }
-    *image = std::move(output);
-  } else if (format == PIXEL_FORMAT_BGR_888_PLANAR ||
-             format == PIXEL_FORMAT_RGB_888_PLANAR) {
-    const unsigned char *plane0 = mapped;
-    const unsigned char *plane1 = mapped + vf.u32Length[0];
-    const unsigned char *plane2 = plane1 + vf.u32Length[1];
-    cv::Mat output(height, width, CV_8UC3);
-    for (int y = 0; y < height; ++y) {
-      const unsigned char *src0 = plane0 + y * vf.u32Stride[0];
-      const unsigned char *src1 = plane1 + y * vf.u32Stride[1];
-      const unsigned char *src2 = plane2 + y * vf.u32Stride[2];
-      cv::Vec3b *dst = output.ptr<cv::Vec3b>(y);
-      for (int x = 0; x < width; ++x) {
-        if (format == PIXEL_FORMAT_BGR_888_PLANAR) {
-          dst[x] = cv::Vec3b(src0[x], src1[x], src2[x]);
-        } else {
-          dst[x] = cv::Vec3b(src2[x], src1[x], src0[x]);
-        }
-      }
-    }
-    *image = std::move(output);
-  } else if (format == PIXEL_FORMAT_YUV_400) {
-    cv::Mat gray(height, width, CV_8UC1);
-    for (int y = 0; y < height; ++y) {
-      std::memcpy(gray.ptr(y), mapped + y * vf.u32Stride[0], width);
-    }
-    cv::cvtColor(gray, *image, cv::COLOR_GRAY2BGR);
-  } else if (format == PIXEL_FORMAT_NV12 || format == PIXEL_FORMAT_NV21) {
-    cv::Mat yuv(height + height / 2, width, CV_8UC1);
-    unsigned char *y_base = mapped;
-    unsigned char *uv_base = mapped + vf.u32Length[0];
-    for (int y = 0; y < height; ++y) {
-      std::memcpy(yuv.ptr(y), y_base + y * vf.u32Stride[0], width);
-    }
-    for (int y = 0; y < height / 2; ++y) {
-      std::memcpy(yuv.ptr(height + y), uv_base + y * vf.u32Stride[1], width);
-    }
-    const int code = format == PIXEL_FORMAT_NV21 ? cv::COLOR_YUV2BGR_NV21
-                                                 : cv::COLOR_YUV2BGR_NV12;
-    cv::cvtColor(yuv, *image, code);
-  } else {
-    ok = false;
-    private_tdl_sdk::setError(
-        error, "single object tracker only supports RGB/BGR/NV12/NV21/YUV400 frame input");
-  }
-
-  CVI_SYS_Munmap(mapped, map_size);
-  if (!ok || image->empty()) {
-    private_tdl_sdk::setError(error, "failed to convert frame to BGR image");
-    return false;
-  }
-  return true;
-}
+constexpr float kTemplateOffset = 0.2f;
+constexpr float kSearchOffset = 2.0f;
+constexpr float kMinResponseScore = 0.2f;
 
 float clampFloat(float value, float low, float high) {
   return std::max(low, std::min(value, high));
 }
 
-float changeRatio(float value) {
-  if (value <= 0.0f) {
-    return std::numeric_limits<float>::infinity();
-  }
-  return std::max(value, 1.0f / value);
-}
-
-float sizeWithContext(float width, float height) {
-  const float pad = 0.5f * (width + height);
-  return std::sqrt((width + pad) * (height + pad));
-}
-
-std::vector<float> buildHannWindow(int width, int height) {
-  std::vector<float> out(static_cast<size_t>(width * height), 0.0f);
-  if (width <= 1 || height <= 1) {
-    std::fill(out.begin(), out.end(), 1.0f);
-    return out;
-  }
-
-  std::vector<float> hann_x(static_cast<size_t>(width), 0.0f);
-  std::vector<float> hann_y(static_cast<size_t>(height), 0.0f);
-  for (int x = 0; x < width; ++x) {
-    hann_x[static_cast<size_t>(x)] =
-        0.5f * (1.0f - std::cos(2.0f * static_cast<float>(CV_PI) * x /
-                                static_cast<float>(width - 1)));
-  }
-  for (int y = 0; y < height; ++y) {
-    hann_y[static_cast<size_t>(y)] =
-        0.5f * (1.0f - std::cos(2.0f * static_cast<float>(CV_PI) * y /
-                                static_cast<float>(height - 1)));
-  }
-  for (int y = 0; y < height; ++y) {
-    for (int x = 0; x < width; ++x) {
-      out[static_cast<size_t>(y * width + x)] =
-          hann_y[static_cast<size_t>(y)] * hann_x[static_cast<size_t>(x)];
-    }
-  }
-  return out;
-}
 
 Box clampBox(const Box &box, int width, int height) {
   Box out = box;
@@ -195,27 +43,41 @@ Box clampBox(const Box &box, int width, int height) {
   return out;
 }
 
-float cropSideLength(const Box &box, float scale) {
-  const float w = std::max(1.0f, box.width());
-  const float h = std::max(1.0f, box.height());
-  const float context = kContextAmount * (w + h);
-  const float size = std::sqrt((w + context) * (h + context));
-  return std::max(2.0f, size * scale);
+bool makeTrackerRoi(const Box &box, float offset, int image_width,
+                    int image_height,
+                    bmrt_runtime::VpssPreprocessor::Roi *roi,
+                    std::string *error) {
+  if (!roi || image_width <= 1 || image_height <= 1 || !box.valid()) {
+    bmrt_runtime::setError(error, "invalid tracker hardware ROI request");
+    return false;
+  }
+  const float box_width = std::max(1.0f, box.width());
+  const float box_height = std::max(1.0f, box.height());
+  const int requested_x = static_cast<int>(box.x1 - box_width * offset);
+  const int requested_y = static_cast<int>(box.y1 - box_height * offset);
+  const int requested_width = std::max(
+      2, static_cast<int>(box_width * (1.0f + 2.0f * offset)));
+  const int requested_height = std::max(
+      2, static_cast<int>(box_height * (1.0f + 2.0f * offset)));
+  const int x = std::max(0, std::min(requested_x, image_width - 1));
+  const int y = std::max(0, std::min(requested_y, image_height - 1));
+  roi->x = x;
+  roi->y = y;
+  roi->width = std::max(1, std::min(requested_width, image_width - x));
+  roi->height = std::max(1, std::min(requested_height, image_height - y));
+  return true;
 }
 
-cv::Mat cropSquarePatch(const cv::Mat &image, float center_x, float center_y,
-                        float side_length, int output_size) {
-  if (image.empty() || output_size <= 0) {
+cv::Mat cropTrackerPatch(const cv::Mat &image,
+                         const bmrt_runtime::VpssPreprocessor::Roi &roi,
+                         int output_width, int output_height) {
+  if (image.empty() || output_width <= 0 || output_height <= 0 ||
+      roi.width <= 0 || roi.height <= 0) {
     return cv::Mat();
   }
-  cv::Mat patch;
-  const int patch_side = std::max(2, static_cast<int>(std::round(side_length)));
-  cv::getRectSubPix(image, cv::Size(patch_side, patch_side),
-                    cv::Point2f(center_x, center_y), patch);
-  if (patch.empty()) {
-    return patch;
-  }
-  cv::resize(patch, patch, cv::Size(output_size, output_size), 0, 0,
+  const cv::Rect crop(roi.x, roi.y, roi.width, roi.height);
+  cv::Mat patch = image(crop);
+  cv::resize(patch, patch, cv::Size(output_width, output_height), 0, 0,
              cv::INTER_LINEAR);
   return patch;
 }
@@ -263,6 +125,16 @@ struct MultiInputOutputTensor {
   bm_shape_t shape{};
   std::vector<float> data;
 };
+
+struct TrackerRuntimeProfile {
+  double inference_ms = 0.0;
+  double output_copy_ms = 0.0;
+};
+
+double elapsedMs(const std::chrono::steady_clock::time_point &begin,
+                 const std::chrono::steady_clock::time_point &end) {
+  return std::chrono::duration<double, std::milli>(end - begin).count();
+}
 
 class MultiInputSession {
  public:
@@ -338,11 +210,36 @@ class MultiInputSession {
       input_nchw_[i] = nchw ? 1 : 0;
       input_dtypes_[i] = net_info_->input_dtypes[i];
     }
+    output_memories_.resize(static_cast<size_t>(net_info_->output_num));
+    for (int i = 0; i < net_info_->output_num; ++i) {
+      size_t bytes = net_info_->max_output_bytes[i];
+      if (bytes == 0) {
+        bytes = bmrt_shape_count(&net_info_->stages[0].output_shapes[i]) *
+                bmrt_data_type_size(net_info_->output_dtypes[i]);
+      }
+      if (bytes == 0 ||
+          bm_malloc_device_byte(handle_, &output_memories_[static_cast<size_t>(i)],
+                                bytes) != BM_SUCCESS) {
+        bmrt_runtime::setError(error,
+                               "failed to allocate persistent tracker output");
+        close();
+        return false;
+      }
+    }
     opened_ = true;
     return true;
   }
 
   void close() {
+    if (handle_) {
+      for (bm_device_mem_t &memory : output_memories_) {
+        if (memory.size > 0) {
+          bm_free_device(handle_, memory);
+          memory = bm_device_mem_t{};
+        }
+      }
+    }
+    output_memories_.clear();
     if (runtime_) {
       bmrt_destroy(runtime_);
       runtime_ = nullptr;
@@ -366,6 +263,17 @@ class MultiInputSession {
   int inputHeight(int index) const { return input_heights_.at(index); }
   int inputWidth(int index) const { return input_widths_.at(index); }
   bool inputNchw(int index) const { return input_nchw_.at(index) != 0; }
+  bm_handle_t handle() const { return handle_; }
+  bm_data_type_t inputDtype(int index) const { return input_dtypes_.at(index); }
+  float inputScale(int index) const {
+    return net_info_ && net_info_->input_scales ? net_info_->input_scales[index]
+                                                : 1.0f;
+  }
+  int inputZeroPoint(int index) const {
+    return net_info_ && net_info_->input_zero_point
+               ? net_info_->input_zero_point[index]
+               : 0;
+  }
 
   bool launch(const std::vector<std::vector<float>> &inputs,
               std::vector<MultiInputOutputTensor> *outputs,
@@ -492,6 +400,88 @@ class MultiInputSession {
     return true;
   }
 
+  bool launchDevice(const std::vector<bm_device_mem_t> &inputs,
+                    std::vector<MultiInputOutputTensor> *outputs,
+                    TrackerRuntimeProfile *profile,
+                    std::string *error) const {
+    if (!opened_ || !outputs ||
+        inputs.size() != static_cast<size_t>(net_info_->input_num) ||
+        output_memories_.size() != static_cast<size_t>(net_info_->output_num)) {
+      bmrt_runtime::setError(error, "invalid tracker device launch state");
+      return false;
+    }
+    std::vector<bm_tensor_t> input_tensors(inputs.size(), bm_tensor_t{});
+    for (int i = 0; i < net_info_->input_num; ++i) {
+      bmrt_tensor_with_device(&input_tensors[static_cast<size_t>(i)],
+                              inputs[static_cast<size_t>(i)],
+                              net_info_->input_dtypes[i],
+                              net_info_->stages[0].input_shapes[i]);
+    }
+    std::vector<bm_tensor_t> output_tensors(
+        static_cast<size_t>(net_info_->output_num), bm_tensor_t{});
+    for (int i = 0; i < net_info_->output_num; ++i) {
+      bmrt_tensor_with_device(&output_tensors[static_cast<size_t>(i)],
+                              output_memories_[static_cast<size_t>(i)],
+                              net_info_->output_dtypes[i],
+                              net_info_->stages[0].output_shapes[i]);
+    }
+    const auto inference_begin = std::chrono::steady_clock::now();
+    if (!bmrt_launch_tensor_ex(runtime_, net_name_.c_str(), input_tensors.data(),
+                               net_info_->input_num, output_tensors.data(),
+                               net_info_->output_num, true, false) ||
+        bm_thread_sync(handle_) != BM_SUCCESS) {
+      bmrt_runtime::setError(error, "tracker device launch failed");
+      return false;
+    }
+    if (profile) {
+      profile->inference_ms =
+          elapsedMs(inference_begin, std::chrono::steady_clock::now());
+    }
+
+    const auto output_begin = std::chrono::steady_clock::now();
+    outputs->clear();
+    outputs->reserve(static_cast<size_t>(net_info_->output_num));
+    for (int i = 0; i < net_info_->output_num; ++i) {
+      const bm_shape_t &shape = output_tensors[static_cast<size_t>(i)].shape;
+      const size_t count = bmrt_shape_count(&shape);
+      const size_t bytes = count * bmrt_data_type_size(net_info_->output_dtypes[i]);
+      std::vector<uint8_t> raw(bytes);
+      if (bm_memcpy_d2s(handle_, raw.data(),
+                        output_tensors[static_cast<size_t>(i)].device_mem) !=
+          BM_SUCCESS) {
+        bmrt_runtime::setError(error, "tracker output copy failed");
+        return false;
+      }
+      MultiInputOutputTensor out;
+      out.shape = shape;
+      out.data.resize(count);
+      const float scale = net_info_->output_scales ? net_info_->output_scales[i]
+                                                    : 1.0f;
+      const int zero = net_info_->output_zero_point
+                           ? net_info_->output_zero_point[i]
+                           : 0;
+      if (net_info_->output_dtypes[i] == BM_INT8) {
+        const int8_t *values = reinterpret_cast<const int8_t *>(raw.data());
+        for (size_t j = 0; j < count; ++j) out.data[j] = (values[j] - zero) * scale;
+      } else if (net_info_->output_dtypes[i] == BM_UINT8) {
+        const uint8_t *values = raw.data();
+        for (size_t j = 0; j < count; ++j) out.data[j] = (values[j] - zero) * scale;
+      } else if (net_info_->output_dtypes[i] == BM_FLOAT32) {
+        const float *values = reinterpret_cast<const float *>(raw.data());
+        std::copy(values, values + count, out.data.begin());
+      } else {
+        bmrt_runtime::setError(error, "unsupported tracker output dtype");
+        return false;
+      }
+      outputs->push_back(std::move(out));
+    }
+    if (profile) {
+      profile->output_copy_ms =
+          elapsedMs(output_begin, std::chrono::steady_clock::now());
+    }
+    return true;
+  }
+
  private:
   bm_handle_t handle_ = nullptr;
   void *runtime_ = nullptr;
@@ -501,6 +491,7 @@ class MultiInputSession {
   std::vector<int> input_widths_;
   std::vector<std::uint8_t> input_nchw_;
   std::vector<bm_data_type_t> input_dtypes_;
+  std::vector<bm_device_mem_t> output_memories_;
   bool opened_ = false;
 };
 
@@ -512,15 +503,13 @@ class SingleObjectTracker::Impl {
             std::string *resolved_model_type, std::string *error) {
     reset();
 
-    const std::string model_type = private_tdl_sdk::resolveModelToken(
-        config, requested_model_type, "TRACKING_FEARTRACK", error);
-    if (model_type.empty()) {
-      return false;
-    }
-
     if (!loadModelDescriptor(config.model_spec, &descriptor_, error)) {
       return false;
     }
+    std::string model_type = requested_model_type;
+    if (model_type.empty()) model_type = config.model_type;
+    if (model_type.empty()) model_type = descriptor_.model_type;
+    if (model_type.empty()) model_type = "TRACKING_FEARTRACK";
     if (descriptor_.input_type.empty()) {
       descriptor_.input_type = "rgb";
     }
@@ -540,6 +529,10 @@ class SingleObjectTracker::Impl {
 
     mean_ = bmrt_runtime::expandChannelValues(descriptor_.mean, 0.0f);
     scale_ = bmrt_runtime::expandChannelValues(descriptor_.scale, 1.0f / 255.0f);
+    if (!openHardwarePreprocessors(error)) {
+      session_.close();
+      return false;
+    }
     if (resolved_model_type) {
       *resolved_model_type = model_type;
     }
@@ -551,7 +544,7 @@ class SingleObjectTracker::Impl {
                   std::string *error) {
     cv::Mat image = cv::imread(image_path, cv::IMREAD_COLOR);
     if (image.empty()) {
-      private_tdl_sdk::setError(error, "failed to read image: " + image_path);
+      bmrt_runtime::setError(error, "failed to read image: " + image_path);
       return false;
     }
     return initializeImage(image, target, error);
@@ -560,27 +553,25 @@ class SingleObjectTracker::Impl {
   bool initializeFrame(const Frame &frame, const Box &target,
                        std::string *error) {
     if (!session_.opened()) {
-      private_tdl_sdk::setError(error, "single object tracker is not initialized");
+      bmrt_runtime::setError(error, "single object tracker is not initialized");
       return false;
     }
-    cv::Mat image;
     if (!frame.image_path.empty()) {
-      image = cv::imread(frame.image_path, cv::IMREAD_COLOR);
+      cv::Mat image = cv::imread(frame.image_path, cv::IMREAD_COLOR);
       if (image.empty()) {
-        private_tdl_sdk::setError(error, "failed to read image: " + frame.image_path);
+        bmrt_runtime::setError(error, "failed to read image: " + frame.image_path);
         return false;
       }
-    } else if (!frameToBgrMat(frame, &image, error)) {
-      return false;
+      return initializeImage(image, target, error);
     }
-    return initializeImage(image, target, error);
+    return initializeNativeFrame(frame, target, error);
   }
 
   bool run(const std::string &image_path, SingleObjectTrackingResult *result,
            std::string *error) {
     cv::Mat image = cv::imread(image_path, cv::IMREAD_COLOR);
     if (image.empty()) {
-      private_tdl_sdk::setError(error, "failed to read image: " + image_path);
+      bmrt_runtime::setError(error, "failed to read image: " + image_path);
       return false;
     }
     return trackImage(image, result, error);
@@ -589,20 +580,18 @@ class SingleObjectTracker::Impl {
   bool runFrame(const Frame &frame, SingleObjectTrackingResult *result,
                 std::string *error) {
     if (!ready()) {
-      private_tdl_sdk::setError(error, "single object tracker target is not initialized");
+      bmrt_runtime::setError(error, "single object tracker target is not initialized");
       return false;
     }
-    cv::Mat image;
     if (!frame.image_path.empty()) {
-      image = cv::imread(frame.image_path, cv::IMREAD_COLOR);
+      cv::Mat image = cv::imread(frame.image_path, cv::IMREAD_COLOR);
       if (image.empty()) {
-        private_tdl_sdk::setError(error, "failed to read image: " + frame.image_path);
+        bmrt_runtime::setError(error, "failed to read image: " + frame.image_path);
         return false;
       }
-    } else if (!frameToBgrMat(frame, &image, error)) {
-      return false;
+      return trackImage(image, result, error);
     }
-    return trackImage(image, result, error);
+    return trackNativeFrame(frame, result, error);
   }
 
   bool initialized() const { return session_.opened(); }
@@ -611,6 +600,8 @@ class SingleObjectTracker::Impl {
   Box currentBox() const { return current_box_; }
 
   void reset() {
+    template_preprocessor_.reset();
+    search_preprocessor_.reset();
     session_.close();
     descriptor_ = ModelDescriptor{};
     mean_.clear();
@@ -618,10 +609,200 @@ class SingleObjectTracker::Impl {
     model_type_.clear();
     current_box_ = Box{};
     initialized_ = false;
-    template_side_ = 0.0f;
   }
 
  private:
+  bool openHardwarePreprocessors(std::string *error) {
+    if (!session_.inputNchw(0) || !session_.inputNchw(1) ||
+        (session_.inputDtype(0) != BM_INT8 &&
+         session_.inputDtype(0) != BM_UINT8) ||
+        (session_.inputDtype(1) != BM_INT8 &&
+         session_.inputDtype(1) != BM_UINT8)) {
+      bmrt_runtime::setError(
+          error, "FearTrack hardware path requires NCHW INT8/UINT8 inputs");
+      return false;
+    }
+    auto make_config = [&](int index) {
+      bmrt_runtime::VpssPreprocessor::Config config;
+      config.width = session_.inputWidth(index);
+      config.height = session_.inputHeight(index);
+      config.rgb = bmrt_runtime::wantsRgbInput(descriptor_);
+      config.input_dtype = session_.inputDtype(index);
+      config.input_scale = session_.inputScale(index);
+      config.input_zero_point = session_.inputZeroPoint(index);
+      config.mean = {{mean_[0], mean_[1], mean_[2]}};
+      config.scale = {{scale_[0], scale_[1], scale_[2]}};
+      return config;
+    };
+    std::unique_ptr<bmrt_runtime::VpssPreprocessor> template_preprocessor(
+        new bmrt_runtime::VpssPreprocessor());
+    std::unique_ptr<bmrt_runtime::VpssPreprocessor> search_preprocessor(
+        new bmrt_runtime::VpssPreprocessor());
+    if (!template_preprocessor->open(session_.handle(), make_config(0), error) ||
+        !search_preprocessor->open(session_.handle(), make_config(1), error)) {
+      return false;
+    }
+    template_preprocessor_ = std::move(template_preprocessor);
+    search_preprocessor_ = std::move(search_preprocessor);
+    return true;
+  }
+
+  bool initializeNativeFrame(const Frame &frame, const Box &target,
+                             std::string *error) {
+    if (!frame.native || !template_preprocessor_) {
+      bmrt_runtime::setError(error, "FearTrack native template input is unavailable");
+      return false;
+    }
+    const auto *video = static_cast<const VIDEO_FRAME_INFO_S *>(frame.native);
+    const int width = static_cast<int>(video->stVFrame.u32Width);
+    const int height = static_cast<int>(video->stVFrame.u32Height);
+    current_box_ = clampBox(target, width, height);
+    if (!current_box_.valid()) {
+      bmrt_runtime::setError(error, "initial target box is invalid");
+      return false;
+    }
+    bmrt_runtime::VpssPreprocessor::Roi roi;
+    if (!makeTrackerRoi(current_box_, kTemplateOffset, width, height, &roi,
+                        error) ||
+        !template_preprocessor_->preprocess(frame.native, &roi, error)) {
+      return false;
+    }
+    initialized_ = true;
+    return true;
+  }
+
+  bool trackNativeFrame(const Frame &frame, SingleObjectTrackingResult *result,
+                        std::string *error) {
+    if (!frame.native || !search_preprocessor_) {
+      bmrt_runtime::setError(error, "FearTrack native search input is unavailable");
+      return false;
+    }
+    const auto *video = static_cast<const VIDEO_FRAME_INFO_S *>(frame.native);
+    const int width = static_cast<int>(video->stVFrame.u32Width);
+    const int height = static_cast<int>(video->stVFrame.u32Height);
+    bmrt_runtime::VpssPreprocessor::Roi roi;
+    const auto total_begin = std::chrono::steady_clock::now();
+    const auto preprocess_begin = total_begin;
+    if (!makeTrackerRoi(current_box_, kSearchOffset, width, height, &roi,
+                        error) ||
+        !search_preprocessor_->preprocess(frame.native, &roi, error)) {
+      return false;
+    }
+    const double preprocess_ms =
+        elapsedMs(preprocess_begin, std::chrono::steady_clock::now());
+    std::vector<MultiInputOutputTensor> outputs;
+    TrackerRuntimeProfile runtime_profile;
+    const std::vector<bm_device_mem_t> inputs{
+        template_preprocessor_->inputMemory(),
+        search_preprocessor_->inputMemory()};
+    if (!session_.launchDevice(inputs, &outputs, &runtime_profile, error)) {
+      return false;
+    }
+    const auto postprocess_begin = std::chrono::steady_clock::now();
+    if (!decodeOutputs(outputs, width, height, roi, result, error)) {
+      return false;
+    }
+    result->preprocess_ms = preprocess_ms;
+    result->inference_ms = runtime_profile.inference_ms;
+    result->output_copy_ms = runtime_profile.output_copy_ms;
+    result->postprocess_ms =
+        elapsedMs(postprocess_begin, std::chrono::steady_clock::now());
+    result->total_ms = elapsedMs(total_begin, std::chrono::steady_clock::now());
+    return true;
+  }
+
+  bool decodeOutputs(const std::vector<MultiInputOutputTensor> &outputs,
+                     int image_width, int image_height,
+                     const bmrt_runtime::VpssPreprocessor::Roi &search_roi,
+                     SingleObjectTrackingResult *result,
+                     std::string *error) {
+    if (!result || cls_output_index_ < 0 || bbox_output_index_ < 0 ||
+        static_cast<size_t>(std::max(cls_output_index_, bbox_output_index_)) >=
+            outputs.size()) {
+      bmrt_runtime::setError(error, "invalid FearTrack output state");
+      return false;
+    }
+    const auto &cls = outputs[static_cast<size_t>(cls_output_index_)];
+    const auto &bbox = outputs[static_cast<size_t>(bbox_output_index_)];
+    if (cls.shape.num_dims != 4 || bbox.shape.num_dims != 4) {
+      bmrt_runtime::setError(error, "tracker output rank is invalid");
+      return false;
+    }
+    const int score_h = cls.shape.dims[2];
+    const int score_w = cls.shape.dims[3];
+    const int bbox_h = bbox.shape.dims[2];
+    const int bbox_w = bbox.shape.dims[3];
+    if (score_h <= 0 || score_w <= 0 || score_h != bbox_h || score_w != bbox_w) {
+      bmrt_runtime::setError(error, "tracker output map size mismatch");
+      return false;
+    }
+    if (bbox.shape.dims[1] < 4 || cls.shape.dims[1] < 1) {
+      bmrt_runtime::setError(error, "tracker output channels are invalid");
+      return false;
+    }
+    const size_t map_size = static_cast<size_t>(bbox_h * bbox_w);
+    int selected_x = -1;
+    int selected_y = -1;
+    float selected_score = 0.0f;
+    // FearTrack trains bbox_Add as logarithmic distances from a stride-16 grid
+    // point. Select the local 5x5 response average used by the model's SDK.
+    for (int y = 2; y < score_h - 2; ++y) {
+      for (int x = 2; x < score_w - 2; ++x) {
+        const float center_score = cls.data[static_cast<size_t>(y * score_w + x)];
+        if (center_score <= kMinResponseScore) {
+          continue;
+        }
+        float average_score = 0.0f;
+        for (int dy = -2; dy <= 2; ++dy) {
+          for (int dx = -2; dx <= 2; ++dx) {
+            average_score +=
+                cls.data[static_cast<size_t>((y + dy) * score_w + x + dx)];
+          }
+        }
+        average_score /= 25.0f;
+        if (average_score > selected_score) {
+          selected_score = average_score;
+          selected_x = x;
+          selected_y = y;
+        }
+      }
+    }
+    result->clear();
+    result->search_width = session_.inputWidth(1);
+    result->search_height = session_.inputHeight(1);
+    if (selected_x < 0 || selected_y < 0) {
+      result->box = current_box_;
+      return true;
+    }
+    const size_t selected = static_cast<size_t>(selected_y * score_w + selected_x);
+    const float grid_x = static_cast<float>(selected_x *
+                                            (session_.inputWidth(1) / score_w));
+    const float grid_y = static_cast<float>(selected_y *
+                                            (session_.inputHeight(1) / score_h));
+    const float x1 = grid_x - std::exp(bbox.data[0 * map_size + selected]);
+    const float y1 = grid_y - std::exp(bbox.data[1 * map_size + selected]);
+    const float x2 = grid_x + std::exp(bbox.data[2 * map_size + selected]);
+    const float y2 = grid_y + std::exp(bbox.data[3 * map_size + selected]);
+    const float scale_x = static_cast<float>(search_roi.width) /
+                          std::max(1, session_.inputWidth(1));
+    const float scale_y = static_cast<float>(search_roi.height) /
+                          std::max(1, session_.inputHeight(1));
+    Box next;
+    next.x1 = search_roi.x + x1 * scale_x;
+    next.y1 = search_roi.y + y1 * scale_y;
+    next.x2 = search_roi.x + x2 * scale_x;
+    next.y2 = search_roi.y + y2 * scale_y;
+    next.score = selected_score;
+    next.class_id = 0;
+    current_box_ = clampBox(next, image_width, image_height);
+    result->box = current_box_;
+    result->confidence = selected_score;
+    result->tracked = true;
+    result->response_x = selected_x;
+    result->response_y = selected_y;
+    return true;
+  }
+
   bool buildOutputIndices(std::string *error) {
     const bm_net_info_t *net_info = session_.netInfo();
     cls_output_index_ = -1;
@@ -642,36 +823,37 @@ class SingleObjectTracker::Impl {
       }
     }
     if (cls_output_index_ < 0 || bbox_output_index_ < 0) {
-      private_tdl_sdk::setError(error, "single object tracker outputs are incomplete");
+      bmrt_runtime::setError(error, "single object tracker outputs are incomplete");
       return false;
     }
-    hann_window_ = buildHannWindow(score_map_width_, score_map_height_);
     return true;
   }
 
   bool initializeImage(const cv::Mat &image, const Box &target,
                        std::string *error) {
     if (!session_.opened()) {
-      private_tdl_sdk::setError(error, "single object tracker is not initialized");
+      bmrt_runtime::setError(error, "single object tracker is not initialized");
       return false;
     }
     if (image.empty()) {
-      private_tdl_sdk::setError(error, "initialize image is empty");
+      bmrt_runtime::setError(error, "initialize image is empty");
       return false;
     }
     current_box_ = clampBox(target, image.cols, image.rows);
     if (!current_box_.valid()) {
-      private_tdl_sdk::setError(error, "initial target box is invalid");
+      bmrt_runtime::setError(error, "initial target box is invalid");
       return false;
     }
 
-    const float cx = (current_box_.x1 + current_box_.x2) * 0.5f;
-    const float cy = (current_box_.y1 + current_box_.y2) * 0.5f;
-    template_side_ = cropSideLength(current_box_, kTemplateScale);
-    cv::Mat patch = cropSquarePatch(image, cx, cy, template_side_,
-                                    session_.inputWidth(0));
+    bmrt_runtime::VpssPreprocessor::Roi roi;
+    if (!makeTrackerRoi(current_box_, kTemplateOffset, image.cols, image.rows,
+                        &roi, error)) {
+      return false;
+    }
+    cv::Mat patch = cropTrackerPatch(image, roi, session_.inputWidth(0),
+                                     session_.inputHeight(0));
     if (patch.empty()) {
-      private_tdl_sdk::setError(error, "failed to crop tracker template patch");
+      bmrt_runtime::setError(error, "failed to crop tracker template patch");
       return false;
     }
     writeImageToTensor(patch, bmrt_runtime::wantsRgbInput(descriptor_),
@@ -683,21 +865,25 @@ class SingleObjectTracker::Impl {
   bool trackImage(const cv::Mat &image, SingleObjectTrackingResult *result,
                   std::string *error) {
     if (!ready()) {
-      private_tdl_sdk::setError(error, "single object tracker target is not initialized");
+      bmrt_runtime::setError(error, "single object tracker target is not initialized");
       return false;
     }
     if (!result) {
-      private_tdl_sdk::setError(error, "tracker result pointer is null");
+      bmrt_runtime::setError(error, "tracker result pointer is null");
       return false;
     }
 
-    const float cx = (current_box_.x1 + current_box_.x2) * 0.5f;
-    const float cy = (current_box_.y1 + current_box_.y2) * 0.5f;
-    const float search_side = cropSideLength(current_box_, kSearchScale);
-    cv::Mat patch = cropSquarePatch(image, cx, cy, search_side,
-                                    session_.inputWidth(1));
+    const auto total_begin = std::chrono::steady_clock::now();
+    const auto preprocess_begin = total_begin;
+    bmrt_runtime::VpssPreprocessor::Roi roi;
+    if (!makeTrackerRoi(current_box_, kSearchOffset, image.cols, image.rows,
+                        &roi, error)) {
+      return false;
+    }
+    cv::Mat patch = cropTrackerPatch(image, roi, session_.inputWidth(1),
+                                     session_.inputHeight(1));
     if (patch.empty()) {
-      private_tdl_sdk::setError(error, "failed to crop tracker search patch");
+      bmrt_runtime::setError(error, "failed to crop tracker search patch");
       return false;
     }
 
@@ -708,148 +894,25 @@ class SingleObjectTracker::Impl {
     std::vector<std::vector<float>> inputs(2);
     inputs[0] = template_tensor_;
     inputs[1] = std::move(search_tensor);
+    const double preprocess_ms =
+        elapsedMs(preprocess_begin, std::chrono::steady_clock::now());
 
     std::vector<MultiInputOutputTensor> outputs;
+    const auto inference_begin = std::chrono::steady_clock::now();
     if (!session_.launch(inputs, &outputs, error)) {
       return false;
     }
-
-    const MultiInputOutputTensor &cls = outputs[static_cast<size_t>(cls_output_index_)];
-    const MultiInputOutputTensor &bbox = outputs[static_cast<size_t>(bbox_output_index_)];
-    if (cls.shape.num_dims != 4 || bbox.shape.num_dims != 4) {
-      private_tdl_sdk::setError(error, "tracker output rank is invalid");
+    const double inference_ms =
+        elapsedMs(inference_begin, std::chrono::steady_clock::now());
+    const auto postprocess_begin = std::chrono::steady_clock::now();
+    if (!decodeOutputs(outputs, image.cols, image.rows, roi, result, error)) {
       return false;
     }
-
-    const int score_h = cls.shape.dims[2];
-    const int score_w = cls.shape.dims[3];
-    const int bbox_h = bbox.shape.dims[2];
-    const int bbox_w = bbox.shape.dims[3];
-    if (score_h <= 0 || score_w <= 0 || score_h != bbox_h || score_w != bbox_w) {
-      private_tdl_sdk::setError(error, "tracker output map size mismatch");
-      return false;
-    }
-
-    int best_index = -1;
-    float best_score = -std::numeric_limits<float>::infinity();
-    for (int i = 0; i < score_h * score_w; ++i) {
-      const float score = cls.data[static_cast<size_t>(i)];
-      if (score > best_score) {
-        best_score = score;
-        best_index = i;
-      }
-    }
-    if (best_index < 0) {
-      private_tdl_sdk::setError(error, "tracker score map is empty");
-      return false;
-    }
-
-    const int best_y = best_index / score_w;
-    const int best_x = best_index % score_w;
-    const float stride_x = search_side / static_cast<float>(score_w);
-    const float stride_y = search_side / static_cast<float>(score_h);
-    const size_t map_size = static_cast<size_t>(bbox_h * bbox_w);
-    const float box_scale =
-        search_side / static_cast<float>(std::max(1, session_.inputWidth(1)));
-    const float current_width = std::max(1.0f, current_box_.width());
-    const float current_height = std::max(1.0f, current_box_.height());
-
-    int selected_index = -1;
-    float selected_penalized_score = -std::numeric_limits<float>::infinity();
-    float selected_score = 0.0f;
-    float selected_left = 0.0f;
-    float selected_top = 0.0f;
-    float selected_right = 0.0f;
-    float selected_bottom = 0.0f;
-    float selected_penalty = 1.0f;
-
-    for (int i = 0; i < score_h * score_w; ++i) {
-      const float score = cls.data[static_cast<size_t>(i)];
-      const float left =
-          bbox.data[0 * map_size + static_cast<size_t>(i)] * box_scale;
-      const float top =
-          bbox.data[1 * map_size + static_cast<size_t>(i)] * box_scale;
-      const float right =
-          bbox.data[2 * map_size + static_cast<size_t>(i)] * box_scale;
-      const float bottom =
-          bbox.data[3 * map_size + static_cast<size_t>(i)] * box_scale;
-      const float pred_width = std::max(1.0f, left + right);
-      const float pred_height = std::max(1.0f, top + bottom);
-      const float scale_penalty =
-          changeRatio(sizeWithContext(pred_width, pred_height) /
-                      sizeWithContext(current_width, current_height));
-      const float ratio_penalty =
-          changeRatio((current_width / current_height) /
-                      (pred_width / pred_height));
-      const float penalty =
-          std::exp(-(scale_penalty * ratio_penalty - 1.0f) * kPenaltyK);
-      const float window =
-          i < static_cast<int>(hann_window_.size()) ? hann_window_[static_cast<size_t>(i)]
-                                                    : 0.0f;
-      const float penalized_score =
-          penalty * score * (1.0f - kWindowInfluence) +
-          window * kWindowInfluence;
-      if (penalized_score > selected_penalized_score) {
-        selected_penalized_score = penalized_score;
-        selected_index = i;
-        selected_score = score;
-        selected_left = left;
-        selected_top = top;
-        selected_right = right;
-        selected_bottom = bottom;
-        selected_penalty = penalty;
-      }
-    }
-    if (selected_index < 0) {
-      private_tdl_sdk::setError(error, "tracker score map is empty");
-      return false;
-    }
-
-    const int selected_y = selected_index / score_w;
-    const int selected_x = selected_index % score_w;
-    const float patch_center_x =
-        (static_cast<float>(selected_x) + 0.5f) * stride_x - search_side * 0.5f;
-    const float patch_center_y =
-        (static_cast<float>(selected_y) + 0.5f) * stride_y - search_side * 0.5f;
-    const float pred_width = std::max(1.0f, selected_left + selected_right);
-    const float pred_height = std::max(1.0f, selected_top + selected_bottom);
-    const float pred_center_x =
-        cx + patch_center_x + (selected_right - selected_left) * 0.5f;
-    const float pred_center_y =
-        cy + patch_center_y + (selected_bottom - selected_top) * 0.5f;
-    const float lr = clampFloat(selected_penalty * selected_score * kTrackLr,
-                                0.0f, 1.0f);
-    const float next_width =
-        current_width * (1.0f - lr) + pred_width * lr;
-    const float next_height =
-        current_height * (1.0f - lr) + pred_height * lr;
-
-    Box next;
-    next.x1 = pred_center_x - next_width * 0.5f;
-    next.y1 = pred_center_y - next_height * 0.5f;
-    next.x2 = pred_center_x + next_width * 0.5f;
-    next.y2 = pred_center_y + next_height * 0.5f;
-    next.score = selected_score;
-    next.class_id = 0;
-    next = clampBox(next, image.cols, image.rows);
-    current_box_ = next;
-
-    result->clear();
-    result->box = next;
-    result->confidence = selected_score;
-    result->search_width = session_.inputWidth(1);
-    result->search_height = session_.inputHeight(1);
-
-    if (trackerDebugEnabled()) {
-      std::cout << "track debug: score_map=" << score_w << "x" << score_h
-                << " best=(" << selected_x << "," << selected_y << ") score="
-                << selected_score << " penalty=" << selected_penalty
-                << " lr=" << lr
-                << " bbox=(" << selected_left << "," << selected_top << ","
-                << selected_right << "," << selected_bottom
-                << ") box=(" << next.x1 << "," << next.y1 << "," << next.x2
-                << "," << next.y2 << ")\n";
-    }
+    result->preprocess_ms = preprocess_ms;
+    result->inference_ms = inference_ms;
+    result->postprocess_ms =
+        elapsedMs(postprocess_begin, std::chrono::steady_clock::now());
+    result->total_ms = elapsedMs(total_begin, std::chrono::steady_clock::now());
     return true;
   }
 
@@ -858,14 +921,14 @@ class SingleObjectTracker::Impl {
   std::vector<float> mean_;
   std::vector<float> scale_;
   std::vector<float> template_tensor_;
+  std::unique_ptr<bmrt_runtime::VpssPreprocessor> template_preprocessor_;
+  std::unique_ptr<bmrt_runtime::VpssPreprocessor> search_preprocessor_;
   std::string model_type_;
   Box current_box_;
-  float template_side_ = 0.0f;
   int cls_output_index_ = -1;
   int bbox_output_index_ = -1;
   int score_map_width_ = 0;
   int score_map_height_ = 0;
-  std::vector<float> hann_window_;
   bool initialized_ = false;
 };
 
@@ -923,7 +986,7 @@ bool SingleObjectTracker::load(const std::string &model_spec,
 bool SingleObjectTracker::initialize(const std::string &image_path,
                                      const Box &target, std::string *error) {
   if (!impl_) {
-    private_tdl_sdk::setError(error, "single object tracker is not initialized");
+    bmrt_runtime::setError(error, "single object tracker is not initialized");
     last_error_ = error ? *error : std::string();
     return false;
   }
@@ -935,7 +998,7 @@ bool SingleObjectTracker::initialize(const std::string &image_path,
 bool SingleObjectTracker::initializeFrame(const Frame &frame, const Box &target,
                                           std::string *error) {
   if (!impl_) {
-    private_tdl_sdk::setError(error, "single object tracker is not initialized");
+    bmrt_runtime::setError(error, "single object tracker is not initialized");
     last_error_ = error ? *error : std::string();
     return false;
   }
@@ -948,7 +1011,7 @@ bool SingleObjectTracker::run(const std::string &image_path,
                               SingleObjectTrackingResult *result,
                               std::string *error) {
   if (!impl_) {
-    private_tdl_sdk::setError(error, "single object tracker is not initialized");
+    bmrt_runtime::setError(error, "single object tracker is not initialized");
     last_error_ = error ? *error : std::string();
     return false;
   }
@@ -961,7 +1024,7 @@ bool SingleObjectTracker::runFrame(const Frame &frame,
                                    SingleObjectTrackingResult *result,
                                    std::string *error) {
   if (!impl_) {
-    private_tdl_sdk::setError(error, "single object tracker is not initialized");
+    bmrt_runtime::setError(error, "single object tracker is not initialized");
     last_error_ = error ? *error : std::string();
     return false;
   }

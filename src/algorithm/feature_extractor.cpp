@@ -3,7 +3,7 @@
 #include <memory>
 #include <utility>
 
-#include "tdl_app/nn_base.hpp"
+#include "tdl_app/nn_feature.hpp"
 #include "algorithm/private/runtime_factory.hpp"
 
 namespace tdl_app {
@@ -109,6 +109,21 @@ bool FeatureExtractor::extractFrame(const Frame &frame, const InferOptions &opti
     return false;
   }
   return model_->predictFrame(frame, options, result, error);
+}
+
+bool FeatureExtractor::extractFrameCrop(const Frame &frame, const Box &roi,
+                                        const InferOptions &options,
+                                        AlgorithmResult *result,
+                                        std::string *error) {
+  const std::shared_ptr<NnFeature> feature_model =
+      std::dynamic_pointer_cast<NnFeature>(model_);
+  if (!feature_model) {
+    if (error) {
+      *error = "feature extractor does not provide native ROI inference";
+    }
+    return false;
+  }
+  return feature_model->predictFrameCrop(frame, roi, options, result, error);
 }
 
 bool FeatureExtractor::initialized() const {

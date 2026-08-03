@@ -3,19 +3,21 @@
 
 #include "demo_support.hpp"
 #include "image_demo_support.hpp"
+#include "ocr_overlay_support.hpp"
 #include "tdl_app/tdl_app.hpp"
 
 namespace {
 
 struct Options {
   image_demo_support::CommonOptions common;
+  std::string font = "./fonts/DroidSansFallbackFull.ttf";
 };
 
 void printUsage() {
   std::cout
       << "Usage:\n"
       << "  tdl_pp_ocr_demo --image FILE --model-spec FILE\n"
-      << "                  [--firmware FILE] [--output FILE]\n";
+      << "                  [--firmware FILE] [--font FILE] [--output FILE]\n";
 }
 
 bool parseArgs(int argc, char **argv, Options *opt) {
@@ -30,7 +32,15 @@ bool parseArgs(int argc, char **argv, Options *opt) {
     if (handled) {
       continue;
     }
-    if (std::string(argv[i]) == "-h" || std::string(argv[i]) == "--help") {
+    if (std::string(argv[i]) == "--font") {
+      if (i + 1 >= argc) {
+        std::cerr << "--font requires a value\n";
+        return false;
+      }
+      opt->font = argv[++i];
+      continue;
+    } else if (std::string(argv[i]) == "-h" ||
+               std::string(argv[i]) == "--help") {
       printUsage();
       std::exit(0);
     }
@@ -71,8 +81,8 @@ int main(int argc, char **argv) {
   }
 
   if (!opt.common.output.empty()) {
-    if (!image_demo_support::saveAnnotatedOutputIfRequested(opt.common, result,
-                                                            &error)) {
+    if (!ocr_overlay_support::saveAnnotatedImage(
+            opt.common.image, opt.common.output, result, opt.font, &error)) {
       std::cerr << "save failed: " << error << "\n";
       return 4;
     }

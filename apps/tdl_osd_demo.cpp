@@ -2,7 +2,8 @@
 #include <iostream>
 #include <string>
 
-#include "tdl_app/advanced.hpp"
+#include "tdl_app/osd_region.hpp"
+#include "tdl_app/sys_context.hpp"
 
 namespace {
 

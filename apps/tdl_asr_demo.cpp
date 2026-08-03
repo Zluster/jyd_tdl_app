@@ -18,14 +18,17 @@ struct Options {
 void printUsage() {
   std::cout
       << "Usage:\n"
-      << "  tdl_asr_demo --pcm FILE --model-spec FILE\n"
+      << "  tdl_asr_demo --pcm FILE|- --model-spec FILE\n"
       << "               [--firmware FILE] [--model-dir DIR]\n"
       << "\n"
       << "PCM convention:\n"
       << "  - raw pcm\n"
       << "  - 16 kHz\n"
       << "  - 16-bit signed little-endian\n"
-      << "  - mono\n";
+      << "  - mono\n"
+      << "\n"
+      << "Notes:\n"
+      << "  - Use --pcm - to read raw PCM from stdin / pipe\n";
 }
 
 bool parseArgs(int argc, char **argv, Options *opt) {
@@ -96,6 +99,30 @@ bool readFile(const std::string &path, std::vector<std::uint8_t> *data) {
          ifs.gcount() == size;
 }
 
+bool readStream(std::istream *input, std::vector<std::uint8_t> *data) {
+  if (!input) {
+    return false;
+  }
+
+  constexpr std::size_t kChunkSize = 4096;
+  std::vector<char> chunk(kChunkSize);
+  data->clear();
+
+  while (true) {
+    input->read(chunk.data(), static_cast<std::streamsize>(chunk.size()));
+    const std::streamsize got = input->gcount();
+    if (got < 0) {
+      return false;
+    }
+    if (got > 0) {
+      data->insert(data->end(), chunk.begin(), chunk.begin() + got);
+    }
+    if (got == 0) {
+      return !input->bad();
+    }
+  }
+}
+
 }  // namespace
 
 int main(int argc, char **argv) {
@@ -106,8 +133,10 @@ int main(int argc, char **argv) {
   }
 
   std::vector<std::uint8_t> pcm;
-  if (!readFile(opt.pcm_path, &pcm)) {
-    std::cerr << "failed to read pcm file: " << opt.pcm_path << "\n";
+  const bool read_ok = opt.pcm_path == "-" ? readStream(&std::cin, &pcm)
+                                            : readFile(opt.pcm_path, &pcm);
+  if (!read_ok) {
+    std::cerr << "failed to read pcm input: " << opt.pcm_path << "\n";
     return 2;
   }
   if (pcm.empty()) {
@@ -136,6 +165,10 @@ int main(int argc, char **argv) {
   }
 
   std::cout << "pcm_bytes: " << pcm.size() << "\n";
-  std::cout << "text: " << result.text << "\n";
-  return 0;
+  std::cout << "text: " << result.text << "\n" << std::flush;
+
+  // CV184X TDL tears down unrelated VPSS/MMF state while destroying the
+  // Zipformer handle, which can crash after a successful one-shot CLI run.
+  // This demo owns no persistent resources and is intentionally one-shot.
+  std::_Exit(0);
 }

@@ -10,4 +10,4 @@ input_type = rgb
 mean = 123.5,123.5,123.5
 scale = 0.017124753831663668,0.017124753831663668,0.017124753831663668
 apply_softmax = true
-labels = 郁金香,水仙花,芦荟,菊花,镜面草
+labels = yujinxiang,shuixianhua,luhui,juhua,jingmiancao

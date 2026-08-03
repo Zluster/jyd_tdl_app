@@ -1,6 +1,7 @@
 #include "tdl_app/nn_plate_recognizer.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cctype>
 #include <cmath>
 #include <fstream>
@@ -12,13 +13,129 @@
 #include <utility>
 #include <vector>
 
+#include <cstring>
+
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
-#include "algorithm/private/bmrt_utils.hpp"
+#include "algorithm/private/vpss_preprocessor.hpp"
+#include "cvi_comm_video.h"
+#include "cvi_sys.h"
 
 namespace tdl_app {
 namespace {
+
+using OcrClock = std::chrono::steady_clock;
+
+double elapsedMs(const OcrClock::time_point &begin,
+                 const OcrClock::time_point &end) {
+  return std::chrono::duration<double, std::milli>(end - begin).count();
+}
+
+bool frameToBgrMat(const Frame &frame, cv::Mat *image, std::string *error) {
+  if (!frame.native) {
+    bmrt_runtime::setError(error,
+                           "frame has no native VIDEO_FRAME_INFO_S buffer");
+    return false;
+  }
+
+  const auto *video = static_cast<VIDEO_FRAME_INFO_S *>(frame.native);
+  const auto &vf = video->stVFrame;
+  const int width = static_cast<int>(vf.u32Width);
+  const int height = static_cast<int>(vf.u32Height);
+  const int format = static_cast<int>(vf.enPixelFormat);
+  if (width <= 0 || height <= 0) {
+    bmrt_runtime::setError(error, "invalid frame size");
+    return false;
+  }
+
+  std::size_t map_size = 0;
+  for (int i = 0; i < 3; ++i) {
+    map_size += vf.u32Length[i];
+  }
+  if (map_size == 0) {
+    bmrt_runtime::setError(error, "frame buffer length is zero");
+    return false;
+  }
+
+  auto *mapped =
+      static_cast<unsigned char *>(CVI_SYS_Mmap(vf.u64PhyAddr[0], map_size));
+  if (!mapped) {
+    bmrt_runtime::setError(error, "CVI_SYS_Mmap failed");
+    return false;
+  }
+  CVI_SYS_IonInvalidateCache(vf.u64PhyAddr[0], mapped, map_size);
+
+  bool ok = true;
+  if (format == PIXEL_FORMAT_BGR_888 || format == PIXEL_FORMAT_RGB_888) {
+    cv::Mat output(height, width, CV_8UC3);
+    for (int y = 0; y < height; ++y) {
+      const unsigned char *src = mapped + y * vf.u32Stride[0];
+      unsigned char *dst = output.ptr<unsigned char>(y);
+      if (format == PIXEL_FORMAT_BGR_888) {
+        std::memcpy(dst, src, static_cast<size_t>(width) * 3);
+      } else {
+        for (int x = 0; x < width; ++x) {
+          dst[x * 3 + 0] = src[x * 3 + 2];
+          dst[x * 3 + 1] = src[x * 3 + 1];
+          dst[x * 3 + 2] = src[x * 3 + 0];
+        }
+      }
+    }
+    *image = std::move(output);
+  } else if (format == PIXEL_FORMAT_BGR_888_PLANAR ||
+             format == PIXEL_FORMAT_RGB_888_PLANAR) {
+    const unsigned char *plane0 = mapped;
+    const unsigned char *plane1 = mapped + vf.u32Length[0];
+    const unsigned char *plane2 = plane1 + vf.u32Length[1];
+    cv::Mat output(height, width, CV_8UC3);
+    for (int y = 0; y < height; ++y) {
+      const unsigned char *src0 = plane0 + y * vf.u32Stride[0];
+      const unsigned char *src1 = plane1 + y * vf.u32Stride[1];
+      const unsigned char *src2 = plane2 + y * vf.u32Stride[2];
+      cv::Vec3b *dst = output.ptr<cv::Vec3b>(y);
+      for (int x = 0; x < width; ++x) {
+        if (format == PIXEL_FORMAT_BGR_888_PLANAR) {
+          dst[x] = cv::Vec3b(src0[x], src1[x], src2[x]);
+        } else {
+          dst[x] = cv::Vec3b(src2[x], src1[x], src0[x]);
+        }
+      }
+    }
+    *image = std::move(output);
+  } else if (format == PIXEL_FORMAT_YUV_400) {
+    cv::Mat gray(height, width, CV_8UC1);
+    for (int y = 0; y < height; ++y) {
+      std::memcpy(gray.ptr(y), mapped + y * vf.u32Stride[0], width);
+    }
+    cv::cvtColor(gray, *image, cv::COLOR_GRAY2BGR);
+  } else if (format == PIXEL_FORMAT_NV12 || format == PIXEL_FORMAT_NV21) {
+    cv::Mat yuv(height + height / 2, width, CV_8UC1);
+    unsigned char *y_base = mapped;
+    unsigned char *uv_base = mapped + vf.u32Length[0];
+    for (int y = 0; y < height; ++y) {
+      std::memcpy(yuv.ptr(y), y_base + y * vf.u32Stride[0], width);
+    }
+    for (int y = 0; y < height / 2; ++y) {
+      std::memcpy(yuv.ptr(height + y), uv_base + y * vf.u32Stride[1], width);
+    }
+    const int code = format == PIXEL_FORMAT_NV21 ? cv::COLOR_YUV2BGR_NV21
+                                                 : cv::COLOR_YUV2BGR_NV12;
+    cv::cvtColor(yuv, *image, code);
+  } else {
+    ok = false;
+    bmrt_runtime::setError(
+        error,
+        "plate recognizer only supports RGB/BGR/NV12/NV21/YUV400 frame input");
+  }
+
+  CVI_SYS_Munmap(mapped, map_size);
+  if (!ok || image->empty()) {
+    bmrt_runtime::setError(error, "failed to convert frame to BGR image");
+    return false;
+  }
+  return true;
+}
 
 const std::vector<std::string> kLegacyPlateChars = {
     "浜?", "娌?", "娲?", "娓?", "鍐€", "鏅?", "钂?", "杈?", "鍚?", "榛?",
@@ -278,14 +395,22 @@ class NnPlateRecognizer::CustomRuntime {
 
   bool inferImage(const std::string &image_path, const Box *roi,
                   AlgorithmResult *result, std::string *error) {
+    cv::Mat image = cv::imread(image_path, cv::IMREAD_COLOR);
+    if (image.empty()) {
+      bmrt_runtime::setError(error, "failed to read image: " + image_path);
+      return false;
+    }
+    return inferMat(image, roi, result, error);
+  }
+
+  bool inferMat(const cv::Mat &image, const Box *roi, AlgorithmResult *result,
+                std::string *error) {
     if (!result) {
       bmrt_runtime::setError(error, "result pointer is null");
       return false;
     }
-
-    cv::Mat image = cv::imread(image_path, cv::IMREAD_COLOR);
     if (image.empty()) {
-      bmrt_runtime::setError(error, "failed to read image: " + image_path);
+      bmrt_runtime::setError(error, "input image is empty");
       return false;
     }
 
@@ -297,9 +422,71 @@ class NnPlateRecognizer::CustomRuntime {
     }
 
     if (pp_ocr_mode_) {
-      return inferPpOcr(cropped, image_roi, result, error);
+      return inferPpOcr(cropped, image_roi, result, nullptr, nullptr, error);
     }
     return inferSingleRecognizer(cropped, result, error);
+  }
+
+  bool inferFrame(const Frame &frame, const Box *roi, AlgorithmResult *result,
+                  OcrProfile *profile, std::string *error) {
+    const auto total_begin = OcrClock::now();
+    if (profile) *profile = OcrProfile{};
+    if (!result || !frame.native) {
+      bmrt_runtime::setError(error, "plate frame/result pointer is null");
+      return false;
+    }
+    if (pp_ocr_mode_) {
+      if (roi) {
+        bmrt_runtime::setError(error,
+                               "PP-OCR camera path does not accept an outer ROI");
+        return false;
+      }
+      const auto convert_begin = OcrClock::now();
+      cv::Mat image;
+      if (!frameToBgrMat(frame, &image, error)) return false;
+      if (profile) {
+        profile->frame_convert_ms = elapsedMs(convert_begin, OcrClock::now());
+      }
+      const cv::Rect image_roi(0, 0, image.cols, image.rows);
+      const bool ok = inferPpOcr(image, image_roi, result, frame.native,
+                                 profile, error);
+      if (profile) {
+        profile->total_ms = elapsedMs(total_begin, OcrClock::now());
+      }
+      return ok;
+    }
+    if (!hardware_preprocessor_) {
+      bmrt_runtime::setError(
+          error, "plate recognizer requires NCHW INT8/UINT8 VPSS input");
+      return false;
+    }
+    bmrt_runtime::VpssPreprocessor::Roi hardware_roi;
+    const bmrt_runtime::VpssPreprocessor::Roi *roi_ptr = nullptr;
+    if (roi) {
+      const auto *video = static_cast<const VIDEO_FRAME_INFO_S *>(frame.native);
+      const int width = static_cast<int>(video->stVFrame.u32Width);
+      const int height = static_cast<int>(video->stVFrame.u32Height);
+      hardware_roi.x = std::max(0, std::min(static_cast<int>(roi->x1), width - 1));
+      hardware_roi.y = std::max(0, std::min(static_cast<int>(roi->y1), height - 1));
+      const int right = std::max(hardware_roi.x + 1,
+                                 std::min(static_cast<int>(roi->x2), width));
+      const int bottom = std::max(hardware_roi.y + 1,
+                                  std::min(static_cast<int>(roi->y2), height));
+      hardware_roi.width = right - hardware_roi.x;
+      hardware_roi.height = bottom - hardware_roi.y;
+      roi_ptr = &hardware_roi;
+    }
+    if (!hardware_preprocessor_->preprocess(frame.native, roi_ptr, error)) {
+      return false;
+    }
+    std::vector<bmrt_runtime::OutputTensor> outputs;
+    if (!single_session_.launchDevice(hardware_preprocessor_->inputMemory(),
+                                      &outputs, error)) {
+      return false;
+    }
+    const bool ok = decodeSingleOutputs(outputs, result, error);
+    if (profile) profile->total_ms = elapsedMs(total_begin, OcrClock::now());
+    return ok;
   }
 
  private:
@@ -317,6 +504,26 @@ class NnPlateRecognizer::CustomRuntime {
     if (labels_.empty()) {
       labels_ = kLegacyPlateChars;
     }
+    if (!single_session_.nchwLayout() ||
+        (single_session_.inputDtype() != BM_INT8 &&
+         single_session_.inputDtype() != BM_UINT8)) {
+      return true;
+    }
+    bmrt_runtime::VpssPreprocessor::Config vpss_config;
+    vpss_config.width = single_session_.inputWidth();
+    vpss_config.height = single_session_.inputHeight();
+    vpss_config.rgb = bmrt_runtime::wantsRgbInput(descriptor_, false);
+    vpss_config.input_dtype = single_session_.inputDtype();
+    vpss_config.input_scale = single_session_.inputScale();
+    vpss_config.input_zero_point = single_session_.inputZeroPoint();
+    vpss_config.mean = {{single_mean_[0], single_mean_[1], single_mean_[2]}};
+    vpss_config.scale = {{single_scale_[0], single_scale_[1], single_scale_[2]}};
+    std::unique_ptr<bmrt_runtime::VpssPreprocessor> preprocessor(
+        new bmrt_runtime::VpssPreprocessor());
+    if (!preprocessor->open(single_session_.handle(), vpss_config, error)) {
+      return false;
+    }
+    hardware_preprocessor_ = std::move(preprocessor);
     return true;
   }
 
@@ -398,6 +605,30 @@ class NnPlateRecognizer::CustomRuntime {
     if (min_size_it != descriptor.extra.end()) {
       det_min_size_ = std::stoi(min_size_it->second);
     }
+
+    if (!det_session_.nchwLayout() ||
+        (det_session_.inputDtype() != BM_INT8 &&
+         det_session_.inputDtype() != BM_UINT8)) {
+      bmrt_runtime::setError(
+          error, "PP-OCR camera detection requires NCHW int8/uint8 input");
+      return false;
+    }
+    bmrt_runtime::VpssPreprocessor::Config vpss_config;
+    vpss_config.width = det_session_.inputWidth();
+    vpss_config.height = det_session_.inputHeight();
+    vpss_config.rgb = bmrt_runtime::wantsRgbInput(descriptor_, false);
+    vpss_config.input_dtype = det_session_.inputDtype();
+    vpss_config.input_scale = det_session_.inputScale();
+    vpss_config.input_zero_point = det_session_.inputZeroPoint();
+    vpss_config.mean = {{det_mean_[0], det_mean_[1], det_mean_[2]}};
+    vpss_config.scale = {{det_scale_[0], det_scale_[1], det_scale_[2]}};
+    vpss_config.keep_aspect_ratio = true;
+    vpss_config.padding = {{0, 0, 0}};
+    det_hardware_preprocessor_.reset(new bmrt_runtime::VpssPreprocessor());
+    if (!det_hardware_preprocessor_->open(det_session_.handle(), vpss_config,
+                                          error)) {
+      return false;
+    }
     return true;
   }
 
@@ -421,16 +652,25 @@ class NnPlateRecognizer::CustomRuntime {
       bmrt_runtime::setError(error, "plate recognizer produced no outputs");
       return false;
     }
+    return decodeSingleOutputs(outputs, result, error);
+  }
 
+  bool decodeSingleOutputs(const std::vector<bmrt_runtime::OutputTensor> &outputs,
+                           AlgorithmResult *result, std::string *error) const {
+    if (!result || outputs.empty()) {
+      bmrt_runtime::setError(error, "plate recognizer produced no outputs");
+      return false;
+    }
     *result = AlgorithmResult{};
     result->text = greedyDecodeLegacy(outputs[0], labels_, nullptr);
     return true;
   }
 
   bool inferPpOcr(const cv::Mat &image, const cv::Rect &image_roi,
-                  AlgorithmResult *result, std::string *error) {
+                  AlgorithmResult *result, void *native_frame,
+                  OcrProfile *profile, std::string *error) {
     std::vector<OcrLine> lines;
-    if (!runDetection(image, image_roi, &lines, error)) {
+    if (!runDetection(image, image_roi, native_frame, &lines, profile, error)) {
       return false;
     }
 
@@ -442,26 +682,64 @@ class NnPlateRecognizer::CustomRuntime {
       texts.push_back(line.text);
     }
     result->text = joinTexts(texts);
+    if (profile) profile->text_regions = static_cast<int>(lines.size());
     return true;
   }
 
   bool runDetection(const cv::Mat &image, const cv::Rect &image_roi,
-                    std::vector<OcrLine> *lines, std::string *error) {
-    float ratio = 1.0f;
-    int pad_top = 0;
-    int pad_left = 0;
-    cv::Mat padded = resizeWithAspectRatio(image, det_session_.inputWidth(),
-                                           det_session_.inputHeight(), &ratio,
-                                           &pad_top, &pad_left);
-
-    std::vector<float> input_tensor;
-    bmrt_runtime::writeImageToTensor(
-        padded, bmrt_runtime::wantsRgbInput(descriptor_, false),
-        det_session_.nchwLayout(), det_mean_, det_scale_, &input_tensor);
-    compensateQuantizedInputScale(det_session_, &input_tensor);
-
+                    void *native_frame, std::vector<OcrLine> *lines,
+                    OcrProfile *profile, std::string *error) {
+    const int det_width = det_session_.inputWidth();
+    const int det_height = det_session_.inputHeight();
+    const float ratio =
+        std::min(static_cast<float>(det_height) / image.rows,
+                 static_cast<float>(det_width) / image.cols);
+    const int resized_w = static_cast<int>(std::round(image.cols * ratio));
+    const int resized_h = static_cast<int>(std::round(image.rows * ratio));
+    const int pad_top = (det_height - resized_h) / 2;
+    const int pad_left = (det_width - resized_w) / 2;
+    const bool hardware_input =
+        native_frame != nullptr && det_hardware_preprocessor_ != nullptr;
+    cv::Mat padded;
     std::vector<bmrt_runtime::OutputTensor> outputs;
-    if (!det_session_.launch(input_tensor, &outputs, error)) {
+    const auto preprocess_begin = OcrClock::now();
+    if (hardware_input) {
+      if (!det_hardware_preprocessor_->preprocess(native_frame, error)) {
+        return false;
+      }
+    } else {
+      float software_ratio = 1.0f;
+      int software_pad_top = 0;
+      int software_pad_left = 0;
+      padded = resizeWithAspectRatio(image, det_width, det_height,
+                                     &software_ratio, &software_pad_top,
+                                     &software_pad_left);
+    }
+    std::vector<float> input_tensor;
+    if (!hardware_input) {
+      bmrt_runtime::writeImageToTensor(
+          padded, bmrt_runtime::wantsRgbInput(descriptor_, false),
+          det_session_.nchwLayout(), det_mean_, det_scale_, &input_tensor);
+      compensateQuantizedInputScale(det_session_, &input_tensor);
+    }
+    if (profile) {
+      profile->hardware_det_preprocess = hardware_input;
+      profile->det_preprocess_ms +=
+          elapsedMs(preprocess_begin, OcrClock::now());
+    }
+
+    const auto inference_begin = OcrClock::now();
+    const bool launch_ok = hardware_input
+                               ? det_session_.launchDevice(
+                                     det_hardware_preprocessor_->inputMemory(),
+                                     &outputs, error)
+                               : det_session_.launch(input_tensor, &outputs,
+                                                     error);
+    if (profile) {
+      profile->det_inference_ms +=
+          elapsedMs(inference_begin, OcrClock::now());
+    }
+    if (!launch_ok) {
       return false;
     }
     if (outputs.empty()) {
@@ -469,6 +747,11 @@ class NnPlateRecognizer::CustomRuntime {
       return false;
     }
 
+    const auto postprocess_begin = OcrClock::now();
+    const double nested_before = profile
+        ? profile->rectify_ms + profile->rec_preprocess_ms +
+              profile->rec_inference_ms + profile->rec_decode_ms
+        : 0.0;
     const auto &tensor = outputs[0];
     if (tensor.shape.num_dims != 4 || tensor.data.empty()) {
       bmrt_runtime::setError(error, "unexpected pp_ocr det output shape");
@@ -501,7 +784,7 @@ class NnPlateRecognizer::CustomRuntime {
     cv::findContours(bitmap, contours, cv::RETR_LIST, cv::CHAIN_APPROX_SIMPLE);
     if (!det_debug_printed_) {
       std::cout << "pp_ocr det debug: image=" << image.cols << "x" << image.rows
-                << " padded=" << padded.cols << "x" << padded.rows
+                << " padded=" << det_width << "x" << det_height
                 << " ratio=" << ratio
                 << " pad=(" << pad_left << "," << pad_top << ")\n";
       std::cout << "pp_ocr det debug: prob_range=[" << prob_min << ","
@@ -533,14 +816,27 @@ class NnPlateRecognizer::CustomRuntime {
       const cv::RotatedRect expanded_rect =
           expandRotatedRect(min_rect, det_unclip_ratio_);
 
-      cv::Mat crop = cropRotatedRect(padded, expanded_rect);
+      const auto rectify_begin = OcrClock::now();
+      cv::RotatedRect crop_rect = expanded_rect;
+      const cv::Mat *crop_source = &padded;
+      if (hardware_input) {
+        crop_rect.center.x = (crop_rect.center.x - pad_left) / ratio;
+        crop_rect.center.y = (crop_rect.center.y - pad_top) / ratio;
+        crop_rect.size.width /= ratio;
+        crop_rect.size.height /= ratio;
+        crop_source = &image;
+      }
+      cv::Mat crop = cropRotatedRect(*crop_source, crop_rect);
+      if (profile) {
+        profile->rectify_ms += elapsedMs(rectify_begin, OcrClock::now());
+      }
       if (crop.empty()) {
         continue;
       }
 
       std::string text;
       float rec_score = 0.0f;
-      if (!runRecognition(crop, &text, &rec_score, error)) {
+      if (!runRecognition(crop, &text, &rec_score, profile, error)) {
         return false;
       }
       if (text.empty()) {
@@ -554,6 +850,8 @@ class NnPlateRecognizer::CustomRuntime {
       float min_y = std::numeric_limits<float>::max();
       float max_x = std::numeric_limits<float>::lowest();
       float max_y = std::numeric_limits<float>::lowest();
+      std::vector<Point> mapped_points;
+      mapped_points.reserve(4);
       for (const auto &pt : rect_points) {
         const float x = (pt.x - pad_left) / ratio + static_cast<float>(image_roi.x);
         const float y = (pt.y - pad_top) / ratio + static_cast<float>(image_roi.y);
@@ -561,6 +859,7 @@ class NnPlateRecognizer::CustomRuntime {
         min_y = std::min(min_y, y);
         max_x = std::max(max_x, x);
         max_y = std::max(max_y, y);
+        mapped_points.push_back({x, y, rec_score});
       }
 
       OcrLine line;
@@ -570,6 +869,7 @@ class NnPlateRecognizer::CustomRuntime {
       line.box.y1 = std::max(0.0f, min_y);
       line.box.x2 = std::max(line.box.x1 + 1.0f, max_x);
       line.box.y2 = std::max(line.box.y1 + 1.0f, max_y);
+      line.box.landmarks = std::move(mapped_points);
       line.text = text;
       line.score = rec_score;
       lines->push_back(std::move(line));
@@ -589,11 +889,20 @@ class NnPlateRecognizer::CustomRuntime {
                 }
                 return lhs.box.x1 < rhs.box.x1;
               });
+    if (profile) {
+      const double nested_after =
+          profile->rectify_ms + profile->rec_preprocess_ms +
+          profile->rec_inference_ms + profile->rec_decode_ms;
+      profile->det_postprocess_ms += std::max(
+          0.0, elapsedMs(postprocess_begin, OcrClock::now()) -
+                   (nested_after - nested_before));
+    }
     return true;
   }
 
   bool runRecognition(const cv::Mat &crop, std::string *text, float *score,
-                      std::string *error) {
+                      OcrProfile *profile, std::string *error) {
+    const auto preprocess_begin = OcrClock::now();
     const int target_h = rec_session_.inputHeight();
     const int target_w = rec_session_.inputWidth();
     if (target_h <= 0 || target_w <= 0) {
@@ -617,17 +926,30 @@ class NnPlateRecognizer::CustomRuntime {
         canvas, bmrt_runtime::wantsRgbInput(descriptor_, false),
         rec_session_.nchwLayout(), rec_mean_, rec_scale_, &input_tensor);
     compensateQuantizedInputScale(rec_session_, &input_tensor);
+    if (profile) {
+      profile->rec_preprocess_ms +=
+          elapsedMs(preprocess_begin, OcrClock::now());
+    }
 
     std::vector<bmrt_runtime::OutputTensor> outputs;
+    const auto inference_begin = OcrClock::now();
     if (!rec_session_.launch(input_tensor, &outputs, error)) {
       return false;
+    }
+    if (profile) {
+      profile->rec_inference_ms +=
+          elapsedMs(inference_begin, OcrClock::now());
     }
     if (outputs.empty()) {
       bmrt_runtime::setError(error, "pp_ocr rec produced no outputs");
       return false;
     }
 
+    const auto decode_begin = OcrClock::now();
     *text = greedyDecodePpOcr(outputs[0], labels_, score);
+    if (profile) {
+      profile->rec_decode_ms += elapsedMs(decode_begin, OcrClock::now());
+    }
     if (!rec_debug_printed_) {
       std::cout << "pp_ocr rec debug: crop=" << crop.cols << "x" << crop.rows
                 << " decoded=\"" << *text << "\" score="
@@ -787,10 +1109,13 @@ class NnPlateRecognizer::CustomRuntime {
   std::vector<float> single_mean_;
   std::vector<float> single_scale_;
   bmrt_runtime::Session single_session_;
+  std::unique_ptr<bmrt_runtime::VpssPreprocessor> hardware_preprocessor_;
 
   std::vector<float> det_mean_;
   std::vector<float> det_scale_;
   bmrt_runtime::Session det_session_;
+  std::unique_ptr<bmrt_runtime::VpssPreprocessor>
+      det_hardware_preprocessor_;
 
   std::vector<float> rec_mean_;
   std::vector<float> rec_scale_;
@@ -857,12 +1182,39 @@ bool NnPlateRecognizer::predictFrame(const Frame &frame,
     bmrt_runtime::setError(error, "model is not initialized");
     return false;
   }
-  if (frame.image_path.empty()) {
-    bmrt_runtime::setError(error,
-                           "plate recognizer runtime currently supports image_path only");
+  if (!frame.image_path.empty()) {
+    return custom_runtime_->inferImage(frame.image_path, nullptr, result,
+                                       error);
+  }
+  return custom_runtime_->inferFrame(frame, nullptr, result, nullptr, error);
+}
+
+bool NnPlateRecognizer::predictFrameProfiled(const Frame &frame,
+                                             const InferOptions &options,
+                                             AlgorithmResult *result,
+                                             OcrProfile *profile,
+                                             std::string *error) {
+  (void)options;
+  if (!custom_runtime_ || !initialized_) {
+    bmrt_runtime::setError(error, "model is not initialized");
     return false;
   }
-  return custom_runtime_->inferImage(frame.image_path, nullptr, result, error);
+  return custom_runtime_->inferFrame(frame, nullptr, result, profile, error);
+}
+
+bool NnPlateRecognizer::predictFrameCrop(const Frame &frame, const Box &roi,
+                                         const InferOptions &options,
+                                         AlgorithmResult *result,
+                                         std::string *error) {
+  (void)options;
+  if (!custom_runtime_ || !initialized_) {
+    bmrt_runtime::setError(error, "model is not initialized");
+    return false;
+  }
+  if (!frame.image_path.empty()) {
+    return custom_runtime_->inferImage(frame.image_path, &roi, result, error);
+  }
+  return custom_runtime_->inferFrame(frame, &roi, result, nullptr, error);
 }
 
 bool NnPlateRecognizer::predictCrop(const std::string &image_path, const Box &roi,

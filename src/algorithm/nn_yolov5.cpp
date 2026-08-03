@@ -10,6 +10,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <numeric>
 #include <type_traits>
 #include <string>
@@ -19,10 +20,7 @@
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
-#include "bmlib_runtime.h"
-#include "bmruntime_interface.h"
-#include "cvi_comm_video.h"
-#include "cvi_sys.h"
+#include "algorithm/private/vpss_preprocessor.hpp"
 
 namespace tdl_app {
 namespace {
@@ -38,7 +36,7 @@ void setError(std::string *error, const std::string &message) {
 }
 
 bool debugEnabled() {
-  const char *value = std::getenv("TDL_APP_YOLOV5_DEBUG");
+  const char *value = std::getenv("JYD_APP_YOLOV5_DEBUG");
   return value && value[0] != '\0' && std::strcmp(value, "0") != 0;
 }
 
@@ -61,135 +59,6 @@ std::string toUpper(std::string value) {
 bool startsWith(const std::string &value, const std::string &prefix) {
   return value.size() >= prefix.size() &&
          value.compare(0, prefix.size(), prefix) == 0;
-}
-
-bool copyPackedRgbToBgr(const VIDEO_FRAME_S &vf, unsigned char *mapped,
-                        int width, int height, bool input_is_bgr,
-                        cv::Mat *image) {
-  cv::Mat output(height, width, CV_8UC3);
-  for (int y = 0; y < height; ++y) {
-    const unsigned char *src = mapped + y * vf.u32Stride[0];
-    unsigned char *dst = output.ptr<unsigned char>(y);
-    if (input_is_bgr) {
-      std::memcpy(dst, src, static_cast<size_t>(width) * 3);
-    } else {
-      for (int x = 0; x < width; ++x) {
-        dst[x * 3 + 0] = src[x * 3 + 2];
-        dst[x * 3 + 1] = src[x * 3 + 1];
-        dst[x * 3 + 2] = src[x * 3 + 0];
-      }
-    }
-  }
-  *image = std::move(output);
-  return true;
-}
-
-bool copyPlanarRgbToBgr(const VIDEO_FRAME_S &vf, unsigned char *mapped,
-                        int width, int height, bool input_is_bgr,
-                        cv::Mat *image) {
-  const unsigned char *plane0 = mapped;
-  const unsigned char *plane1 = mapped + vf.u32Length[0];
-  const unsigned char *plane2 = plane1 + vf.u32Length[1];
-  cv::Mat output(height, width, CV_8UC3);
-  for (int y = 0; y < height; ++y) {
-    const unsigned char *src0 = plane0 + y * vf.u32Stride[0];
-    const unsigned char *src1 = plane1 + y * vf.u32Stride[1];
-    const unsigned char *src2 = plane2 + y * vf.u32Stride[2];
-    cv::Vec3b *dst = output.ptr<cv::Vec3b>(y);
-    for (int x = 0; x < width; ++x) {
-      if (input_is_bgr) {
-        dst[x] = cv::Vec3b(src0[x], src1[x], src2[x]);
-      } else {
-        dst[x] = cv::Vec3b(src2[x], src1[x], src0[x]);
-      }
-    }
-  }
-  *image = std::move(output);
-  return true;
-}
-
-bool videoFrameToBgrMat(const VIDEO_FRAME_INFO_S &video_frame, cv::Mat *image,
-                        std::string *error) {
-  if (!image) {
-    setError(error, "output image pointer is null");
-    return false;
-  }
-  const auto &vf = video_frame.stVFrame;
-  const int width = static_cast<int>(vf.u32Width);
-  const int height = static_cast<int>(vf.u32Height);
-  const int format = static_cast<int>(vf.enPixelFormat);
-  if (width <= 0 || height <= 0) {
-    setError(error, "invalid frame size");
-    return false;
-  }
-
-  std::size_t map_size = 0;
-  for (int i = 0; i < 3; ++i) {
-    map_size += vf.u32Length[i];
-  }
-  if (map_size == 0) {
-    setError(error, "frame buffer length is zero");
-    return false;
-  }
-
-  auto *mapped =
-      static_cast<unsigned char *>(CVI_SYS_Mmap(vf.u64PhyAddr[0], map_size));
-  if (!mapped) {
-    setError(error, "CVI_SYS_Mmap failed");
-    return false;
-  }
-  CVI_SYS_IonInvalidateCache(vf.u64PhyAddr[0], mapped, map_size);
-
-  bool ok = true;
-  if (format == PIXEL_FORMAT_BGR_888) {
-    ok = copyPackedRgbToBgr(vf, mapped, width, height, true, image);
-  } else if (format == PIXEL_FORMAT_RGB_888) {
-    ok = copyPackedRgbToBgr(vf, mapped, width, height, false, image);
-  } else if (format == PIXEL_FORMAT_BGR_888_PLANAR) {
-    ok = copyPlanarRgbToBgr(vf, mapped, width, height, true, image);
-  } else if (format == PIXEL_FORMAT_RGB_888_PLANAR) {
-    ok = copyPlanarRgbToBgr(vf, mapped, width, height, false, image);
-  } else if (format == PIXEL_FORMAT_YUV_400) {
-    cv::Mat gray(height, width, CV_8UC1);
-    for (int y = 0; y < height; ++y) {
-      std::memcpy(gray.ptr(y), mapped + y * vf.u32Stride[0], width);
-    }
-    cv::cvtColor(gray, *image, cv::COLOR_GRAY2BGR);
-  } else if (format == PIXEL_FORMAT_NV12 || format == PIXEL_FORMAT_NV21) {
-    cv::Mat yuv(height + height / 2, width, CV_8UC1);
-    unsigned char *y_base = mapped;
-    unsigned char *uv_base = mapped + vf.u32Length[0];
-    for (int y = 0; y < height; ++y) {
-      std::memcpy(yuv.ptr(y), y_base + y * vf.u32Stride[0], width);
-    }
-    for (int y = 0; y < height / 2; ++y) {
-      std::memcpy(yuv.ptr(height + y), uv_base + y * vf.u32Stride[1], width);
-    }
-    const int code = format == PIXEL_FORMAT_NV21
-                         ? cv::COLOR_YUV2BGR_NV21
-                         : cv::COLOR_YUV2BGR_NV12;
-    cv::cvtColor(yuv, *image, code);
-  } else {
-    ok = false;
-    setError(error,
-             "custom YOLOv5 runtime only supports RGB/BGR/NV12/NV21/YUV400 frame input");
-  }
-
-  CVI_SYS_Munmap(mapped, map_size);
-  if (!ok || image->empty()) {
-    setError(error, "failed to convert frame to BGR image");
-    return false;
-  }
-  return true;
-}
-
-bool frameToBgrMat(const Frame &frame, cv::Mat *image, std::string *error) {
-  if (!frame.native) {
-    setError(error, "frame has no native VIDEO_FRAME_INFO_S buffer");
-    return false;
-  }
-  auto *video = static_cast<VIDEO_FRAME_INFO_S *>(frame.native);
-  return videoFrameToBgrMat(*video, image, error);
 }
 
 float sigmoid(float value) {
@@ -370,12 +239,44 @@ class NnYolov5::CustomRuntime {
              input_width_, input_height_, input_is_nchw_ ? "NCHW" : "NHWC",
              static_cast<int>(input_dtype_), output_count_,
              static_cast<int>(labels_.size()));
+    if (input_is_nchw_ &&
+        (input_dtype_ == BM_INT8 || input_dtype_ == BM_UINT8)) {
+      bmrt_runtime::VpssPreprocessor::Config vpss_config;
+      vpss_config.width = input_width_;
+      vpss_config.height = input_height_;
+      vpss_config.rgb = toUpper(descriptor.input_type) != "BGR";
+      vpss_config.keep_aspect_ratio = true;
+      vpss_config.padding = {{114, 114, 114}};
+      vpss_config.input_dtype = input_dtype_;
+      vpss_config.input_scale =
+          input_dtype_ == BM_UINT8
+              ? 1.0f
+              : (net_info_->input_scales ? net_info_->input_scales[0] : 1.0f);
+      vpss_config.input_zero_point =
+          input_dtype_ == BM_UINT8
+              ? 0
+              : (net_info_->input_zero_point ? net_info_->input_zero_point[0]
+                                              : 0);
+      vpss_config.mean = {{0.0f, 0.0f, 0.0f}};
+      vpss_config.scale = {{1.0f, 1.0f, 1.0f}};
+      std::unique_ptr<bmrt_runtime::VpssPreprocessor> preprocessor(
+          new bmrt_runtime::VpssPreprocessor());
+      if (preprocessor->open(handle_, vpss_config, &hardware_error_)) {
+        hardware_preprocessor_ = std::move(preprocessor);
+        if (!allocateOutputBuffers(error)) {
+          return false;
+        }
+      }
+    } else {
+      hardware_error_ = "require NCHW int8/uint8 model input";
+    }
     opened_ = true;
     return true;
   }
 
   bool inferImage(const std::string &image_path, const InferOptions &options,
                   AlgorithmResult *result, std::string *error) {
+    std::lock_guard<std::mutex> lock(infer_mutex_);
     if (!opened_) {
       setError(error, "custom YOLOv5 runtime is not initialized");
       return false;
@@ -433,8 +334,59 @@ class NnYolov5::CustomRuntime {
     return true;
   }
 
+  bool inferFrame(const Frame &frame, const InferOptions &options,
+                  AlgorithmResult *result, std::string *error) {
+    std::lock_guard<std::mutex> lock(infer_mutex_);
+    if (!opened_) {
+      setError(error, "custom YOLOv5 runtime is not initialized");
+      return false;
+    }
+    if (!result || !frame.native) {
+      setError(error, "YOLOv5 frame/result pointer is null");
+      return false;
+    }
+    if (!hardware_preprocessor_) {
+      const std::string reason = hardware_error_.empty()
+                                     ? "VPSS preprocessor is unavailable"
+                                     : hardware_error_;
+      setError(error, "YOLOv5 VPSS input is unavailable: " + reason);
+      return false;
+    }
+    auto *video = static_cast<VIDEO_FRAME_INFO_S *>(frame.native);
+    const int source_width = static_cast<int>(video->stVFrame.u32Width);
+    const int source_height = static_cast<int>(video->stVFrame.u32Height);
+    if (source_width <= 0 || source_height <= 0) {
+      setError(error, "YOLOv5 source frame dimensions are invalid");
+      return false;
+    }
+    const float ratio = std::min(
+        static_cast<float>(input_height_) / source_height,
+        static_cast<float>(input_width_) / source_width);
+    const int resized_width = static_cast<int>(std::round(source_width * ratio));
+    const int resized_height = static_cast<int>(std::round(source_height * ratio));
+    const int top = (input_height_ - resized_height) / 2;
+    const int left = (input_width_ - resized_width) / 2;
+    if (!hardware_preprocessor_->preprocess(video, error)) {
+      return false;
+    }
+    std::vector<std::vector<float>> outputs;
+    std::vector<bm_shape_t> output_shapes;
+    if (!launchDevice(hardware_preprocessor_->inputMemory(), &outputs,
+                      &output_shapes, error)) {
+      return false;
+    }
+    *result = AlgorithmResult{};
+    result->labels = labels_;
+    result->boxes = decode(outputs, output_shapes, source_width, source_height,
+                           ratio, top, left, options.threshold,
+                           options.iou_threshold);
+    return true;
+  }
+
  private:
   void close() {
+    hardware_preprocessor_.reset();
+    releaseOutputBuffers();
     if (runtime_) {
       bmrt_destroy(runtime_);
       runtime_ = nullptr;
@@ -445,6 +397,40 @@ class NnYolov5::CustomRuntime {
     }
     opened_ = false;
     net_info_ = nullptr;
+  }
+
+  bool allocateOutputBuffers(std::string *error) {
+    releaseOutputBuffers();
+    output_memories_.resize(static_cast<size_t>(output_count_));
+    for (int i = 0; i < output_count_; ++i) {
+      size_t bytes = net_info_->max_output_bytes[i];
+      if (bytes == 0) {
+        bytes = bmrt_shape_count(&net_info_->stages[0].output_shapes[i]) *
+                bmrt_data_type_size(net_info_->output_dtypes[i]);
+      }
+      if (bytes == 0 ||
+          bm_malloc_device_byte(handle_, &output_memories_[static_cast<size_t>(i)],
+                                bytes) != BM_SUCCESS) {
+        setError(error, "bm_malloc_device_byte failed for YOLOv5 output");
+        releaseOutputBuffers();
+        return false;
+      }
+    }
+    return true;
+  }
+
+  void releaseOutputBuffers() {
+    if (!handle_) {
+      output_memories_.clear();
+      return;
+    }
+    for (bm_device_mem_t &memory : output_memories_) {
+      if (memory.size > 0) {
+        bm_free_device(handle_, memory);
+        memory = bm_device_mem_t{};
+      }
+    }
+    output_memories_.clear();
   }
 
   void preprocess(const cv::Mat &image, std::vector<float> *data, float *ratio,
@@ -604,6 +590,86 @@ class NnYolov5::CustomRuntime {
                  output_zero_point, min_value, max_value, decoded[0],
                  decoded.size() > 1 ? decoded[1] : 0.0f,
                  decoded.size() > 2 ? decoded[2] : 0.0f);
+      }
+      outputs->push_back(std::move(decoded));
+    }
+    return true;
+  }
+
+  bool launchDevice(bm_device_mem_t input_memory,
+                    std::vector<std::vector<float>> *outputs,
+                    std::vector<bm_shape_t> *output_shapes,
+                    std::string *error) {
+    if (output_memories_.size() != static_cast<size_t>(output_count_)) {
+      setError(error, "YOLOv5 output buffers are not initialized");
+      return false;
+    }
+    bm_tensor_t input_tensor{};
+    bmrt_tensor_with_device(&input_tensor, input_memory, input_dtype_,
+                            net_info_->stages[0].input_shapes[0]);
+    std::vector<bm_tensor_t> device_outputs(
+        static_cast<size_t>(output_count_), bm_tensor_t{});
+    for (int i = 0; i < output_count_; ++i) {
+      bmrt_tensor_with_device(&device_outputs[static_cast<size_t>(i)],
+                              output_memories_[static_cast<size_t>(i)],
+                              net_info_->output_dtypes[i],
+                              net_info_->stages[0].output_shapes[i]);
+    }
+    if (!bmrt_launch_tensor_ex(runtime_, net_name_.c_str(), &input_tensor, 1,
+                               device_outputs.data(), output_count_, true,
+                               false)) {
+      setError(error, "bmrt_launch_tensor_ex failed");
+      return false;
+    }
+    if (bm_thread_sync(handle_) != BM_SUCCESS) {
+      setError(error, "bm_thread_sync failed");
+      return false;
+    }
+
+    outputs->clear();
+    outputs->reserve(static_cast<size_t>(output_count_));
+    output_shapes->assign(static_cast<size_t>(output_count_), bm_shape_t{});
+    for (int i = 0; i < output_count_; ++i) {
+      const bm_shape_t &shape = device_outputs[static_cast<size_t>(i)].shape;
+      (*output_shapes)[static_cast<size_t>(i)] = shape;
+      size_t element_count = 1;
+      for (int d = 0; d < shape.num_dims; ++d) {
+        element_count *= static_cast<size_t>(shape.dims[d]);
+      }
+      const size_t bytes =
+          element_count * bmrt_data_type_size(net_info_->output_dtypes[i]);
+      std::vector<uint8_t> raw(bytes);
+      if (bm_memcpy_d2s(handle_, raw.data(),
+                         device_outputs[static_cast<size_t>(i)].device_mem) !=
+          BM_SUCCESS) {
+        setError(error, "bm_memcpy_d2s failed for YOLOv5 output");
+        return false;
+      }
+
+      std::vector<float> decoded(element_count, 0.0f);
+      const float output_scale =
+          net_info_->output_scales ? net_info_->output_scales[i] : 1.0f;
+      const int output_zero_point = net_info_->output_zero_point
+                                        ? net_info_->output_zero_point[i]
+                                        : 0;
+      if (net_info_->output_dtypes[i] == BM_FLOAT32) {
+        const float *values = reinterpret_cast<const float *>(raw.data());
+        decoded.assign(values, values + element_count);
+      } else if (net_info_->output_dtypes[i] == BM_INT8) {
+        const int8_t *values = reinterpret_cast<const int8_t *>(raw.data());
+        for (size_t j = 0; j < element_count; ++j) {
+          decoded[j] =
+              (static_cast<int>(values[j]) - output_zero_point) * output_scale;
+        }
+      } else if (net_info_->output_dtypes[i] == BM_UINT8) {
+        const uint8_t *values = reinterpret_cast<const uint8_t *>(raw.data());
+        for (size_t j = 0; j < element_count; ++j) {
+          decoded[j] =
+              (static_cast<int>(values[j]) - output_zero_point) * output_scale;
+        }
+      } else {
+        setError(error, "custom YOLOv5 runtime does not support this output dtype");
+        return false;
       }
       outputs->push_back(std::move(decoded));
     }
@@ -857,6 +923,11 @@ class NnYolov5::CustomRuntime {
   bm_data_type_t input_dtype_ = BM_FLOAT32;
   std::vector<std::array<float, 2>> anchors_;
   std::vector<std::string> labels_;
+  std::unique_ptr<bmrt_runtime::VpssPreprocessor>
+      hardware_preprocessor_;
+  std::vector<bm_device_mem_t> output_memories_;
+  std::string hardware_error_;
+  std::mutex infer_mutex_;
   bool opened_ = false;
 };
 
@@ -899,6 +970,8 @@ bool NnYolov5::shouldUseCustomRuntime() const {
 }
 
 bool NnYolov5::load(EngineConfig config, std::string *error) {
+  initialized_ = false;
+  custom_runtime_.reset();
   config_ = std::move(config);
   if (!loadDescriptor(error)) {
     return false;
@@ -944,11 +1017,11 @@ bool NnYolov5::predictFrame(const Frame &frame, const InferOptions &options,
   if (!frame.image_path.empty()) {
     return custom_runtime_->inferImage(frame.image_path, options, result, error);
   }
-  cv::Mat image;
-  if (!frameToBgrMat(frame, &image, error)) {
-    return false;
+  if (frame.native) {
+    return custom_runtime_->inferFrame(frame, options, result, error);
   }
-  return custom_runtime_->inferMat(image, options, result, error);
+  setError(error, "YOLOv5 frame has neither native data nor image_path");
+  return false;
 }
 
 }  // namespace tdl_app

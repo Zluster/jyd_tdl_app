@@ -9,6 +9,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <numeric>
 #include <string>
 #include <utility>
@@ -17,6 +18,7 @@
 #include <opencv2/imgcodecs.hpp>
 #include <opencv2/imgproc.hpp>
 
+#include "algorithm/private/vpss_preprocessor.hpp"
 #include "bmlib_runtime.h"
 #include "bmruntime_interface.h"
 
@@ -32,7 +34,7 @@ void setError(std::string *error, const std::string &message) {
 }
 
 bool debugEnabled() {
-  const char *value = std::getenv("TDL_APP_CLASSIFIER_DEBUG");
+  const char *value = std::getenv("JYD_APP_CLASSIFIER_DEBUG");
   return value && value[0] != '\0' && std::strcmp(value, "0") != 0;
 }
 
@@ -134,6 +136,7 @@ class NnClassifier::CustomRuntime {
   bool open(const EngineConfig &config, const ModelDescriptor &descriptor,
             std::string *error) {
     close();
+    hardware_error_.clear();
 
     bm_status_t status = bm_dev_request(&handle_, 0);
     if (status != BM_SUCCESS) {
@@ -198,6 +201,31 @@ class NnClassifier::CustomRuntime {
     labels_ = descriptor.labels;
     softmax_output_ = wantsSoftmax(descriptor);
     input_dtype_ = net_info_->input_dtypes[0];
+    if (nchw_layout_ &&
+        (input_dtype_ == BM_INT8 || input_dtype_ == BM_UINT8)) {
+      bmrt_runtime::VpssPreprocessor::Config vpss_config;
+      vpss_config.width = input_width_;
+      vpss_config.height = input_height_;
+      vpss_config.rgb = wantsRgbInput(descriptor_);
+      vpss_config.input_dtype = input_dtype_;
+      vpss_config.input_scale =
+          net_info_->input_scales ? net_info_->input_scales[0] : 1.0f;
+      vpss_config.input_zero_point = net_info_->input_zero_point
+                                         ? net_info_->input_zero_point[0]
+                                         : 0;
+      for (int i = 0; i < kInputChannels; ++i) {
+        vpss_config.mean[static_cast<size_t>(i)] = mean_[static_cast<size_t>(i)];
+        vpss_config.scale[static_cast<size_t>(i)] = scale_[static_cast<size_t>(i)];
+      }
+      std::unique_ptr<bmrt_runtime::VpssPreprocessor> vpss(
+          new bmrt_runtime::VpssPreprocessor());
+      if (vpss->open(handle_, vpss_config, &hardware_error_)) {
+        hardware_preprocessor_ = std::move(vpss);
+      }
+    }
+    if (hardware_preprocessor_ && !allocateOutputBuffers(&hardware_error_)) {
+      hardware_preprocessor_.reset();
+    }
     debugLog("open model=%s input=%dx%d layout=%s input_dtype=%d input_scale=%.8f input_zp=%d output_dtype=%d output_scale=%.8f output_zp=%d labels=%d",
              resolveModelPath(descriptor).c_str(), input_width_, input_height_,
              nchw_layout_ ? "NCHW" : "NHWC", static_cast<int>(input_dtype_),
@@ -213,6 +241,7 @@ class NnClassifier::CustomRuntime {
 
   bool inferImage(const std::string &image_path, const InferOptions &options,
                   AlgorithmResult *result, std::string *error) {
+    std::lock_guard<std::mutex> lock(infer_mutex_);
     if (!opened_) {
       setError(error, "classifier runtime is not initialized");
       return false;
@@ -235,37 +264,42 @@ class NnClassifier::CustomRuntime {
     if (!launch(input_tensor, &outputs, error)) {
       return false;
     }
-    if (outputs.empty() || outputs[0].empty()) {
-      setError(error, "classifier runtime produced no output");
+    return buildResult(outputs, options, result, error);
+  }
+
+  bool inferFrame(const Frame &frame, const InferOptions &options,
+                  AlgorithmResult *result, std::string *error) {
+    std::lock_guard<std::mutex> lock(infer_mutex_);
+    if (!opened_) {
+      setError(error, "classifier runtime is not initialized");
+      return false;
+    }
+    if (!frame.native) {
+      setError(error, "classifier frame has no native VIDEO_FRAME_INFO_S");
+      return false;
+    }
+    if (!hardware_preprocessor_) {
+      const std::string reason = hardware_error_.empty()
+                                     ? "require NCHW int8/uint8 model input"
+                                     : hardware_error_;
+      setError(error, "classifier VPSS input is unavailable: " + reason);
+      return false;
+    }
+    if (!hardware_preprocessor_->preprocess(frame.native, error)) {
       return false;
     }
 
-    *result = AlgorithmResult{};
-    result->labels = labels_;
-
-    std::vector<float> scores = outputs[0];
-    if (softmax_output_) {
-      applySoftmax(&scores);
+    std::vector<std::vector<float>> outputs;
+    if (!launchDevice(hardware_preprocessor_->inputMemory(), &outputs, error)) {
+      return false;
     }
-
-    std::vector<int> order(scores.size());
-    std::iota(order.begin(), order.end(), 0);
-    std::sort(order.begin(), order.end(),
-              [&](int lhs, int rhs) { return scores[lhs] > scores[rhs]; });
-
-    const int top_k = std::max(1, options.top_k);
-    const int count = std::min(top_k, static_cast<int>(order.size()));
-    for (int i = 0; i < count; ++i) {
-      ClassificationItem item;
-      item.class_id = order[i];
-      item.score = scores[order[i]];
-      result->classes.push_back(item);
-    }
-    return true;
+    return buildResult(outputs, options, result, error);
   }
 
  private:
   void close() {
+    hardware_preprocessor_.reset();
+    releaseOutputBuffers();
     if (runtime_) {
       bmrt_destroy(runtime_);
       runtime_ = nullptr;
@@ -276,6 +310,40 @@ class NnClassifier::CustomRuntime {
     }
     net_info_ = nullptr;
     opened_ = false;
+  }
+
+  bool allocateOutputBuffers(std::string *error) {
+    releaseOutputBuffers();
+    output_memories_.resize(static_cast<size_t>(net_info_->output_num));
+    for (int i = 0; i < net_info_->output_num; ++i) {
+      size_t bytes = net_info_->max_output_bytes[i];
+      if (bytes == 0) {
+        bytes = bmrt_shape_count(&net_info_->stages[0].output_shapes[i]) *
+                bmrt_data_type_size(net_info_->output_dtypes[i]);
+      }
+      if (bytes == 0 ||
+          bm_malloc_device_byte(handle_, &output_memories_[static_cast<size_t>(i)],
+                                bytes) != BM_SUCCESS) {
+        setError(error, "bm_malloc_device_byte failed for classifier output");
+        releaseOutputBuffers();
+        return false;
+      }
+    }
+    return true;
+  }
+
+  void releaseOutputBuffers() {
+    if (!handle_) {
+      output_memories_.clear();
+      return;
+    }
+    for (bm_device_mem_t &memory : output_memories_) {
+      if (memory.size > 0) {
+        bm_free_device(handle_, memory);
+        memory = bm_device_mem_t{};
+      }
+    }
+    output_memories_.clear();
   }
 
   void preprocess(const cv::Mat &image, std::vector<float> *tensor) const {
@@ -442,6 +510,116 @@ class NnClassifier::CustomRuntime {
     return true;
   }
 
+  bool launchDevice(bm_device_mem_t input_memory,
+                    std::vector<std::vector<float>> *outputs,
+                    std::string *error) {
+    const bm_shape_t input_shape = net_info_->stages[0].input_shapes[0];
+    bm_tensor_t input_tensor{};
+    bmrt_tensor_with_device(&input_tensor, input_memory, input_dtype_, input_shape);
+    if (output_memories_.size() !=
+        static_cast<size_t>(net_info_->output_num)) {
+      setError(error, "classifier output buffers are not initialized");
+      return false;
+    }
+    std::vector<bm_tensor_t> device_outputs(
+        static_cast<size_t>(net_info_->output_num), bm_tensor_t{});
+    for (int i = 0; i < net_info_->output_num; ++i) {
+      bmrt_tensor_with_device(
+          &device_outputs[static_cast<size_t>(i)],
+          output_memories_[static_cast<size_t>(i)], net_info_->output_dtypes[i],
+          net_info_->stages[0].output_shapes[i]);
+    }
+    if (!bmrt_launch_tensor_ex(runtime_, net_name_.c_str(), &input_tensor, 1,
+                               device_outputs.data(), net_info_->output_num,
+                               true, false)) {
+      setError(error, "bmrt_launch_tensor_ex failed");
+      return false;
+    }
+    if (bm_thread_sync(handle_) != BM_SUCCESS) {
+      setError(error, "bm_thread_sync failed");
+      return false;
+    }
+
+    outputs->clear();
+    outputs->reserve(static_cast<size_t>(net_info_->output_num));
+    for (int i = 0; i < net_info_->output_num; ++i) {
+      const bm_shape_t &shape = device_outputs[static_cast<size_t>(i)].shape;
+      size_t element_count = 1;
+      for (int d = 0; d < shape.num_dims; ++d) {
+        element_count *= static_cast<size_t>(shape.dims[d]);
+      }
+      const size_t output_bytes =
+          element_count * bmrt_data_type_size(net_info_->output_dtypes[i]);
+      std::vector<uint8_t> raw(output_bytes);
+      if (bm_memcpy_d2s(handle_, raw.data(),
+                         device_outputs[static_cast<size_t>(i)].device_mem) !=
+          BM_SUCCESS) {
+        setError(error, "bm_memcpy_d2s failed for classifier output");
+        return false;
+      }
+
+      std::vector<float> decoded(element_count, 0.0f);
+      const float output_scale =
+          net_info_->output_scales ? net_info_->output_scales[i] : 1.0f;
+      const int output_zero_point =
+          net_info_->output_zero_point ? net_info_->output_zero_point[i] : 0;
+      if (net_info_->output_dtypes[i] == BM_FLOAT32) {
+        const float *values = reinterpret_cast<const float *>(raw.data());
+        decoded.assign(values, values + element_count);
+      } else if (net_info_->output_dtypes[i] == BM_INT8) {
+        const int8_t *values = reinterpret_cast<const int8_t *>(raw.data());
+        for (size_t j = 0; j < element_count; ++j) {
+          decoded[j] =
+              (static_cast<int>(values[j]) - output_zero_point) * output_scale;
+        }
+      } else if (net_info_->output_dtypes[i] == BM_UINT8) {
+        const uint8_t *values = reinterpret_cast<const uint8_t *>(raw.data());
+        for (size_t j = 0; j < element_count; ++j) {
+          decoded[j] =
+              (static_cast<int>(values[j]) - output_zero_point) * output_scale;
+        }
+      } else {
+        setError(error, "classifier runtime does not support this output dtype");
+        return false;
+      }
+      outputs->push_back(std::move(decoded));
+    }
+    return true;
+  }
+
+  bool buildResult(const std::vector<std::vector<float>> &outputs,
+                   const InferOptions &options, AlgorithmResult *result,
+                   std::string *error) const {
+    if (!result) {
+      setError(error, "result pointer is null");
+      return false;
+    }
+    if (outputs.empty() || outputs[0].empty()) {
+      setError(error, "classifier runtime produced no output");
+      return false;
+    }
+
+    *result = AlgorithmResult{};
+    result->labels = labels_;
+    std::vector<float> scores = outputs[0];
+    if (softmax_output_) {
+      applySoftmax(&scores);
+    }
+    std::vector<int> order(scores.size());
+    std::iota(order.begin(), order.end(), 0);
+    std::sort(order.begin(), order.end(),
+              [&](int lhs, int rhs) { return scores[lhs] > scores[rhs]; });
+    const int count = std::min(std::max(1, options.top_k),
+                               static_cast<int>(order.size()));
+    for (int i = 0; i < count; ++i) {
+      ClassificationItem item;
+      item.class_id = order[static_cast<size_t>(i)];
+      item.score = scores[static_cast<size_t>(item.class_id)];
+      result->classes.push_back(item);
+    }
+    return true;
+  }
+
   void applySoftmax(std::vector<float> *scores) const {
     if (!scores || scores->empty()) {
       return;
@@ -473,6 +651,11 @@ class NnClassifier::CustomRuntime {
   bool nchw_layout_ = true;
   bool softmax_output_ = false;
   bm_data_type_t input_dtype_ = BM_FLOAT32;
+  std::unique_ptr<bmrt_runtime::VpssPreprocessor>
+      hardware_preprocessor_;
+  std::vector<bm_device_mem_t> output_memories_;
+  std::string hardware_error_;
+  std::mutex infer_mutex_;
   bool opened_ = false;
 };
 
@@ -500,14 +683,21 @@ bool NnClassifier::loadDescriptor(std::string *error) {
 }
 
 bool NnClassifier::load(EngineConfig config, std::string *error) {
+  // Release the previous model and its private VPSS group before reloading.
+  initialized_ = false;
+  custom_runtime_.reset();
   config_ = std::move(config);
   if (!loadDescriptor(error)) {
     return false;
   }
+
   custom_runtime_.reset(new CustomRuntime());
   if (!custom_runtime_->open(config_, descriptor_, error)) {
     custom_runtime_.reset();
     return false;
+  }
+  if (error) {
+    error->clear();
   }
   initialized_ = true;
   return true;
@@ -533,15 +723,22 @@ bool NnClassifier::predict(const std::string &image_path,
 
 bool NnClassifier::predictFrame(const Frame &frame, const InferOptions &options,
                                 AlgorithmResult *result, std::string *error) {
-  if (!initialized_ || !custom_runtime_) {
+  if (!initialized_) {
     setError(error, "model is not initialized");
     return false;
   }
-  if (frame.image_path.empty()) {
-    setError(error, "classifier runtime currently supports image_path only");
+  if (!custom_runtime_) {
+    setError(error, "model is not initialized");
     return false;
   }
-  return custom_runtime_->inferImage(frame.image_path, options, result, error);
+  if (frame.native) {
+    return custom_runtime_->inferFrame(frame, options, result, error);
+  }
+  if (!frame.image_path.empty()) {
+    return custom_runtime_->inferImage(frame.image_path, options, result, error);
+  }
+  setError(error, "classifier frame has neither native data nor image_path");
+  return false;
 }
 
 }  // namespace tdl_app

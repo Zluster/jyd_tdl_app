@@ -1,5 +1,360 @@
 # 算法测试与 `model_tool` 分析指南
 
+## 0. 产品截图算法测试矩阵（2026-07-15）
+
+本节是当前板端验收的唯一范围：通用分类、通用检测、人脸检测/识别/属性/478 点、人体关键点、
+人体姿态分类、手关键点、手势分类、OCR、多目标跟踪/计数、自学习分类器、自学习检测/跟踪。
+功能测试必须生成效果图；性能测试统一使用 `warmup=30`、`frames=300` 并打印 `avg_total_ms` 和 `fps`。
+
+| 功能 | 功能图 | 性能测试 | 当前状态 |
+| --- | --- | --- | --- |
+| 通用分类 | 分类标签/分数 overlay | 相机 300 帧 | 可运行 |
+| 通用检测 | 框/类别/分数 overlay | 相机 300 帧 | 可运行 |
+| 人脸检测 | 框+5点 overlay | 相机 300 帧 | 可运行 |
+| 人脸识别 | 匹配框和 similarity 图 | 离线 `repeat=300` | 仅离线，待相机化 |
+| 人脸属性 | 属性 overlay | 相机 300 帧 | 可运行 |
+| 478 人脸点 | 478 点 overlay | 离线和相机各 300 帧 | 可运行 |
+| 人体关键点/姿态分类 | 17 点或姿态标签 overlay | 相机 300 帧 | 可运行 |
+| 手部关键点 | 21 点 overlay | 相机 300 帧 | 可运行 |
+| 手势分类 | 手势标签 overlay | 手部 ROI 相机 300 帧 | 待开发统一 pipeline |
+| OCR | 文本框和文本 overlay | 检测/识别分阶段 300 帧 | 可运行；检测 VPSS，四点矫正 CPU |
+| 多目标跟踪计数 | ID/轨迹/计数 overlay | detector/tracker/count 300 帧 | 可运行 |
+| 自学习图像分类 | top-k 结果图 | 离线图片 feature bank（非 FPS） | 仅离线功能可验收 |
+| 自学习检测 | 标签/相似度 overlay | 不适用 | 当前不可验收（特征模型超出 BPU 内存） |
+| 自学习单目标跟踪 | 跟踪框 overlay | VPSS/BMRT/后处理 300 帧 | 可运行 |
+
+### 0.1 可直接执行的功能和性能命令
+
+先准备统一目录：
+
+```sh
+cd /root/jyd_tdl_app_sdk_cv184x_self
+mkdir -p /tmp/jyd_results
+```
+
+#### 0.1.1 通用图像分类：植物五分类
+
+- 测试内容：相机画面整帧分类，输出 top-5 类别和分数。
+- 使用模型：`plant_classifier.mud`。
+- 功能结果：查看 `classify_overlay.jpg` 左上角类别和概率。
+- 性能结果：查看 `avg_read_ms`、`avg_infer_ms`、`avg_total_ms`、`fps`。
+
+```sh
+./bin/tdl_camera_classify_demo \
+  --model-spec ./configs/model_specs/plant_classifier.mud \
+  --group 0 --channel 1 --warmup 30 --frames 300 --top-k 5 \
+  --dump-frame /tmp/jyd_results/classify_input.jpg \
+  --dump-overlay /tmp/jyd_results/classify_overlay.jpg
+```
+
+#### 0.1.2 通用目标检测：YOLOv8 COCO80
+
+- 测试内容：检测 person、book、cell phone 等 COCO 目标。
+- 使用模型：`yolov8n_det_coco80.mud`；测试 YOLOv5 时替换为 `yolov5s_det_coco80.mud`。
+- 功能结果：查看 `det_overlay.jpg` 中目标框、类别和分数。
+- 性能结果：查看 `avg_read_ms`、`avg_infer_ms`、`avg_total_ms`、`fps`、`avg_boxes`。
+
+```sh
+./bin/tdl_camera_detect_demo \
+  --model-spec ./configs/model_specs/yolov8n_det_coco80.mud \
+  --group 0 --channel 1 --warmup 30 --frames 300 \
+  --dump-frame /tmp/jyd_results/det_input.jpg \
+  --dump-overlay /tmp/jyd_results/det_overlay.jpg
+```
+
+#### 0.1.3 人脸检测：SCRFD 人脸框和 5 点
+
+- 测试内容：检测人脸框、双眼、鼻尖和双嘴角。
+- 使用模型：`scrfd_real.mud`。
+- 功能结果：查看 `scrfd_overlay.jpg`，5 点必须落在人脸对应位置。
+- 性能结果：查看 SCRFD 预处理、BMRT、后处理、总耗时和 FPS。
+
+```sh
+./bin/tdl_camera_scrfd_benchmark_demo \
+  --model-spec ./configs/model_specs/scrfd_real.mud \
+  --group 0 --channel 1 --warmup 30 --frames 300 --dump-boxes \
+  --dump-frame /tmp/jyd_results/scrfd_input.jpg \
+  --dump-overlay /tmp/jyd_results/scrfd_overlay.jpg
+```
+
+#### 0.1.4 人脸情绪和属性：SCRFD + 属性模型
+
+- 测试内容：先检测人脸，再对每张脸识别性别、年龄、眼镜和情绪。
+- 使用模型：`scrfd_real.mud` + `face_attribute_gender_age_glass_emotion.mud`。
+- 功能结果：查看 `face_attr_overlay.jpg` 中每张脸的属性文字。
+- 性能结果：查看 `avg_detect_ms`、`avg_attribute_ms`、`avg_total_ms`、`fps`。
+
+```sh
+./bin/tdl_face_attr_pipeline_demo --camera \
+  --detector-model-spec ./configs/model_specs/scrfd_real.mud \
+  --attribute-model-spec ./configs/model_specs/face_attribute_gender_age_glass_emotion.mud \
+  --threshold 0.25 --group 0 --channel 1 --frames 300 \
+  --dump-frame /tmp/jyd_results/face_attr_input.jpg \
+  --dump-overlay /tmp/jyd_results/face_attr_overlay.jpg
+```
+
+#### 人脸识别：离线功能和 pair 性能
+
+- 测试内容：参考图与查询图分别做人脸检测、对齐、特征提取和余弦相似度比较。
+- 使用模型：`scrfd_real.mud` + `feature_cviface.mud`。
+- 功能结果：查看 `face_recognition.jpg` 中人脸框、`match/different` 和 similarity。
+- 性能结果：查看 `avg_reference_ms`、`avg_query_ms`、`avg_pair_ms`、`pairs_per_second`。
+- 限制：当前是离线文件性能，不代表相机 VPSS/GDC 硬件链路。
+
+```sh
+./bin/tdl_face_recognition_demo \
+  --reference-image ./assets/face.jpg \
+  --query-image ./assets/face.jpg \
+  --detector-model-spec ./configs/model_specs/scrfd_real.mud \
+  --feature-model-spec ./configs/model_specs/feature_cviface.mud \
+  --match-threshold 0.50 --repeat 300 \
+  --output /tmp/jyd_results/face_recognition.jpg
+```
+
+#### 0.1.5 人脸稠密关键点：478 点相机硬件路径
+
+- 测试内容：SCRFD 检测后，用 VPSS 正方形 ROI 推理 478 点。
+- 使用模型：`scrfd_real.mud` + `face_dense_real.mud`。
+- 功能结果：查看 `face478_overlay.jpg`，点应覆盖轮廓、眉眼、鼻子和嘴，不能向右下漂移。
+- 性能结果：查看 `avg_detect_ms`、`avg_vpss_roi_ms`、`avg_bmrt_ms`、
+  `avg_output_copy_decode_ms`、`avg_postprocess_ms`、`avg_total_ms`、`fps`。
+
+```sh
+./run_face_dense_keypoint_demo.sh --camera \
+  --detector-model-spec ./configs/model_specs/scrfd_real.mud \
+  --keypoint-model-spec ./configs/model_specs/face_dense_real.mud \
+  --threshold 0.25 --roi-expand-ratio 0.2 \
+  --group 0 --channel 1 --warmup 30 --frames 300 \
+  --dump-frame /tmp/jyd_results/face478_input.jpg \
+  --dump-overlay /tmp/jyd_results/face478_overlay.jpg
+```
+
+#### 0.1.6 人体关键点：YOLOv8 Pose 17 点
+
+- 测试内容：检测人体框并输出 COCO 17 点骨架。
+- 使用模型：`pose_yolov8.mud`。
+- 功能结果：查看 `body17_overlay.jpg`，肩、肘、腕、髋、膝和踝应贴合人体。
+- 性能结果：查看 `avg_read_ms`、`avg_infer_ms`、`avg_total_ms`、`fps`。
+
+```sh
+./bin/tdl_keypoint_demo --camera \
+  --model-spec ./configs/model_specs/pose_yolov8.mud \
+  --group 0 --channel 1 --frames 300 \
+  --dump-frame /tmp/jyd_results/body17_input.jpg \
+  --dump-overlay /tmp/jyd_results/body17_overlay.jpg
+```
+
+#### 0.1.7 人体姿态分类：17 点规则分类
+
+- 测试内容：根据 17 点输出站、坐、躺、举手等姿态并做时序平滑。
+- 使用模型：`pose_yolov8.mud` + 自研规则后处理。
+- 功能结果：查看 `pose_class_overlay.jpg` 中姿态标签。
+- 性能结果：查看关键点、平滑、规则分类、总耗时和 FPS。
+
+```sh
+./bin/tdl_pose_classifier_demo --camera \
+  --model-spec ./configs/model_specs/pose_yolov8.mud \
+  --group 0 --channel 1 --warmup 30 --frames 300 \
+  --dump-frame /tmp/jyd_results/pose_class_input.jpg \
+  --dump-overlay /tmp/jyd_results/pose_class_overlay.jpg
+```
+
+#### 手部关键点：21 点
+
+- 功能测试：使用已经裁好的手部图片，检查手腕和五根手指的 21 点顺序。
+- 性能测试：相机整帧命令只测 VPSS/BMRT 吞吐；准确率验收必须接手部检测 ROI。
+- 使用模型：`keypoint_hand_128.mud`。
+- 性能结果：查看 `avg_read_ms`、`avg_infer_ms`、`avg_total_ms`、`fps`。
+
+```sh
+# 功能测试
+./bin/tdl_keypoint_demo \
+  --image /tmp/hand_crop.jpg \
+  --model-spec ./configs/model_specs/keypoint_hand_128.mud \
+  --output /tmp/jyd_results/hand21_function.jpg
+
+# 性能测试；不用于整帧手关键点准确率结论
+./bin/tdl_keypoint_demo --camera \
+  --model-spec ./configs/model_specs/keypoint_hand_128.mud \
+  --group 0 --channel 1 --frames 300 \
+  --dump-frame /tmp/jyd_results/hand21_input.jpg \
+  --dump-overlay /tmp/jyd_results/hand21_overlay.jpg
+```
+
+#### 0.1.8 自学习检测：当前不可验收
+
+YOLO proposal + feature bank 匹配依赖的 MobileCLIP2 约需 92.5 MiB BPU device memory，超过
+CV184X 的 75 MiB carveout。因此该实验性入口、模型规格和相机自学习分类入口均不随当前包发布，
+也不能用于性能验收；这不是 VPSS、后处理或样本库故障。
+
+实时自学习单目标场景请使用下一节 FearTrack。若后续提供通用的 no-top INT8 embedding bmodel，
+应优先选择 device memory 小于 20 MiB、224x224 RGB UINT8/INT8 输入、输出 256 或 512 维特征的模型，
+再重新启用该 pipeline。
+
+#### 0.1.9 自学习单目标跟踪：FearTrack
+
+- 测试内容：第一帧手工给框，后续帧持续跟踪同一目标。
+- 使用模型：`feartrack.mud`；`--init-box` 必须按现场目标修改。
+- 功能结果：查看 `feartrack_overlay.jpg` 中跟踪框和置信度。
+- 性能结果：查看 `avg_vpss_roi_ms`、`avg_bmrt_ms`、`avg_output_copy_ms`、
+  `avg_postprocess_ms`、`avg_total_ms`、`fps`。
+- 初始框应紧贴目标；框在第一帧偏离目标时，应先调整 `--init-box`，不能据此判断模型跟踪效果。
+- 300 帧验收时应有 `initialize_ms`、各分阶段平均耗时和 `fps`；目标缓慢移动时框应连续跟随，
+  短时遮挡可降低 score，但不应立即跳到背景。
+
+```sh
+./bin/tdl_single_object_tracker_demo --camera \
+  --model-spec ./configs/model_specs/feartrack.mud \
+  --init-box 180,120,360,420 --group 0 --channel 1 \
+  --warmup 30 --frames 300 \
+  --dump-frame /tmp/jyd_results/feartrack_input.jpg \
+  --dump-overlay /tmp/jyd_results/feartrack_overlay.jpg
+```
+
+#### 0.1.10 人脸 478 点离线功能和离线性能
+
+- 功能命令：单次运行，检查固定图片上的点位正确性。
+- 性能命令：同一图片运行 warmup 30 次、计时 300 次。
+- 性能结果：查看 `offline_runs`、`avg_detect_ms`、`avg_crop_align_ms`、
+  `avg_dense_infer_ms`、`avg_postprocess_ms`、`avg_total_ms`、`fps`。
+
+```sh
+# 功能测试
+./run_face_dense_keypoint_demo.sh \
+  --image /mnt/sd/test.jpg \
+  --detector-model-spec ./configs/model_specs/scrfd_real.mud \
+  --keypoint-model-spec ./configs/model_specs/face_dense_real.mud \
+  --threshold 0.25 --roi-expand-ratio 0.2 \
+  --output /tmp/jyd_results/face478_function.jpg
+
+# 性能测试
+./run_face_dense_keypoint_demo.sh \
+  --image /mnt/sd/test.jpg \
+  --detector-model-spec ./configs/model_specs/scrfd_real.mud \
+  --keypoint-model-spec ./configs/model_specs/face_dense_real.mud \
+  --threshold 0.25 --roi-expand-ratio 0.2 --warmup 30 --frames 300 \
+  --output /tmp/jyd_results/face478_perf.jpg
+```
+
+#### 0.1.11 OCR：PP-OCR 文本检测和识别
+
+- 测试内容：相机整帧先做 PP-OCR 文本检测，再对每个旋转文本框做四点矫正和 CTC 识别。
+- 使用资源：`pp_ocr.mud`、`ch_PP_OCRv3_det_int8_sym.bmodel`、
+  `ch_PP_OCRv4_rec_int8_sym.bmodel`、`configs/ppocr_keys_v1.txt`。
+- 硬件路径：检测 resize/letterbox/归一化由常驻 VPSS 完成，检测和识别由常驻 BMRT 完成。
+- 当前限制：CV184X 公开 GDC API 没有开放任意 homography task，因此旋转文本框四点矫正使用
+  CPU `warpPerspective`，耗时单独打印为 `avg_rectify_cpu_ms`，不能将其当成 GDC 耗时。
+- 功能结果：查看 `ocr_overlay.jpg` 中绿色四点文本框和 UTF-8 完整识别文本；中文由包内
+  `fonts/DroidSansFallbackFull.ttf` 通过 FreeType 绘制，不再使用 OpenCV Hershey 乱码占位。
+- 性能结果：查看 `hardware_det_preprocess=1`、`avg_det_preprocess_ms`、
+  `avg_det_inference_ms`、`avg_det_postprocess_ms`、`avg_rectify_cpu_ms`、
+  `avg_rec_preprocess_ms`、`avg_rec_inference_ms`、`avg_rec_decode_ms`、`fps`。
+
+固定素材功能测试：
+
+```sh
+./scripts/run_pp_ocr_function_test.sh
+```
+
+相机硬件性能测试：
+
+```sh
+./scripts/run_pp_ocr_camera_benchmark.sh
+```
+
+预期现象：终端至少打印 `frames=300 hardware_det_preprocess=1` 和 FPS；镜头中放置清晰、
+占画面足够面积的 `assets/ocr_test_card.jpg` 后，`avg_text_regions` 应大于 0，文本框方向和
+位置应贴合文字行。功能图为 `/tmp/jyd_results/ocr_function_overlay.jpg`，相机图为
+`/tmp/jyd_results/ocr_camera_overlay.jpg`。
+
+#### 0.1.12 多目标跟踪和过线计数：YOLOv8 + ByteTrack
+
+- 测试内容：YOLOv8 检测 person，ByteTrack 进行高分框第一次关联、低分框第二次关联，
+  输出稳定 ID、历史轨迹和左右方向过线计数。
+- 实现方式：参考 `tdl_sdk` MOT 的状态生命周期，自研 8 状态常速度 Kalman 预测、Hungarian
+  全局分配、高/低分两阶段关联、仅高分框建轨和超时回收；不链接 `tdl_sdk` 或 Eigen 代码。
+  高密度交叉场景仍应单独记录 ID switch，不能只看平均 FPS。
+- 使用资源：`yolov8n_det_coco80.mud` 及其 bmodel；不需要额外 ByteTrack 模型。
+- 功能结果：查看 `bytetrack_overlay.jpg` 中 `ID`、轨迹、黄色计数线及 `L->R/R->L`。
+- 性能结果：查看 `avg_read_ms`、`avg_detect_ms`、`avg_tracker_ms`、`avg_total_ms`、
+  `fps`、`avg_detections`、`avg_active_tracks`。
+- 参数说明：默认 `--class-id 0` 只跟踪 COCO person；`--line-x 320` 是 640 宽画面中线，
+  可按现场修改。测试时让两个人分别从计数线两侧穿过。
+
+固定 100 帧素材功能测试：
+
+```sh
+./scripts/run_bytetrack_function_test.sh
+```
+
+相机硬件性能测试：
+
+```sh
+./scripts/run_bytetrack_camera_benchmark.sh
+```
+
+预期现象：同一行人在连续帧和短时遮挡后的 ID 应尽量保持不变；穿越黄色线后对应方向计数加一；
+`avg_tracker_ms` 应明显小于 `avg_detect_ms`。固定素材效果图为
+`/tmp/jyd_results/bytetrack_function_overlay.jpg`，现场走位参考
+`assets/bytetrack_camera_test_guide.jpg`。
+
+#### 0.1.13 自学习图像分类：离线 feature bank top-k 匹配
+
+- 测试内容：样本图片提取 512 维 CLIP 特征，L2 归一化后保存为 feature bank；查询图片与各类别
+  原型做 cosine similarity 并输出 top-k。类别由 `--add 标签=图片` 定义，不是固定分类标签。
+- 使用资源：`feature_clip_image.mud` 及其 bmodel；示例样本使用包内 `assets/dog.jpg`、
+  `assets/plant.jpg` 和 `assets/self_learning_dog_query.jpg`。
+- 功能结果：终端打印 `feature_dim: 512`、`classes=2 samples=2` 和 top-k；dog 查询中 `dog` 应排在
+  `plant` 前，生成 `/tmp/jyd_results/self_classifier_function_overlay.jpg`。
+- 已验证 dog 查询参考分数为 `dog=0.60862`、`plant=0.29737`；分数会随构图变化，验收重点是 dog 排名第一。
+- 采样要求：每类提供 3 至 10 张主体清晰、覆盖实际视角/尺度/光照的图片；同标签样本会求均值原型。
+
+固定素材 top-k 功能测试：
+
+```sh
+./scripts/run_self_classifier_function_test.sh
+```
+
+手工建立并保存 feature bank：
+
+```sh
+./bin/tdl_self_learn_classify_demo \
+  --model-spec ./configs/model_specs/feature_clip_image.mud \
+  --bank /tmp/jyd_results/my_feature.bank \
+  --add dog=./assets/dog.jpg \
+  --add plant=./assets/plant.jpg \
+  --image ./assets/self_learning_dog_query.jpg --top-k 2 \
+  --output /tmp/jyd_results/my_feature_overlay.jpg
+```
+
+后续查询复用同一个 bank，不再传入 `--add`：
+
+```sh
+./bin/tdl_self_learn_classify_demo \
+  --model-spec ./configs/model_specs/feature_clip_image.mud \
+  --bank /tmp/jyd_results/my_feature.bank \
+  --image ./assets/self_learning_dog_query.jpg --top-k 2 \
+  --output /tmp/jyd_results/my_feature_reuse_overlay.jpg
+```
+
+`feature_clip_image.mud` 约需 61.7 MiB BPU memory，只支持上述离线图片 feature bank；
+相机路径不随当前包发布，不能据此给出 FPS。
+
+FearTrack 的单算法连续 300 帧运行后，程序应正常退出并输出 FPS 和 `avg_total_ms`，不应出现持续增长的
+VPSS group 数、BPU 分配失败或 `Segmentation fault`。多算法并发前应先分别完成单算法 300 帧测试；
+512 MiB 系统内存和 75 MiB BPU carveout 不适合同时常驻多个大型特征模型。
+
+三项素材的详细清单、预期图和重建方式见 `docs/THREE_ALGORITHM_TEST_ASSETS_CN.md`；对应完整
+源码快照位于包内 `source/jyd_tdl_app/`。
+
+#### 尚无可执行性能命令的截图项目
+
+以下项目只有功能入口或底层类，尚无同时满足“效果图 + 分阶段耗时 + FPS”的测试程序：
+
+- 手势分类：需要手部检测 -> VPSS ROI -> 21 点/分类 -> 手势 overlay 的统一相机 pipeline。
+
+这些项目实现前没有合格的性能命令，不能用 shell 外层计时或单帧离线命令代替。
+
 本文面向当前 `tdl_app_sdk` 仓库，整理每个已接入算法的测试方法、对应 demo、典型命令、输出判读方式，以及如何借助 `model_tool` 分析模型输入输出并反推后处理逻辑。
 
 ## 1. 使用范围与前提
@@ -438,7 +793,7 @@ cd /mnt/sd/tdl_app_sdk_cv184x
 
 ```sh
 ./run_face_dense_keypoint_demo.sh \
-  --image /mnt/sd/test.jpg \
+  --image ./assets/face.jpg \
   --detector-model-spec ./configs/model_specs/scrfd_real.mud \
   --keypoint-model-spec ./configs/model_specs/face_dense_real.mud \
   --firmware ./firmware/libbm1688_kernel_module.so \
