@@ -11,10 +11,16 @@
 import textwrap
 import inspect
 import functools
+from typing import TYPE_CHECKING
 
 import mpy
 
 from .proxy import Module, Attribute, marshal_arg, unmarshal_result
+
+if TYPE_CHECKING:
+    # IDE 补全：env_stub.pyi 由 gen_stub.py 从 lv_mpy.json 生成，
+    # 描述 m.env.lv 的完整 API。运行时不导入（env 实际是 Module 代理）。
+    from .env_stub import Env
 
 # MicroPython 侧运行时支撑，Mpyc 初始化时注入 __main__ globals。
 _PRELUDE = r"""
@@ -65,12 +71,14 @@ def __mpyc_tick__(ms):
 class Mpyc:
     """MicroPython 解释器的生命周期与交互封装（进程内单例语义）。"""
 
+    #: 属性路径代理入口（类型来自 env_stub.pyi，仅供 IDE；运行时是 Module）
+    env: "Env"
+
     def __init__(self, heap_size=16 * 1024 * 1024):
         if not mpy.active():
             mpy.init(heap_size)
         mpy.exec(_PRELUDE)
-        #: 属性路径代理入口：m.env.lv.tick_inc(40)
-        self.env = Module(self)
+        self.env = Module(self)  # type: ignore[assignment]
 
     # ---- 基础通道（直通 nanobind 模块） ----
 
@@ -122,6 +130,9 @@ class Mpyc:
             mpy.register(f, name=name)
             return f
         return wrap(fn) if fn is not None else wrap
+
+    def register(self, fn):
+        mpy.register(fn, fn.__name__)
 
     # ---- 源码搬运：把 CPython 写的函数下放到 MicroPython 执行 ----
 

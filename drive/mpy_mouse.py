@@ -3,13 +3,22 @@
 path = __file__[:__file__.rfind('/')+1]
 import ustruct
 import select
+import sys
 import lvgl as lv
+
+# struct input_event 尺寸随用户态位数变化：64 位为 24 字节（QQHHi），
+# 32 位为 16 字节（IIHHi）。读长度不是事件尺寸整数倍时内核返回 EINVAL。
+if sys.maxsize > 2**32:
+    EV_FMT, EV_SIZE = 'QQHHi', 24
+else:
+    EV_FMT, EV_SIZE = 'IIHHi', 16
+
 #import lv_pm
 #pm = lv_pm.pm()
 # evdev driver for mouse
 class mouse_indev:
-    def __init__(self, scr=None):
-        self.evdev = open("/dev/input/touchscreen", 'rb')
+    def __init__(self, scr=None, dev="/dev/input/event0"):
+        self.evdev = open(dev, 'rb')
         self.poll = select.poll()
         self.poll.register(self.evdev.fileno())
         self.scr = scr if scr else lv.screen_active()
@@ -46,7 +55,7 @@ class mouse_indev:
             return 0
         while True:
             # Data is relative, update coordinates
-            time_sec, time_usec, _type, code, value = ustruct.unpack('QQHHi', self.evdev.read(24))
+            time_sec, time_usec, _type, code, value = ustruct.unpack(EV_FMT, self.evdev.read(EV_SIZE))
             if _type == 0x03:
                 if code == 53:
                     self.x = value
@@ -58,8 +67,8 @@ class mouse_indev:
                 self.b = value
             if not self.poll.poll()[0][1] & select.POLLIN:
                 break
-        data.point.x = self.hor_res - self.y
-        data.point.y = self.x
+        data.point.x = self.x
+        data.point.y = self.y
 
         # data.point.x = int(data.point.x / 2) + 256
         # data.point.y = int(data.point.y / 2) #150

@@ -33,7 +33,7 @@ def calc_fps(tips: str) -> None:
         fcnt = 0
 
 class Display:
-    def __init__(self, width, height, is_full=True):
+    def __init__(self, width, height):
         self.width = width
         self.height = height
         self.buf_size = width * height * 4
@@ -47,13 +47,10 @@ class Display:
         # 第二块 framebuffer（OSD 双缓冲），CPython 侧注册了才有
         buf_addr2 = mpy_embed.get_flush_buf(1)
         self.buf2 = uctypes.bytearray_at(buf_addr2, self.buf_size) if buf_addr2 else None
-        # DIRECT: LVGL 按屏幕坐标直接渲染进整块 framebuffer（OSD 显存）。
-        # 不能用 PARTIAL——它假设 buffer 是"脏区大小的暂存区"，把脏区打包
-        # 渲染到 buffer 开头，坐标换算与整块显存布局错位；透明屏幕
-        # (bg_opa=0) 重绘前的 lv_draw_buf_clear 会写出显存映射之外导致段错误。
-        # 双缓冲时 LVGL 每次 flush 后自动把脏区同步到另一块，消除撕裂/闪烁。
         self.disp_drv.set_buffers(self.buf, self.buf2, self.buf_size, lv.DISPLAY_RENDER_MODE.DIRECT)
         self.disp_drv.set_flush_cb(self.flush)
+        
+        # self.disp_drv.refr_timer.set_period(16)
 
     def flush(self, disp, area, color_p):
         data_view = color_p.__dereference__(self.buf_size)

@@ -1,6 +1,7 @@
 import lvgl as lv
 import time
 import os
+import mpy_embed
 # import os_ffi
 
 font_cn = lv.binfont_create('L:./res/font/siyun_blod.bin')
@@ -271,8 +272,8 @@ class AppTile:
         self.app = app_info
         self.callback = click_callback
 
-        self.w = 100
-        self.h = 100
+        self.w = 80
+        self.h = 80
         
         # 创建容器
         self.container = lv.obj(parent)
@@ -289,7 +290,8 @@ class AppTile:
             self.buf = bytearray(self.w * self.h * 4)
             self.lottie.set_buffer(self.w, self.h, self.buf)
             self.lottie.set_src_file(app_info.icon)
-            self.lottie.align(lv.ALIGN.TOP_MID, 0, 0)
+            self.lottie.align(lv.ALIGN.TOP_MID, 0, 44)
+            self.icon_obj = self.lottie
 
             self.anim = self.lottie.get_anim()
             duration = self.anim.get_time()
@@ -305,16 +307,21 @@ class AppTile:
             # try:
             self.img = lv.image(self.container)
             self.img.set_src(full_path)
-            self.img.align(lv.ALIGN.TOP_MID, 0, 0)
+            self.img.align(lv.ALIGN.TOP_MID, 0, 44)
             self.img.set_size(self.w, self.h)
+            self.icon_obj = self.img
             # except Exception as e:
             #     print(f"Icon not found: {full_path}")
         
-        # 应用名称标签
+        # 应用名称标签：与 tile 同宽 + 文本居中，与图标同轴。
+        # 不用 align_to(图标)：相对兄弟节点的对齐不会随容器重建自动
+        # 追踪，构造期（tile 还是 80 宽）算出的 x 会一直偏左
         self.label = lv.label(self.container)
         zh_name = self.app.names["zh"]
         self.label.set_text(zh_name)
-        self.label.align(lv.ALIGN.BOTTOM_MID, 0, -10)
+        self.label.set_width(lv.pct(100))
+        self.label.align(lv.ALIGN.TOP_MID, 0, 130)   # 图标 44+80 下方 6px
+        self.label.set_style_text_align(lv.TEXT_ALIGN.CENTER, 0)
         self.label.set_style_pad_all(0, 0)
         
         # 添加点击事件
@@ -327,6 +334,16 @@ class AppTile:
     
     def get_container(self):
         return self.container
+
+    def pause_anim(self):
+        """滚动期间暂停 lottie 播放（定格在当前帧，恢复时不跳变）"""
+        if ".json" in self.app.icon:
+            self.anim.pause()
+
+    def resume_anim(self):
+        """滚动结束从暂停帧继续播放"""
+        if ".json" in self.app.icon:
+            self.anim.resume()
 
 # 图标定义
 MY_MATERIAL_ICON = "\ue600"
@@ -343,7 +360,8 @@ MY_SIDER_ICON_2 = "\ue601"
 
 TOP_LEVEL_BUTTONS = 7
 SECONDARY_BUTTONS = 12
-TILES_PER_PAGE = 12
+TILES_PER_PAGE = 6   # 720x480：3 列 x 2 行
+_PAGE_TURN_PX = 48   # 松手翻页阈值：偏移超过它才翻页，否则弹回
 
 import sys
 class MainScreen:
@@ -473,8 +491,8 @@ class MainScreen:
         self.fold_btn = lv.obj(self.main_container)
         self.fold_btn.set_style_pad_all(0, 0)
         self.fold_btn.set_style_bg_opa(lv.OPA.TRANSP, 0)
-        self.fold_btn.set_size(100, 100)
-        self.fold_btn.set_pos(0, 470)
+        self.fold_btn.set_size(56, 56)
+        self.fold_btn.set_pos(8, 416)
         self.fold_btn.set_style_radius(20, 0)
         self.fold_btn.set_style_shadow_width(0, 0)
         self.fold_btn.set_style_border_width(0, 0)
@@ -500,25 +518,26 @@ class MainScreen:
         
         if self.is_sidebar_collapsed:
             self.sidebar.remove_flag(lv.obj.FLAG.HIDDEN)
-            self.app_display_area.set_x(-30)
+            self.app_display_area.set_x(192)
             icon.set_text(MY_SIDER_ICON_1)
         else:
             self.sidebar.add_flag(lv.obj.FLAG.HIDDEN)
-            self.app_display_area.set_x(-110)
+            # 侧栏收起后显示区在整屏居中（不扩宽，宽度仍 512）
+            self.app_display_area.set_x((720 - 512) // 2)
             icon.set_text(MY_SIDER_ICON_2)
-        
+
         self.is_sidebar_collapsed = not self.is_sidebar_collapsed
-        self.page_indicator.align_to(self.app_grid_container, lv.ALIGN.OUT_BOTTOM_MID, 0, 30)
+        self.page_indicator.align_to(self.app_grid_container, lv.ALIGN.OUT_BOTTOM_MID, 0, 12)
     
     def create_status_bar(self):
         """创建状态栏"""
         self.status_bar = lv.obj(self.main_container)
-        self.status_bar.set_size(lv.pct(100), 40)
+        self.status_bar.set_size(lv.pct(100), 36)
         self.status_bar.align(lv.ALIGN.TOP_MID, 0, 0)
         self.status_bar.set_style_bg_color(lv.color_black(), 0)
         self.status_bar.set_style_bg_opa(lv.OPA.COVER, 0)
-        self.status_bar.set_style_pad_hor(20, 0)
-        self.status_bar.set_style_pad_ver(5, 0)
+        self.status_bar.set_style_pad_hor(16, 0)
+        self.status_bar.set_style_pad_ver(4, 0)
         self.status_bar.set_flex_flow(lv.FLEX_FLOW.ROW)
         self.status_bar.set_flex_align(
             lv.FLEX_ALIGN.SPACE_BETWEEN,
@@ -613,11 +632,11 @@ class MainScreen:
     def create_sidebar(self):
         """创建侧边栏"""
         self.sidebar = lv.obj(self.main_container)
-        self.sidebar.set_width(220)
-        self.sidebar.set_pos(10, 40)
-        self.sidebar.set_height(lv.pct(75))
+        self.sidebar.set_width(176)
+        self.sidebar.set_pos(8, 44)
+        self.sidebar.set_height(364)
         self.sidebar.set_style_bg_color(lv.color_hex(0x2C0B02), 0)
-        self.sidebar.set_style_pad_all(10, 0)
+        self.sidebar.set_style_pad_all(8, 0)
         self.sidebar.set_style_border_width(0, lv.PART.MAIN | lv.STATE.DEFAULT)
         self.sidebar.set_style_shadow_width(0, lv.PART.MAIN | lv.STATE.DEFAULT)
         
@@ -634,11 +653,11 @@ class MainScreen:
         
         for i, (name, symbol) in enumerate(items):
             btn = lv.button(self.sidebar)
-            btn.set_height(50)
-            btn.set_width(lv.pct(90))
+            btn.set_height(44)
+            btn.set_width(lv.pct(92))
             btn.set_style_pad_all(0, 0)
             btn.set_style_bg_color(lv.color_hex(0x3F160A), lv.PART.MAIN | lv.STATE.DEFAULT)
-            btn.align(lv.ALIGN.TOP_LEFT, 0, i * 60)
+            btn.align(lv.ALIGN.TOP_LEFT, 0, i * 48)
             
             # 图标
             sym_label = lv.label(btn)
@@ -685,11 +704,11 @@ class MainScreen:
         
         for i, sub_name in enumerate(sub_items):
             sub_btn = lv.button(self.sidebar)
-            sub_btn.set_height(50)
-            sub_btn.set_width(lv.pct(90))
+            sub_btn.set_height(44)
+            sub_btn.set_width(lv.pct(92))
             sub_btn.set_style_pad_all(0, 0)
             sub_btn.set_style_bg_color(lv.color_hex(0x3F160A), lv.PART.MAIN | lv.STATE.DEFAULT)
-            sub_btn.align(lv.ALIGN.TOP_LEFT, 0, (3 + 1) * 60 + i * 60)
+            sub_btn.align(lv.ALIGN.TOP_LEFT, 0, (3 + 1) * 48 + i * 48)
             sub_btn.add_flag(lv.obj.FLAG.HIDDEN)
             
             # 图标
@@ -704,7 +723,7 @@ class MainScreen:
             sub_txt.set_text(sub_name)
             sub_txt.set_style_text_color(lv.color_white(), 0)
             sub_txt.set_long_mode(lv.label.LONG_MODE.SCROLL_CIRCULAR)
-            sub_txt.set_width(120)
+            sub_txt.set_width(110)
             sub_txt.align(lv.ALIGN.LEFT_MID, 40, 0)
             
             # sub_btn.set_user_data(sub_name)
@@ -719,17 +738,17 @@ class MainScreen:
         print(f"TeachingAI toggled: {self.is_secondary_visible}")
         
         # 调整后续按钮位置
-        offset = len(self.secondary_buttons) * 60 if self.is_secondary_visible else 0
+        offset = len(self.secondary_buttons) * 48 if self.is_secondary_visible else 0
         for i in range(4, TOP_LEVEL_BUTTONS):
             if self.other_buttons[i]:
-                base_y = 4 * 60 + (i - 4) * 60
+                base_y = 4 * 48 + (i - 4) * 48
                 self.other_buttons[i].set_pos(0, base_y + offset)
-        
+
         # 显示/隐藏二级按钮
         for i, sub_btn in enumerate(self.secondary_buttons):
             if sub_btn:
                 if self.is_secondary_visible:
-                    sub_btn.set_pos(0, (4 * 60) + i * 60)
+                    sub_btn.set_pos(0, (4 * 48) + i * 48)
                     sub_btn.remove_flag(lv.obj.FLAG.HIDDEN)
                 else:
                     sub_btn.add_flag(lv.obj.FLAG.HIDDEN)
@@ -756,8 +775,8 @@ class MainScreen:
     def create_app_display_area(self):
         """创建应用显示区域"""
         self.app_display_area = lv.obj(self.main_container)
-        self.app_display_area.set_size(760, 472)
-        self.app_display_area.align(lv.ALIGN.TOP_RIGHT, -30, 60)
+        self.app_display_area.set_size(512, 400)
+        self.app_display_area.set_pos(192, 44)
         self.app_display_area.remove_flag(lv.obj.FLAG.SCROLLABLE)
         self.app_display_area.set_style_bg_color(lv.color_hex(0x2C0B02), 0)
         self.app_display_area.set_style_opa(lv.OPA._0, lv.PART.SCROLLBAR)
@@ -771,7 +790,11 @@ class MainScreen:
         self.app_grid_container.set_style_bg_color(lv.color_hex(0x2C0B02), 0)
         self.app_grid_container.set_style_border_width(0, lv.PART.MAIN | lv.STATE.DEFAULT)
         self.app_grid_container.set_style_pad_all(0, 0)
-        
+
+        # 翻页事件只注册一次：create_app_grid() 每次切分类都会执行，
+        # 在那里注册会导致 SCROLL_END 被重复处理、翻页动画互相打断
+        self.app_grid_container.add_event_cb(self.scroll_handler, lv.EVENT.ALL, None)
+
         self.current_page = 0
         self.total_pages = 0
     
@@ -798,22 +821,28 @@ class MainScreen:
         # 配置滚动和布局
         self.app_grid_container.set_layout(lv.LAYOUT.FLEX)
         self.app_grid_container.set_flex_flow(lv.FLEX_FLOW.ROW)
+        # pad_all 不覆盖 pad_column/row；主题若给 flex 子项加间隙 g，
+        # 第 i 页实际位于 i*(512+g)，按 512 翻页会逐页右移
+        self.app_grid_container.set_style_pad_column(0, 0)
+        self.app_grid_container.set_style_pad_row(0, 0)
         self.app_grid_container.set_scroll_dir(lv.DIR.HOR)
         self.app_grid_container.set_style_opa(lv.OPA.COVER, lv.PART.MAIN)
-        self.app_grid_container.set_scroll_snap_x(lv.SCROLL_SNAP.CENTER)
-        # print(dir(self.app_grid_container))
+        # 分页器语义：关掉 LVGL 的惯性和吸附（它们按甩速飞多页），
+        # 拖动 1:1 跟手，松手由 handle_scroll 按方向翻恰好一页
+        self.app_grid_container.set_scroll_snap_x(lv.SCROLL_SNAP.NONE)
+        self.app_grid_container.remove_flag(lv.obj.FLAG.SCROLL_MOMENTUM)
         self.app_grid_container.set_style_anim_duration(200, 0)
         self.app_grid_container.add_flag(lv.obj.FLAG.SCROLL_ELASTIC)
         self.app_grid_container.set_scrollbar_mode(lv.SCROLLBAR_MODE.OFF)
         self.app_grid_container.set_style_pad_all(0, 0)
         
-        tile_width = (760 - 20) // 4
-        tile_height = (472 - 10) // 3
+        tile_width = 512 // 3    # 170
+        tile_height = 400 // 2   # 200
         
         # 创建分页
         for page in range(self.total_pages):
             page_container = lv.obj(self.app_grid_container)
-            page_container.set_size(760, 472)
+            page_container.set_size(512, 400)
             page_container.set_style_bg_opa(lv.OPA.TRANSP, 0)
             page_container.set_layout(lv.LAYOUT.FLEX)
             page_container.set_flex_flow(lv.FLEX_FLOW.ROW_WRAP)
@@ -841,7 +870,7 @@ class MainScreen:
                 container.add_event_cb(lambda e: self.handle_tile_event(e, app_info), lv.EVENT.ALL, None)
                 
                 self.tiles.append(tile)
-            
+
             # 添加占位符
             #placeholders = TILES_PER_PAGE - (end_idx - start_idx)
             #for _ in range(placeholders):
@@ -849,8 +878,6 @@ class MainScreen:
             #    ph.set_size(tile_width, tile_height)
             #    ph.remove_style_all()
             #    ph.set_style_bg_opa(lv.OPA.TRANSP, 0)
-        
-        self.app_grid_container.add_event_cb(self.scroll_handler, lv.EVENT.ALL, None)
     
     def handle_tile_event(self, e, user_data):
         """处理应用图标触摸事件"""
@@ -929,50 +956,56 @@ class MainScreen:
             # if os.path.exists("/tmp/run_app.txt"):
             #     os.remove("/tmp/run_app.txt")
             # self.handler(app_info.name)
-            # print(app_info.id, -1, app_info.exec)
+            mpy_embed.on_app_launch(app_info.name)
+            # print(app_info.id, app_info.name, app_info.exec)
             # app.switch_app(app_info["id"], -1, app_info["exec"])
             pass
         except Exception as e:
             print(f"Launch app failed: {e}")
     
     def scroll_handler(self, e):
-        """滚动事件处理"""
+        """滚动事件处理。滚动期间（拖动 + 松手归位动画）暂停 lottie 动画：
+        每个播放中的图标每帧都要 thorvg 矢量重绘，是滑动卡顿的主要来源"""
         code = e.get_code()
+        if code == lv.EVENT.SCROLL_BEGIN:
+            for tile in self.tiles:
+                tile.pause_anim()
+            return
         if code in (lv.EVENT.SCROLL_END, lv.EVENT.SCROLL):
             self.handle_scroll(e)
+        if code == lv.EVENT.SCROLL_END:
+            # 放在 handle_scroll 之后：里面的保险对齐 scroll_to_x
+            # 可能再触发一轮 SCROLL_BEGIN/END，避免刚恢复又被暂停
+            for tile in self.tiles:
+                tile.resume_anim()
     
     def handle_scroll(self, e):
-        """处理翻页逻辑"""
-        if self.total_pages <= 1:
+        """翻页逻辑：惯性/吸附已关（滚动完全跟手），松手时按相对当前页
+        的偏移方向翻恰好一页；偏移不足阈值（含单页/边界弹性）弹回原位"""
+        if e.get_code() != lv.EVENT.SCROLL_END:
             return
-        
-        if e.get_code() == lv.EVENT.SCROLL_END:
-            obj = e.get_target_obj()
-            scroll_x = obj.get_scroll_x()
-            page_width = 760
-            
-            threshold = page_width * 0.07
-            scroll_offset = scroll_x - (self.current_page * page_width)
-            
-            if abs(scroll_offset) > threshold:
-                new_page = self.current_page + (1 if scroll_offset > 0 else -1)
-            else:
-                new_page = self.current_page
-            
-            new_page = max(0, min(new_page, self.total_pages - 1))
-            
-            if new_page != self.current_page:
-                print(f"Scroll to page: {new_page + 1}/{self.total_pages}")
-                self.current_page = new_page
-                self.update_page_indicator()
-                obj.scroll_to_x(self.current_page * page_width, True)
-            else:
-                obj.scroll_to_x(self.current_page * page_width, False)
+
+        obj = e.get_target_obj()
+        page_width = 512
+        delta = obj.get_scroll_x() - self.current_page * page_width
+        new_page = self.current_page
+        if delta > _PAGE_TURN_PX:
+            new_page = min(self.current_page + 1, self.total_pages - 1)
+        elif delta < -_PAGE_TURN_PX:
+            new_page = max(self.current_page - 1, 0)
+
+        if new_page != self.current_page:
+            print(f"Scroll to page: {new_page + 1}/{self.total_pages}")
+            self.current_page = new_page
+            self.update_page_indicator()
+        # 归位动画到页边界；归位本身会再触发一轮 SCROLL 事件，
+        # 结束时 delta=0，自然收敛不会再翻页
+        obj.scroll_to_x(new_page * page_width, True)
     
     def create_page_indicator(self):
         """创建页面指示器"""
         self.page_indicator = lv.obj(self.main_container)
-        self.page_indicator.set_size(150, 12)
+        self.page_indicator.set_size(120, 12)
         self.page_indicator.set_layout(lv.LAYOUT.FLEX)
         self.page_indicator.set_flex_flow(lv.FLEX_FLOW.ROW)
         self.page_indicator.set_flex_align(
@@ -985,7 +1018,7 @@ class MainScreen:
         self.page_indicator.remove_flag(lv.obj.FLAG.SCROLLABLE)
         self.page_indicator.remove_flag(lv.obj.FLAG.SCROLL_CHAIN_VER)
         
-        self.page_indicator.align_to(self.app_grid_container,lv.ALIGN.OUT_BOTTOM_MID,0,30)
+        self.page_indicator.align_to(self.app_grid_container, lv.ALIGN.OUT_BOTTOM_MID, 0, 12)
     
     def update_page_indicator(self):
         """更新页面指示器"""
