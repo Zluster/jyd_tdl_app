@@ -4,6 +4,8 @@
 //     plus raw addr/size for ctypes users).
 //   - Osd: RGN overlay region attached to a VPSS channel; the double-buffered
 //     canvas is exposed as a writable memoryview plus raw addr/size.
+//   - Detector/Classifier/KeypointDetector/InstanceSegmenter/PlateRecognizer:
+//     NPU inference on VpssCamera frames or image files (TDL_PY_WITH_NPU).
 //
 // Frame lifecycle contract (agreed): one outstanding frame per camera. The
 // mapped view becomes invalid as soon as the frame is released (explicitly,
@@ -12,6 +14,8 @@
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/shared_ptr.h>
+#include <nanobind/stl/string.h>
+#include <nanobind/stl/vector.h>
 
 #include <cstdint>
 #include <cstring>
@@ -29,6 +33,17 @@
 #include "tdl_app/osd_region.hpp"
 #include "tdl_app/sys_context.hpp"
 #include "tdl_app/vo_output.hpp"
+
+#ifdef TDL_PY_WITH_NPU
+#include "algorithm/private/vpss_preprocessor.hpp"
+#include "tdl_app/classifier.hpp"
+#include "tdl_app/detector.hpp"
+#include "tdl_app/instance_segmenter.hpp"
+#include "tdl_app/keypoint_detector.hpp"
+#include "tdl_app/model_descriptor.hpp"
+#include "tdl_app/plate_recognizer.hpp"
+#include "tdl_app/vision_task_types.hpp"
+#endif
 
 namespace nb = nanobind;
 
@@ -57,7 +72,7 @@ class PyFrame {
  public:
   PyFrame(PyVpssCamera *camera, const VIDEO_FRAME_INFO_S &info,
           unsigned char *mapped, std::size_t map_size)
-      : camera_(camera), mapped_(mapped), map_size_(map_size) {
+      : camera_(camera), info_(info), mapped_(mapped), map_size_(map_size) {
     const auto &vf = info.stVFrame;
     width_ = static_cast<int>(vf.u32Width);
     height_ = static_cast<int>(vf.u32Height);
@@ -99,6 +114,11 @@ class PyFrame {
   void invalidate() { unmap(); }
 
   void detachCamera() { camera_ = nullptr; }
+
+  // Copy of the frame's VIDEO_FRAME_INFO_S. Its physical addresses stay valid
+  // while the frame is alive (the camera holds the VB until the next read() or
+  // close()), so NPU inference can consume it zero-copy.
+  const VIDEO_FRAME_INFO_S &nativeInfo() const { return info_; }
 
   std::uintptr_t addr() const {
     requireValid();
@@ -142,6 +162,7 @@ class PyFrame {
   }
 
   PyVpssCamera *camera_ = nullptr;
+  VIDEO_FRAME_INFO_S info_ {};
   unsigned char *mapped_ = nullptr;
   std::size_t map_size_ = 0;
 };
@@ -260,6 +281,508 @@ void PyFrame::release() {
   }
   unmap();
 }
+
+#ifdef TDL_PY_WITH_NPU
+// Builds the SDK frame view over a live PyFrame for the algorithm classes.
+tdl_app::Frame sdkFrameFrom(PyFrame &frame) {
+  frame.requireValid();
+  tdl_app::Frame out;
+  out.native = const_cast<VIDEO_FRAME_INFO_S *>(&frame.nativeInfo());
+  out.width = frame.width_;
+  out.height = frame.height_;
+  out.format = frame.format_;
+  out.sequence = frame.sequence_;
+  out.timestamp_us = frame.timestamp_us_;
+  return out;
+}
+
+// Shared load path for every algorithm wrapper: ModelSessionConfig::fromSpec,
+// GIL released (model load can take seconds), errors become exceptions.
+template <typename Model>
+void loadModel(Model &model, const char *what, const std::string &model_spec,
+               const std::string &firmware) {
+  std::string error;
+  bool ok = false;
+  {
+    nb::gil_scoped_release guard;
+    ok = model.load(tdl_app::ModelSessionConfig::fromSpec(model_spec, firmware),
+                    &error);
+  }
+  if (!ok) {
+    raise(std::string(what) + " load failed: " + error);
+  }
+}
+
+// Face dense landmark (face_dense_real.mud, runtime "face_dense_landmark") is
+// a second-stage model: a first-stage face detector (SCRFD / YOLOv8-face, via
+// tdl_py.Detector) supplies face boxes, and this runtime estimates dense
+// landmarks per face ROI. No tdl_app class wraps this runtime yet, so this
+// mirrors the camera path of apps/tdl_face_dense_keypoint_demo.cpp: VPSS
+// hardware ROI crop (zero-copy from the camera VB), bmrt inference, output
+// dequantize, then coordinates are mapped back to frame space.
+class PyFaceDenseLandmark {
+ public:
+  PyFaceDenseLandmark() = default;
+  ~PyFaceDenseLandmark() { close(); }
+
+  PyFaceDenseLandmark(const PyFaceDenseLandmark &) = delete;
+  PyFaceDenseLandmark &operator=(const PyFaceDenseLandmark &) = delete;
+
+  bool initialized() const { return runtime_ != nullptr; }
+  int inputWidth() const { return input_width_; }
+  int inputHeight() const { return input_height_; }
+  int landmarkCount() const { return landmark_count_; }
+
+  bool load(const std::string &model_spec, const std::string &firmware,
+            std::string *error) {
+    close();
+    if (!tdl_app::loadModelDescriptor(model_spec, &descriptor_, error)) {
+      return false;
+    }
+    if (descriptor_.model_path.empty()) {
+      fail(error, "dense landmark descriptor missing model path");
+      return false;
+    }
+
+    if (bm_dev_request(&handle_, 0) != BM_SUCCESS) {
+      fail(error, "bm_dev_request failed");
+      close();
+      return false;
+    }
+    if (!firmware.empty()) {
+      setenv("BMRUNTIME_USING_FIRMWARE", firmware.c_str(), 1);
+    }
+    runtime_ = bmrt_create(handle_);
+    if (!runtime_) {
+      fail(error, "bmrt_create failed");
+      close();
+      return false;
+    }
+    if (!bmrt_load_bmodel(runtime_, descriptor_.model_path.c_str())) {
+      fail(error, "bmrt_load_bmodel failed: " + descriptor_.model_path);
+      close();
+      return false;
+    }
+
+    const char **net_names = nullptr;
+    bmrt_get_network_names(runtime_, &net_names);
+    if (!net_names || bmrt_get_network_number(runtime_) <= 0) {
+      fail(error, "dense landmark bmodel has no network");
+      if (net_names) {
+        std::free(net_names);
+      }
+      close();
+      return false;
+    }
+    net_name_ = net_names[0];
+    std::free(net_names);
+
+    net_info_ = bmrt_get_network_info(runtime_, net_name_.c_str());
+    if (!net_info_) {
+      fail(error, "bmrt_get_network_info failed");
+      close();
+      return false;
+    }
+    if (net_info_->input_num != 1 || net_info_->output_num < 1 ||
+        net_info_->stage_num < 1) {
+      fail(error, "unexpected dense landmark network io layout");
+      close();
+      return false;
+    }
+    if (!parseInputShape(net_info_->stages[0].input_shapes[0], error) ||
+        !parseOutputLayout(error)) {
+      close();
+      return false;
+    }
+    input_dtype_ = net_info_->input_dtypes[0];
+
+    // The camera path feeds the model straight from the VPSS hardware
+    // preprocessor, which only supports NHWC uint8 model inputs.
+    if (nchw_layout_ || input_dtype_ != BM_UINT8) {
+      fail(error, "dense landmark frame path requires an NHWC uint8 model");
+      close();
+      return false;
+    }
+    tdl_app::bmrt_runtime::VpssPreprocessor::Config vpss_config;
+    vpss_config.width = input_width_;
+    vpss_config.height = input_height_;
+    vpss_config.rgb = normalizeToken(descriptor_.input_type) == "RGB";
+    vpss_config.interleaved = true;
+    vpss_config.input_dtype = input_dtype_;
+    vpss_config.input_scale =
+        net_info_->input_scales ? net_info_->input_scales[0] : 1.0f;
+    vpss_config.input_zero_point =
+        net_info_->input_zero_point ? net_info_->input_zero_point[0] : 0;
+    const float mean = descriptor_.mean.empty() ? 0.0f : descriptor_.mean[0];
+    const float scale =
+        descriptor_.scale.empty() ? 1.0f / 255.0f : descriptor_.scale[0];
+    vpss_config.mean = {{mean, mean, mean}};
+    vpss_config.scale = {{scale, scale, scale}};
+    preprocessor_.reset(new tdl_app::bmrt_runtime::VpssPreprocessor());
+    if (!preprocessor_->open(handle_, vpss_config, error) ||
+        !allocateDeviceOutputs(error)) {
+      close();
+      return false;
+    }
+    return true;
+  }
+
+  bool estimate(const VIDEO_FRAME_INFO_S &frame, const tdl_app::Box &box,
+                float expand_ratio, std::vector<tdl_app::Point> *points,
+                std::string *error) {
+    if (!runtime_ || !preprocessor_ || !net_info_) {
+      fail(error, "dense landmark runtime is not initialized");
+      return false;
+    }
+    if (!points) {
+      fail(error, "points output pointer is null");
+      return false;
+    }
+
+    tdl_app::bmrt_runtime::VpssPreprocessor::Roi roi;
+    if (!makeRoi(box, expand_ratio, static_cast<int>(frame.stVFrame.u32Width),
+                 static_cast<int>(frame.stVFrame.u32Height), &roi)) {
+      fail(error, "face box falls outside of the frame");
+      return false;
+    }
+
+    if (!preprocessor_->preprocess(
+            const_cast<VIDEO_FRAME_INFO_S *>(&frame), &roi, error)) {
+      return false;
+    }
+
+    bm_tensor_t input_tensor {};
+    bmrt_tensor_with_device(&input_tensor, preprocessor_->inputMemory(),
+                            input_dtype_,
+                            net_info_->stages[0].input_shapes[0]);
+    std::vector<bm_tensor_t> output_tensors(
+        static_cast<size_t>(net_info_->output_num), bm_tensor_t {});
+    for (int i = 0; i < net_info_->output_num; ++i) {
+      bmrt_tensor_with_device(&output_tensors[static_cast<size_t>(i)],
+                              output_memories_[static_cast<size_t>(i)],
+                              net_info_->output_dtypes[i],
+                              net_info_->stages[0].output_shapes[i]);
+    }
+    if (!bmrt_launch_tensor_ex(runtime_, net_name_.c_str(), &input_tensor, 1,
+                               output_tensors.data(), net_info_->output_num,
+                               true, false) ||
+        bm_thread_sync(handle_) != BM_SUCCESS) {
+      fail(error, "dense landmark device launch failed");
+      return false;
+    }
+
+    std::vector<std::vector<std::uint8_t>> output_bytes(
+        static_cast<size_t>(net_info_->output_num));
+    std::vector<bm_shape_t> output_shapes(
+        static_cast<size_t>(net_info_->output_num));
+    for (int i = 0; i < net_info_->output_num; ++i) {
+      output_shapes[static_cast<size_t>(i)] =
+          output_tensors[static_cast<size_t>(i)].shape;
+      size_t count = 1;
+      for (int d = 0; d < output_shapes[static_cast<size_t>(i)].num_dims;
+           ++d) {
+        count *=
+            static_cast<size_t>(output_shapes[static_cast<size_t>(i)].dims[d]);
+      }
+      output_bytes[static_cast<size_t>(i)].resize(
+          count * bmrt_data_type_size(net_info_->output_dtypes[i]));
+      if (bm_memcpy_d2s(handle_, output_bytes[static_cast<size_t>(i)].data(),
+                        output_tensors[static_cast<size_t>(i)].device_mem) !=
+          BM_SUCCESS) {
+        fail(error, "dense landmark output copy failed");
+        return false;
+      }
+    }
+
+    std::vector<tdl_app::Point> local_points;
+    if (!decodePoints(output_bytes, output_shapes, &local_points, error)) {
+      return false;
+    }
+
+    // Model coordinates are relative to the ROI crop; map them back to the
+    // source frame coordinate space.
+    points->clear();
+    points->reserve(local_points.size());
+    for (const tdl_app::Point &point : local_points) {
+      tdl_app::Point mapped = point;
+      mapped.x = roi.x + point.x * roi.width / input_width_;
+      mapped.y = roi.y + point.y * roi.height / input_height_;
+      points->push_back(mapped);
+    }
+    return true;
+  }
+
+  void close() {
+    preprocessor_.reset();
+    if (handle_) {
+      for (bm_device_mem_t &memory : output_memories_) {
+        if (memory.size > 0) {
+          bm_free_device(handle_, memory);
+          memory = bm_device_mem_t {};
+        }
+      }
+    }
+    output_memories_.clear();
+    if (runtime_) {
+      bmrt_destroy(runtime_);
+      runtime_ = nullptr;
+    }
+    if (handle_) {
+      bm_dev_free(handle_);
+      handle_ = nullptr;
+    }
+    net_info_ = nullptr;
+    net_name_.clear();
+    input_width_ = 0;
+    input_height_ = 0;
+    nchw_layout_ = false;
+    coord_output_index_ = -1;
+    landmark_count_ = 0;
+    coordinate_extent_ = 0.0f;
+    input_dtype_ = BM_UINT8;
+    descriptor_ = tdl_app::ModelDescriptor {};
+  }
+
+ private:
+  static void fail(std::string *error, const std::string &message) {
+    if (error) {
+      *error = message;
+    }
+  }
+
+  static std::string normalizeToken(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) {
+                     return static_cast<char>(std::toupper(c));
+                   });
+    std::replace(value.begin(), value.end(), '-', '_');
+    return value;
+  }
+
+  // Face ROI is the square around the detection box center, enlarged by
+  // expand_ratio, clamped to the frame.
+  static bool makeRoi(const tdl_app::Box &box, float expand_ratio,
+                      int image_width, int image_height,
+                      tdl_app::bmrt_runtime::VpssPreprocessor::Roi *roi) {
+    if (!roi || image_width <= 0 || image_height <= 0) {
+      return false;
+    }
+    const float w = std::max(1.0f, box.x2 - box.x1);
+    const float h = std::max(1.0f, box.y2 - box.y1);
+    const float cx = (box.x1 + box.x2) * 0.5f;
+    const float cy = (box.y1 + box.y2) * 0.5f;
+    const float side = std::max(w, h) * std::max(1.0f, 1.0f + expand_ratio);
+    const int x1 = std::max(
+        0, std::min(image_width - 1,
+                    static_cast<int>(std::floor(cx - side * 0.5f))));
+    const int y1 = std::max(
+        0, std::min(image_height - 1,
+                    static_cast<int>(std::floor(cy - side * 0.5f))));
+    const int x2 = std::max(
+        x1 + 1, std::min(image_width,
+                         static_cast<int>(std::ceil(cx + side * 0.5f))));
+    const int y2 = std::max(
+        y1 + 1, std::min(image_height,
+                         static_cast<int>(std::ceil(cy + side * 0.5f))));
+    roi->x = x1;
+    roi->y = y1;
+    roi->width = x2 - x1;
+    roi->height = y2 - y1;
+    return true;
+  }
+
+  bool parseInputShape(const bm_shape_t &shape, std::string *error) {
+    if (shape.num_dims != 4) {
+      fail(error, "dense landmark model only supports 4D input");
+      return false;
+    }
+    if (shape.dims[3] == 3) {
+      nchw_layout_ = false;
+      input_height_ = shape.dims[1];
+      input_width_ = shape.dims[2];
+      return true;
+    }
+    if (shape.dims[1] == 3) {
+      nchw_layout_ = true;
+      input_height_ = shape.dims[2];
+      input_width_ = shape.dims[3];
+      return true;
+    }
+    fail(error, "unable to infer dense landmark input layout");
+    return false;
+  }
+
+  bool parseOutputLayout(std::string *error) {
+    coord_output_index_ = -1;
+    landmark_count_ = 0;
+    coordinate_extent_ =
+        static_cast<float>(std::max(input_width_, input_height_));
+    size_t best_coord_elements = 0;
+    for (int i = 0; i < net_info_->output_num; ++i) {
+      size_t element_count = 1;
+      const bm_shape_t &shape = net_info_->stages[0].output_shapes[i];
+      for (int d = 0; d < shape.num_dims; ++d) {
+        element_count *= static_cast<size_t>(shape.dims[d]);
+      }
+      if (element_count > 3 && element_count % 3 == 0 &&
+          element_count > best_coord_elements) {
+        coord_output_index_ = i;
+        best_coord_elements = element_count;
+        landmark_count_ = static_cast<int>(element_count / 3);
+      }
+    }
+    if (coord_output_index_ < 0) {
+      fail(error,
+           "dense landmark model does not expose a usable coordinate output");
+      return false;
+    }
+    coordinate_extent_ = inferQuantizedCoordinateExtent(coord_output_index_);
+    return true;
+  }
+
+  float inferQuantizedCoordinateExtent(int output_index) const {
+    const bm_data_type_t dtype = net_info_->output_dtypes[output_index];
+    if (dtype != BM_INT8 && dtype != BM_UINT8) {
+      return static_cast<float>(std::max(input_width_, input_height_));
+    }
+
+    const float scale =
+        net_info_->output_scales ? net_info_->output_scales[output_index]
+                                 : 1.0f;
+    const int zero_point = net_info_->output_zero_point
+                               ? net_info_->output_zero_point[output_index]
+                               : 0;
+    const int qmin = (dtype == BM_INT8) ? -128 : 0;
+    const int qmax = (dtype == BM_INT8) ? 127 : 255;
+    const float min_value = (static_cast<float>(qmin) - zero_point) * scale;
+    const float max_value = (static_cast<float>(qmax) - zero_point) * scale;
+    const float magnitude =
+        std::max(std::fabs(min_value), std::fabs(max_value));
+    if (magnitude <= 1.5f) {
+      return 1.0f;
+    }
+    return std::max(16.0f, std::round(magnitude / 16.0f) * 16.0f);
+  }
+
+  bool allocateDeviceOutputs(std::string *error) {
+    output_memories_.resize(static_cast<size_t>(net_info_->output_num));
+    for (int i = 0; i < net_info_->output_num; ++i) {
+      size_t bytes = net_info_->max_output_bytes[i];
+      if (bytes == 0) {
+        const bm_shape_t &shape = net_info_->stages[0].output_shapes[i];
+        size_t count = 1;
+        for (int d = 0; d < shape.num_dims; ++d) {
+          count *= static_cast<size_t>(shape.dims[d]);
+        }
+        bytes = count * bmrt_data_type_size(net_info_->output_dtypes[i]);
+      }
+      if (bytes == 0 ||
+          bm_malloc_device_byte(handle_,
+                                &output_memories_[static_cast<size_t>(i)],
+                                bytes) != BM_SUCCESS) {
+        fail(error, "dense landmark output allocation failed");
+        return false;
+      }
+    }
+    return true;
+  }
+
+  bool decodePoints(
+      const std::vector<std::vector<std::uint8_t>> &output_bytes,
+      const std::vector<bm_shape_t> &output_shapes,
+      std::vector<tdl_app::Point> *points, std::string *error) const {
+    if (!points || coord_output_index_ < 0 ||
+        static_cast<size_t>(coord_output_index_) >= output_bytes.size()) {
+      fail(error, "dense landmark coordinate output is unavailable");
+      return false;
+    }
+    std::vector<float> coords;
+    if (!decodeOutput(output_bytes[static_cast<size_t>(coord_output_index_)],
+                      output_shapes[static_cast<size_t>(coord_output_index_)],
+                      coord_output_index_, &coords, error)) {
+      return false;
+    }
+    if (coords.size() < 3 || coords.size() % 3 != 0) {
+      fail(error, "unexpected dense landmark coordinate count: " +
+                      std::to_string(coords.size()));
+      return false;
+    }
+    points->clear();
+    points->reserve(coords.size() / 3);
+    const float x_scale =
+        static_cast<float>(input_width_) / std::max(1.0f, coordinate_extent_);
+    const float y_scale =
+        static_cast<float>(input_height_) / std::max(1.0f, coordinate_extent_);
+    for (size_t i = 0; i + 2 < coords.size(); i += 3) {
+      tdl_app::Point point;
+      point.x = std::max(
+          0.0f, std::min(static_cast<float>(input_width_),
+                         coords[i] * x_scale));
+      point.y = std::max(
+          0.0f, std::min(static_cast<float>(input_height_),
+                         coords[i + 1] * y_scale));
+      points->push_back(point);
+    }
+    return true;
+  }
+
+  bool decodeOutput(const std::vector<std::uint8_t> &raw_bytes,
+                    const bm_shape_t &shape, int output_index,
+                    std::vector<float> *decoded, std::string *error) const {
+    size_t element_count = 1;
+    for (int d = 0; d < shape.num_dims; ++d) {
+      element_count *= static_cast<size_t>(shape.dims[d]);
+    }
+    decoded->assign(element_count, 0.0f);
+
+    const float scale =
+        net_info_->output_scales ? net_info_->output_scales[output_index]
+                                 : 1.0f;
+    const int zero_point = net_info_->output_zero_point
+                               ? net_info_->output_zero_point[output_index]
+                               : 0;
+    const bm_data_type_t dtype = net_info_->output_dtypes[output_index];
+
+    if (dtype == BM_FLOAT32) {
+      const float *ptr = reinterpret_cast<const float *>(raw_bytes.data());
+      decoded->assign(ptr, ptr + element_count);
+      return true;
+    }
+    if (dtype == BM_INT8) {
+      const int8_t *ptr = reinterpret_cast<const int8_t *>(raw_bytes.data());
+      for (size_t i = 0; i < element_count; ++i) {
+        (*decoded)[i] = (static_cast<int>(ptr[i]) - zero_point) * scale;
+      }
+      return true;
+    }
+    if (dtype == BM_UINT8) {
+      const uint8_t *ptr = reinterpret_cast<const uint8_t *>(raw_bytes.data());
+      for (size_t i = 0; i < element_count; ++i) {
+        (*decoded)[i] = (static_cast<int>(ptr[i]) - zero_point) * scale;
+      }
+      return true;
+    }
+
+    fail(error, "unsupported dense landmark output dtype");
+    return false;
+  }
+
+  tdl_app::ModelDescriptor descriptor_;
+  bm_handle_t handle_ = nullptr;
+  void *runtime_ = nullptr;
+  const bm_net_info_t *net_info_ = nullptr;
+  std::string net_name_;
+  int input_width_ = 0;
+  int input_height_ = 0;
+  bool nchw_layout_ = false;
+  int coord_output_index_ = -1;
+  int landmark_count_ = 0;
+  float coordinate_extent_ = 0.0f;
+  bm_data_type_t input_dtype_ = BM_UINT8;
+  std::unique_ptr<tdl_app::bmrt_runtime::VpssPreprocessor> preprocessor_;
+  std::vector<bm_device_mem_t> output_memories_;
+};
+#endif  // TDL_PY_WITH_NPU
 
 // Snapshot of the RGN back-buffer returned by CVI_RGN_GetCanvasInfo. Valid
 // until the matching Osd.update(); fetch a fresh one for every draw cycle.
@@ -482,7 +1005,7 @@ class PyVoOutput {
  public:
   PyVoOutput(int device, int layer, int channel, int width, int height,
              int pixel_format, int interface_type, int interface_sync,
-             int rotation) {
+             int rotation, bool preserve_hardware_on_close) {
     tdl_app::VoOutput::Config config;
     config.device = device;
     config.layer = layer;
@@ -493,6 +1016,7 @@ class PyVoOutput {
     config.interface_type = interface_type;
     config.interface_sync = interface_sync;
     config.rotation = rotation;
+    config.preserve_hardware_on_close = preserve_hardware_on_close;
     vo_ = std::make_unique<tdl_app::VoOutput>(config);
   }
 
@@ -582,8 +1106,8 @@ class PyMediaLink {
 }  // namespace
 
 NB_MODULE(tdl_py, m) {
-  m.doc() = "CV184X dual-OS big-core bindings: VPSS frame capture (zero-copy) "
-            "and RGN OSD overlay";
+  m.doc() = "CV184X dual-OS big-core bindings: VPSS frame capture (zero-copy), "
+            "RGN OSD overlay, and NPU inference";
 
   m.def("init", []() {
     std::string error;
@@ -675,7 +1199,7 @@ NB_MODULE(tdl_py, m) {
                         tdl_app::DualOsLayout::kMainChannel, timeout_ms);
                   },
                   nb::arg("timeout_ms") = 1000,
-                  "grp0/ch0 main 1920x1080 NV12")
+                  "grp0/ch0 main 1600x1200 NV12")
       .def_static("ai",
                   [](int timeout_ms) {
                     return new PyVpssCamera(
@@ -691,7 +1215,7 @@ NB_MODULE(tdl_py, m) {
                         tdl_app::DualOsLayout::kLiveChannel, timeout_ms);
                   },
                   nb::arg("timeout_ms") = 1000,
-                  "grp0/ch2 live 1280x720 NV12")
+                  "grp0/ch2 live 720x480 NV12")
       .def_static("sub_rgb",
                   [](int timeout_ms) {
                     return new PyVpssCamera(
@@ -707,7 +1231,7 @@ NB_MODULE(tdl_py, m) {
                         tdl_app::DualOsLayout::kDisplayChannel, timeout_ms);
                   },
                   nb::arg("timeout_ms") = 1000,
-                  "grp1/ch0 display 1280x720 NV12")
+                  "grp1/ch0 display 720x480 NV12")
       .def_prop_ro("group", &PyVpssCamera::group)
       .def_prop_ro("channel", &PyVpssCamera::channel)
       .def("open", &PyVpssCamera::open)
@@ -776,6 +1300,7 @@ NB_MODULE(tdl_py, m) {
   // --- display path ---------------------------------------------------------
   m.attr("INTERFACE_MIPI") = tdl_app::VoInterfaceType::Mipi;
   m.attr("INTERFACE_LVDS") = tdl_app::VoInterfaceType::Lvds;
+  m.attr("SYNC_720x480_60") = tdl_app::VoInterfaceSync::P720_480_60;
   m.attr("SYNC_720x1280_60") = tdl_app::VoInterfaceSync::P720_1280_60;
   m.attr("SYNC_1080x1920_60") = tdl_app::VoInterfaceSync::P1080_1920_60;
   m.attr("SYNC_480x800_60") = tdl_app::VoInterfaceSync::P480_800_60;
@@ -783,9 +1308,9 @@ NB_MODULE(tdl_py, m) {
   m.attr("SYNC_480x640_60") = tdl_app::VoInterfaceSync::P480_640_60;
 
   nb::class_<PyVoOutput>(m, "VoOutput",
-      "MIPI panel output. Defaults match the dual-OS portrait screen "
-      "(720x1280 NV12, hardware rotation 90).")
-      .def(nb::init<int, int, int, int, int, int, int, int, int>(),
+      "MIPI panel output. Defaults match the dual-OS landscape screen "
+      "(720x480 NV12, no rotation).")
+      .def(nb::init<int, int, int, int, int, int, int, int, int, bool>(),
            nb::arg("device") = tdl_app::DualOsLayout::kVoDevice,
            nb::arg("layer") = 0,
            nb::arg("channel") = tdl_app::DualOsLayout::kVoChannel,
@@ -793,8 +1318,9 @@ NB_MODULE(tdl_py, m) {
            nb::arg("height") = tdl_app::DualOsLayout::kScreenHeight,
            nb::arg("pixel_format") = tdl_app::PixelFormat::NV12,
            nb::arg("interface_type") = tdl_app::VoInterfaceType::Mipi,
-           nb::arg("interface_sync") = tdl_app::VoInterfaceSync::P720_1280_60,
-           nb::arg("rotation") = tdl_app::DualOsLayout::kVoRotation)
+           nb::arg("interface_sync") = tdl_app::VoInterfaceSync::P720_480_60,
+           nb::arg("rotation") = tdl_app::DualOsLayout::kVoRotation,
+           nb::arg("preserve_hardware_on_close") = false)
       .def("open", &PyVoOutput::open)
       .def("close", &PyVoOutput::close)
       .def_prop_ro("opened", &PyVoOutput::isOpen);
@@ -849,4 +1375,406 @@ NB_MODULE(tdl_py, m) {
         },
         nb::arg("layer") = 0, nb::arg("channel") = 0,
         "Bind source feeding a VO channel as (module, dev, chn), or None");
+
+#ifdef TDL_PY_WITH_NPU
+  // --- NPU inference: result structures ------------------------------------
+  nb::class_<tdl_app::Point>(m, "Point",
+      "One keypoint/landmark in source-frame coordinates.")
+      .def_ro("x", &tdl_app::Point::x)
+      .def_ro("y", &tdl_app::Point::y)
+      .def_ro("score", &tdl_app::Point::score)
+      .def("__repr__", [](const tdl_app::Point &self) {
+        return "<tdl_py.Point x=" + std::to_string(self.x) +
+               " y=" + std::to_string(self.y) +
+               " score=" + std::to_string(self.score) + ">";
+      });
+
+  nb::class_<tdl_app::Box>(m, "Box",
+      "Detected box: corners (x1,y1,x2,y2), score, class_id. Face detectors "
+      "(SCRFD) also fill landmarks with 5 facial keypoints.")
+      .def_ro("x1", &tdl_app::Box::x1)
+      .def_ro("y1", &tdl_app::Box::y1)
+      .def_ro("x2", &tdl_app::Box::x2)
+      .def_ro("y2", &tdl_app::Box::y2)
+      .def_ro("score", &tdl_app::Box::score)
+      .def_ro("class_id", &tdl_app::Box::class_id)
+      .def_ro("landmarks", &tdl_app::Box::landmarks,
+              "Per-face landmarks when the detector provides them "
+              "(SCRFD: 5 points - eyes, nose, mouth corners), "
+              "in frame coordinates like the box itself")
+      .def_ro("landmarks", &tdl_app::Box::landmarks)
+      .def_prop_ro("width", &tdl_app::Box::width)
+      .def_prop_ro("height", &tdl_app::Box::height)
+      .def("__repr__", [](const tdl_app::Box &self) {
+        return "<tdl_py.Box (" + std::to_string(self.x1) + "," +
+               std::to_string(self.y1) + ")-(" + std::to_string(self.x2) +
+               "," + std::to_string(self.y2) +
+               " score=" + std::to_string(self.score) +
+               " class=" + std::to_string(self.class_id) + ">";
+      });
+
+  nb::class_<tdl_app::ClassificationItem>(m, "ClassificationItem",
+      "One top-k classification entry: class_id + score.")
+      .def_ro("class_id", &tdl_app::ClassificationItem::class_id)
+      .def_ro("score", &tdl_app::ClassificationItem::score)
+      .def("__repr__", [](const tdl_app::ClassificationItem &self) {
+        return "<tdl_py.ClassificationItem class=" +
+               std::to_string(self.class_id) +
+               " score=" + std::to_string(self.score) + ">";
+      });
+
+  nb::class_<tdl_app::Attribute>(m, "Attribute",
+      "Named scalar attribute (e.g. \"ocr_text:<text>\" per OCR box).")
+      .def_ro("name", &tdl_app::Attribute::name)
+      .def_ro("value", &tdl_app::Attribute::value);
+
+  nb::class_<tdl_app::AlgorithmResult>(m, "AlgorithmResult",
+      "Generic inference result. Detection fills boxes; classification fills "
+      "classes; OCR fills boxes + text (+ ocr_text attributes).")
+      .def_ro("classes", &tdl_app::AlgorithmResult::classes)
+      .def_ro("boxes", &tdl_app::AlgorithmResult::boxes)
+      .def_ro("points", &tdl_app::AlgorithmResult::points)
+      .def_ro("attributes", &tdl_app::AlgorithmResult::attributes)
+      .def_ro("labels", &tdl_app::AlgorithmResult::labels)
+      .def_ro("text", &tdl_app::AlgorithmResult::text)
+      .def("label_of",
+           [](const tdl_app::AlgorithmResult &self, int class_id) {
+             if (class_id >= 0 &&
+                 class_id < static_cast<int>(self.labels.size())) {
+               return self.labels[static_cast<std::size_t>(class_id)];
+             }
+             return std::to_string(class_id);
+           },
+           nb::arg("class_id"),
+           "Label string for class_id, or the id itself when out of range");
+
+  nb::class_<tdl_app::KeypointResult>(m, "KeypointResult",
+      "Pose/keypoint result; points are in source-frame coordinates.")
+      .def_ro("width", &tdl_app::KeypointResult::width)
+      .def_ro("height", &tdl_app::KeypointResult::height)
+      .def_ro("points", &tdl_app::KeypointResult::points);
+
+  nb::class_<tdl_app::InstanceSegment>(m, "InstanceSegment",
+      "One segmented instance: detection box + polygon outline.")
+      .def_ro("box", &tdl_app::InstanceSegment::box)
+      .def_ro("outline", &tdl_app::InstanceSegment::outline);
+
+  nb::class_<tdl_app::InstanceSegmentationResult>(m,
+      "InstanceSegmentationResult")
+      .def_ro("width", &tdl_app::InstanceSegmentationResult::width)
+      .def_ro("height", &tdl_app::InstanceSegmentationResult::height)
+      .def_ro("instances", &tdl_app::InstanceSegmentationResult::instances);
+
+  // --- NPU inference: model wrappers ----------------------------------------
+  nb::class_<tdl_app::Detector>(m, "Detector",
+      "Object detector (YOLOv5/v8 etc., .mud model-spec). detect() runs on a "
+      "VpssCamera frame; detect_image() on a file path.")
+      .def(nb::init<>())
+      .def("load",
+           [](tdl_app::Detector &self, const std::string &model_spec,
+              const std::string &firmware) {
+             loadModel(self, "detector", model_spec, firmware);
+           },
+           nb::arg("model_spec"), nb::arg("firmware") = "",
+           "Load a .mud model-spec (GIL released)")
+      .def("detect",
+           [](tdl_app::Detector &self, PyFrame &frame, float threshold,
+              float iou_threshold) {
+             const tdl_app::InferOptions options =
+                 tdl_app::InferOptions::detection(threshold, iou_threshold);
+             const tdl_app::Frame sdk_frame = sdkFrameFrom(frame);
+             tdl_app::AlgorithmResult result;
+             std::string error;
+             bool ok = false;
+             {
+               nb::gil_scoped_release guard;
+               ok = self.runFrame(sdk_frame, options, &result, &error);
+             }
+             if (!ok) {
+               raise("detector inference failed: " + error);
+             }
+             return result;
+           },
+           nb::arg("frame"), nb::arg("threshold") = 0.5f,
+           nb::arg("iou_threshold") = 0.45f,
+           "Detect objects in a camera frame (zero-copy, GIL released)")
+      .def("detect_image",
+           [](tdl_app::Detector &self, const std::string &path,
+              float threshold, float iou_threshold) {
+             const tdl_app::InferOptions options =
+                 tdl_app::InferOptions::detection(threshold, iou_threshold);
+             tdl_app::AlgorithmResult result;
+             std::string error;
+             bool ok = false;
+             {
+               nb::gil_scoped_release guard;
+               ok = self.run(path, options, &result, &error);
+             }
+             if (!ok) {
+               raise("detector inference failed: " + error);
+             }
+             return result;
+           },
+           nb::arg("path"), nb::arg("threshold") = 0.5f,
+           nb::arg("iou_threshold") = 0.45f,
+           "Detect objects in an image file (GIL released)")
+      .def("reset", &tdl_app::Detector::reset, "Unload the model")
+      .def_prop_ro("initialized", &tdl_app::Detector::initialized)
+      .def_prop_ro("model_type", &tdl_app::Detector::modelType);
+
+  nb::class_<tdl_app::Classifier>(m, "Classifier",
+      "Image classifier. classify() runs on a VpssCamera frame; "
+      "classify_image() on a file path.")
+      .def(nb::init<>())
+      .def("load",
+           [](tdl_app::Classifier &self, const std::string &model_spec,
+              const std::string &firmware) {
+             loadModel(self, "classifier", model_spec, firmware);
+           },
+           nb::arg("model_spec"), nb::arg("firmware") = "",
+           "Load a .mud model-spec (GIL released)")
+      .def("classify",
+           [](tdl_app::Classifier &self, PyFrame &frame, float threshold,
+              int top_k) {
+             const tdl_app::InferOptions options =
+                 tdl_app::InferOptions::classification(threshold, top_k);
+             const tdl_app::Frame sdk_frame = sdkFrameFrom(frame);
+             tdl_app::AlgorithmResult result;
+             std::string error;
+             bool ok = false;
+             {
+               nb::gil_scoped_release guard;
+               ok = self.runFrame(sdk_frame, options, &result, &error);
+             }
+             if (!ok) {
+               raise("classifier inference failed: " + error);
+             }
+             return result;
+           },
+           nb::arg("frame"), nb::arg("threshold") = 0.0f, nb::arg("top_k") = 5,
+           "Classify a camera frame (zero-copy, GIL released)")
+      .def("classify_image",
+           [](tdl_app::Classifier &self, const std::string &path,
+              float threshold, int top_k) {
+             const tdl_app::InferOptions options =
+                 tdl_app::InferOptions::classification(threshold, top_k);
+             tdl_app::AlgorithmResult result;
+             std::string error;
+             bool ok = false;
+             {
+               nb::gil_scoped_release guard;
+               ok = self.run(path, options, &result, &error);
+             }
+             if (!ok) {
+               raise("classifier inference failed: " + error);
+             }
+             return result;
+           },
+           nb::arg("path"), nb::arg("threshold") = 0.0f, nb::arg("top_k") = 5,
+           "Classify an image file (GIL released)")
+      .def("reset", &tdl_app::Classifier::reset, "Unload the model")
+      .def_prop_ro("initialized", &tdl_app::Classifier::initialized)
+      .def_prop_ro("model_type", &tdl_app::Classifier::modelType);
+
+  nb::class_<tdl_app::KeypointDetector>(m, "KeypointDetector",
+      "Pose/keypoint estimator (YOLOv8-pose person17, hand, ...). estimate() "
+      "runs on a VpssCamera frame; estimate_image() on a file path.")
+      .def(nb::init<>())
+      .def("load",
+           [](tdl_app::KeypointDetector &self, const std::string &model_spec,
+              const std::string &firmware) {
+             loadModel(self, "keypoint detector", model_spec, firmware);
+           },
+           nb::arg("model_spec"), nb::arg("firmware") = "",
+           "Load a .mud model-spec (GIL released)")
+      .def("estimate",
+           [](tdl_app::KeypointDetector &self, PyFrame &frame) {
+             const tdl_app::Frame sdk_frame = sdkFrameFrom(frame);
+             tdl_app::KeypointResult result;
+             std::string error;
+             bool ok = false;
+             {
+               nb::gil_scoped_release guard;
+               ok = self.runFrame(sdk_frame, &result, &error);
+             }
+             if (!ok) {
+               raise("keypoint inference failed: " + error);
+             }
+             return result;
+           },
+           nb::arg("frame"),
+           "Estimate keypoints on a camera frame (zero-copy, GIL released)")
+      .def("estimate_image",
+           [](tdl_app::KeypointDetector &self, const std::string &path) {
+             tdl_app::KeypointResult result;
+             std::string error;
+             bool ok = false;
+             {
+               nb::gil_scoped_release guard;
+               ok = self.run(path, &result, &error);
+             }
+             if (!ok) {
+               raise("keypoint inference failed: " + error);
+             }
+             return result;
+           },
+           nb::arg("path"), "Estimate keypoints on an image file (GIL released)")
+      .def("reset", &tdl_app::KeypointDetector::reset, "Unload the model")
+      .def_prop_ro("initialized", &tdl_app::KeypointDetector::initialized)
+      .def_prop_ro("model_type", &tdl_app::KeypointDetector::modelType);
+
+  nb::class_<tdl_app::InstanceSegmenter>(m, "InstanceSegmenter",
+      "Instance segmentation (YOLOv8-seg etc.). segment() runs on a "
+      "VpssCamera frame; segment_image() on a file path. Each instance "
+      "exposes its box and polygon outline (per-pixel masks are not "
+      "exported).")
+      .def(nb::init<>())
+      .def("load",
+           [](tdl_app::InstanceSegmenter &self, const std::string &model_spec,
+              const std::string &firmware) {
+             loadModel(self, "instance segmenter", model_spec, firmware);
+           },
+           nb::arg("model_spec"), nb::arg("firmware") = "",
+           "Load a .mud model-spec (GIL released)")
+      .def("segment",
+           [](tdl_app::InstanceSegmenter &self, PyFrame &frame) {
+             const tdl_app::Frame sdk_frame = sdkFrameFrom(frame);
+             tdl_app::InstanceSegmentationResult result;
+             std::string error;
+             bool ok = false;
+             {
+               nb::gil_scoped_release guard;
+               ok = self.runFrame(sdk_frame, &result, &error);
+             }
+             if (!ok) {
+               raise("instance segmentation failed: " + error);
+             }
+             return result;
+           },
+           nb::arg("frame"),
+           "Segment a camera frame (zero-copy, GIL released)")
+      .def("segment_image",
+           [](tdl_app::InstanceSegmenter &self, const std::string &path) {
+             tdl_app::InstanceSegmentationResult result;
+             std::string error;
+             bool ok = false;
+             {
+               nb::gil_scoped_release guard;
+               ok = self.run(path, &result, &error);
+             }
+             if (!ok) {
+               raise("instance segmentation failed: " + error);
+             }
+             return result;
+           },
+           nb::arg("path"), "Segment an image file (GIL released)")
+      .def("reset", &tdl_app::InstanceSegmenter::reset, "Unload the model")
+      .def_prop_ro("initialized", &tdl_app::InstanceSegmenter::initialized)
+      .def_prop_ro("model_type", &tdl_app::InstanceSegmenter::modelType);
+
+  nb::class_<tdl_app::PlateRecognizer>(m, "PlateRecognizer",
+      "OCR / plate recognizer (PP-OCR, LPR, ...). recognize() runs on a "
+      "VpssCamera frame; recognize_image() on a file path.")
+      .def(nb::init<>())
+      .def("load",
+           [](tdl_app::PlateRecognizer &self, const std::string &model_spec,
+              const std::string &firmware) {
+             loadModel(self, "plate recognizer", model_spec, firmware);
+           },
+           nb::arg("model_spec"), nb::arg("firmware") = "",
+           "Load a .mud model-spec (GIL released)")
+      .def("recognize",
+           [](tdl_app::PlateRecognizer &self, PyFrame &frame,
+              float threshold) {
+             const tdl_app::InferOptions options =
+                 tdl_app::InferOptions::withThreshold(threshold);
+             const tdl_app::Frame sdk_frame = sdkFrameFrom(frame);
+             tdl_app::AlgorithmResult result;
+             std::string error;
+             bool ok = false;
+             {
+               nb::gil_scoped_release guard;
+               ok = self.runFrame(sdk_frame, options, &result, &error);
+             }
+             if (!ok) {
+               raise("plate recognition failed: " + error);
+             }
+             return result;
+           },
+           nb::arg("frame"), nb::arg("threshold") = 0.5f,
+           "Recognize text/plates in a camera frame (zero-copy, GIL released)")
+      .def("recognize_image",
+           [](tdl_app::PlateRecognizer &self, const std::string &path,
+              float threshold) {
+             const tdl_app::InferOptions options =
+                 tdl_app::InferOptions::withThreshold(threshold);
+             tdl_app::AlgorithmResult result;
+             std::string error;
+             bool ok = false;
+             {
+               nb::gil_scoped_release guard;
+               ok = self.run(path, options, &result, &error);
+             }
+             if (!ok) {
+               raise("plate recognition failed: " + error);
+             }
+             return result;
+           },
+           nb::arg("path"), nb::arg("threshold") = 0.5f,
+           "Recognize text/plates in an image file (GIL released)")
+      .def("reset", &tdl_app::PlateRecognizer::reset, "Unload the model")
+      .def_prop_ro("initialized", &tdl_app::PlateRecognizer::initialized)
+      .def_prop_ro("model_type", &tdl_app::PlateRecognizer::modelType);
+
+  nb::class_<PyFaceDenseLandmark>(m, "FaceDenseLandmark",
+      "Dense facial landmark estimator (face_dense_real.mud). Second-stage "
+      "model: detect faces first (Detector + scrfd_real.mud or "
+      "yolov8_face_real.mud), then estimate() landmarks per face box on a "
+      "VpssCamera frame. Returned points are in frame coordinates.")
+      .def(nb::init<>())
+      .def("load",
+           [](PyFaceDenseLandmark &self, const std::string &model_spec,
+              const std::string &firmware) {
+             std::string error;
+             bool ok = false;
+             {
+               nb::gil_scoped_release guard;
+               ok = self.load(model_spec, firmware, &error);
+             }
+             if (!ok) {
+               raise("face dense landmark load failed: " + error);
+             }
+           },
+           nb::arg("model_spec"), nb::arg("firmware") = "",
+           "Load a .mud model-spec (GIL released)")
+      .def("estimate",
+           [](PyFaceDenseLandmark &self, PyFrame &frame,
+              const tdl_app::Box &box, float expand) {
+             frame.requireValid();
+             std::vector<tdl_app::Point> points;
+             std::string error;
+             bool ok = false;
+             {
+               nb::gil_scoped_release guard;
+               ok = self.estimate(frame.nativeInfo(), box, expand, &points,
+                                  &error);
+             }
+             if (!ok) {
+               raise("face dense landmark inference failed: " + error);
+             }
+             return points;
+           },
+           nb::arg("frame"), nb::arg("box"), nb::arg("expand") = 0.0f,
+           "Estimate dense landmarks for one face box on a camera frame "
+           "(zero-copy VPSS ROI, GIL released); expand enlarges the square "
+           "ROI, e.g. 0.2 = +20%")
+      .def("reset", [](PyFaceDenseLandmark &self) { self.close(); },
+           "Unload the model")
+      .def_prop_ro("initialized", &PyFaceDenseLandmark::initialized)
+      .def_prop_ro("input_width", &PyFaceDenseLandmark::inputWidth,
+                   "Model input width (ROI is resized to this)")
+      .def_prop_ro("input_height", &PyFaceDenseLandmark::inputHeight)
+      .def_prop_ro("landmark_count", &PyFaceDenseLandmark::landmarkCount,
+                   "Number of landmarks produced per face");
+#endif  // TDL_PY_WITH_NPU
 }

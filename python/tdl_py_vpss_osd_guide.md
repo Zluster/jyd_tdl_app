@@ -1,4 +1,4 @@
-# tdl_py：VPSS 零拷取帧与 OSD 使用指南
+# tdl_py：VPSS 零拷取帧、OSD 与 NPU 推理使用指南
 
 本文档对应 `python/tdl_py_module.cpp` 当前实现，适用于 CV184X 双系统场景：
 
@@ -6,6 +6,7 @@
 - 大核 Python 3.10 通过 `tdl_py` 调用 MMF 接口。
 - VPSS 帧使用 `CVI_SYS_Mmap` 映射为只读 `memoryview`，不复制像素。
 - OSD 画布以可写 `memoryview` 或整数地址暴露，可供 Python、ctypes、LVGL 等直接写入。
+- NPU 推理（检测/分类/关键点/实例分割/OCR）直接读取 VPSS 帧的物理缓冲，不经过 Python 复制像素。
 
 本文所说的“零拷贝”是指 Python 直接访问映射后的媒体缓冲区，不额外复制整帧像素。调用 `bytes(memoryview)`、切片产生 `bytes`、颜色转换等操作仍会产生复制。
 
@@ -21,6 +22,9 @@
 - `MediaLink`：建立 VPSS→VPSS、VPSS→VO 的硬件绑定。
 - `Osd`：创建 RGN Overlay、绑定到 VPSS 通道并提交画布。
 - `OsdCanvas`：OSD 画布描述，包括地址、大小、stride 和可写 `memoryview`。
+- `Detector`、`Classifier`、`KeypointDetector`、`InstanceSegmenter`、`PlateRecognizer`：NPU 推理，直接消费 `Frame` 或图片文件。
+- `FaceDenseLandmark`：人脸稠密关键点（二级模型），在 `Frame` 上对每个人脸框做 ROI 推理。
+- `AlgorithmResult`、`Box`、`ClassificationItem`、`Attribute`、`KeypointResult`、`InstanceSegmentationResult` 等：推理结果结构。
 
 模块还提供：
 
@@ -37,11 +41,11 @@
 
 | Python 构造方法 | VPSS 通道 | 默认规格 | 像素格式 |
 |---|---:|---:|---|
-| `VpssCamera.main()` | grp0/ch0 | 1920×1080 | NV12 |
+| `VpssCamera.main()` | grp0/ch0 | 1600×1200 | NV12 |
 | `VpssCamera.ai()` | grp0/ch1 | 640×640 | RGB888_PLANAR |
-| `VpssCamera.live()` | grp0/ch2 | 1280×720 | NV12 |
+| `VpssCamera.live()` | grp0/ch2 | 720×480 | NV12 |
 | `VpssCamera.sub_rgb()` | grp0/ch3 | 640×640 | NV21 |
-| `VpssCamera.screen()` | grp1/ch0 | 1280×720 | NV12 |
+| `VpssCamera.screen()` | grp1/ch0 | 720×480 | NV12 |
 
 显示链路通常为：
 
@@ -49,16 +53,16 @@
 摄像头/小核媒体管线
         │
         ▼
-VPSS grp0/ch2（live，1280×720）
+VPSS grp0/ch2（live，720×480）
         │ CVI_SYS_Bind
         ▼
 VPSS grp1/ch0（显示处理通道）
         │ CVI_SYS_Bind
         ▼
-VO layer0/ch0
-        │ 旋转 90°
+VO layer0/ch0（不旋转）
+        │
         ▼
-MIPI 720×1280 竖屏
+MIPI 720×480 横屏
 ```
 
 OSD 可以绑定到：
@@ -133,12 +137,12 @@ cam.close()
 
 ### 4.3 NV12 示例
 
-1280×720 NV12 通常表现为：
+720×480 NV12 通常表现为：
 
 ```text
-plane 0: Y，  stride=1280，size=1280×720=921600
-plane 1: UV， stride=1280，size=1280×360=460800
-总大小：1382400
+plane 0: Y，  stride=720，size=720×480=345600
+plane 1: UV， stride=720，size=720×240=172800
+总大小：518400
 ```
 
 访问两个 plane：
@@ -253,13 +257,14 @@ display.bind()
 - VO device 0。
 - layer 0。
 - channel 0。
-- 输出尺寸 720×1280。
+- 输出尺寸 720×480。
 - NV12。
 - MIPI。
-- `P720_1280_60`。
-- 硬件旋转 90°。
+- `P720_480_60`。
+- 不旋转（rotation=0）。
+- `preserve_hardware_on_close=False`。
 
-VPSS/OSD 画布仍按 1280×720 横屏坐标绘制，VO 会把最终视频和 OSD 一起旋转到 720×1280 竖屏。
+VPSS/OSD 画布、live 视频和屏幕同为 720×480 横屏，VO 不再做硬件旋转。若希望 `close()` 后屏幕保持点亮（例如避免进程退出时黑屏闪烁、或让下一个进程接力显示），使用 `tdl_py.VoOutput(preserve_hardware_on_close=True)`。
 
 ### 5.2 避免重复打开和重复 bind
 
@@ -318,8 +323,8 @@ if vo is not None:
 ```python
 osd = tdl_py.Osd(
     handle=201,
-    width=1280,
-    height=720,
+    width=720,
+    height=480,
     pixel_format=tdl_py.FORMAT_ARGB8888,
     canvas_count=2,
     bg_color=0,
@@ -579,8 +584,8 @@ fb.stride == width * 4
 ```python
 osd = tdl_py.Osd(
     handle=201,
-    width=1280,
-    height=720,
+    width=720,
+    height=480,
     canvas_count=1,
 )
 osd.create()
@@ -835,7 +840,7 @@ osd_screen.create()
 osd_screen.attach(group=1, channel=0, layer=1)
 c_screen = osd_screen.canvas()
 c_screen.data[:] = b"\x00" * c_screen.size
-c_screen.data[c_screen.stride * 620:c_screen.stride * 720] = (
+c_screen.data[c_screen.stride * 380:c_screen.stride * 480] = (
     bytes([255, 0, 0, 200]) * (c_screen.stride * 100 // 4)
 )
 osd_screen.update()
@@ -1071,6 +1076,27 @@ tdl_py.Osd(..., canvas_count=1)
 
 这类错误无法靠 Python 异常完全保护，因为地址已经交给了外部代码。
 
+### 16.10 模块里没有 Detector 等 NPU 类
+
+- 固件以 `TDL_APP_MEDIA_MINIMAL=ON` 构建时只包含媒体绑定，NPU 类不会编入。
+- 板端 `/root/tdl_py.so` 是旧版本，重新编译并替换。
+
+### 16.11 `load()` 失败
+
+- `model_spec` 路径错误或 `.mud` 引用的模型文件缺失。
+- 模型与当前 TDL SDK/TPU 固件版本不匹配。
+- 错误信息来自 SDK 底层，先按提示核对模型文件来源。
+
+### 16.12 `detect()` 结果为空
+
+- 阈值过高：先试 `threshold=0.25`。
+- 输入帧内容与模型期望不符（类别不在 label 表内）。
+- 确认取帧通道画面正常，可先用 `detect_image()` 对静态图片验证模型本身。
+
+### 16.13 FaceDenseLandmark `load()` 报 "requires an NHWC uint8 model"
+
+帧推理路径由 VPSS 硬件完成 ROI 裁剪和预处理，只支持 NHWC 布局、uint8 输入的模型。换用 `face_dense_real.mud` 这类满足条件的模型；NCHW 布局的稠密关键点模型暂时无法用本类。
+
 ---
 
 ## 17. 性能与线程建议
@@ -1083,12 +1109,209 @@ tdl_py.Osd(..., canvas_count=1)
 - 不要让一个线程 `update()`，另一个线程仍在写该 back buffer。
 - persistent 双缓冲必须由一个明确的渲染/提交线程维护相位。
 - VPSS camera 每次只能保留一个有效帧；需要跨线程处理时，应在 release 前完成，或复制到自有内存。
+- `load()` 和各类推理调用期间都会释放 GIL，可以把推理放到独立线程；但同一模型对象不要并发发起多次推理，需要并发时请加锁或各线程持有独立模型对象。
+- 帧推理是零拷贝的，不必先把像素复制出来再推理；在帧有效期内直接传入 `Frame` 即可。
 
 ---
 
-## 18. API 快速参考
+## 18. NPU 推理
 
-### 18.1 VpssCamera
+`tdl_py` 内置 5 个 NPU 算法类，对应 TDL SDK 的模型封装。仅当固件以 `TDL_APP_MEDIA_MINIMAL=OFF`（默认配置）构建时可用；media-minimal 构建不含这些类。
+
+### 18.1 算法类一览
+
+| 类 | 帧推理 | 图片推理 | 返回类型 | 结果重点 |
+|---|---|---|---|---|
+| `Detector` | `detect(frame, threshold=0.5, iou_threshold=0.45)` | `detect_image(path, ...)` | `AlgorithmResult` | `boxes` |
+| `Classifier` | `classify(frame, threshold=0.0, top_k=5)` | `classify_image(path, ...)` | `AlgorithmResult` | `classes` |
+| `KeypointDetector` | `estimate(frame)` | `estimate_image(path)` | `KeypointResult` | `points` |
+| `InstanceSegmenter` | `segment(frame)` | `segment_image(path)` | `InstanceSegmentationResult` | `instances`（box + outline） |
+| `PlateRecognizer` | `recognize(frame, threshold=0.5)` | `recognize_image(path, ...)` | `AlgorithmResult` | `boxes` + `text` + ocr_text 属性 |
+| `FaceDenseLandmark` | `estimate(frame, box, expand=0.0)` | 无 | `list[Point]` | 单个人脸框的稠密关键点（二级模型，见 18.7） |
+
+每个类都有：
+
+- `load(model_spec, firmware="")`：加载模型。
+- `reset()`：卸载模型，释放 NPU 内存。
+- `initialized`：是否已加载。
+
+除 `FaceDenseLandmark` 外还有 `model_type`（当前模型类型字符串）；`FaceDenseLandmark` 另有 `input_width`、`input_height`、`landmark_count` 只读属性。
+
+### 18.2 加载模型
+
+```python
+det = tdl_py.Detector()
+det.load("/root/models/yolov8n.mud")
+```
+
+- `model_spec`：板端 `.mud` 模型描述文件路径。
+- `firmware`：通常留空，由 SDK 使用默认 TPU 固件。
+- `load()` 可能耗时数秒，期间释放 GIL，不会阻塞其他 Python 线程。
+- 模型对象不是上下文管理器；需要提前释放 NPU 内存时显式调用 `reset()`。
+- 可同时加载多个模型对象，但 NPU 内存有限，注意模型总体大小。
+
+### 18.3 相机帧推理
+
+```python
+with tdl_py.VpssCamera.ai() as cam:
+    with cam.read() as frame:
+        result = det.detect(frame, threshold=0.25)
+```
+
+- 帧推理是零拷贝的：`Frame` 内部保存了 `VIDEO_FRAME_INFO_S` 副本，NPU 预处理直接读取 VPSS 的 VB 物理缓冲，不经过 Python 复制像素。
+- 与取帧相同的生命周期约束：推理必须在 `frame.release()`、下一次 `cam.read()` 或 `cam.close()` 之前完成。
+- 推理调用期间释放 GIL，其他线程可以继续取帧或画 OSD。
+- 结果坐标是输入帧的坐标系。例如 `VpssCamera.ai()` 为 640×640，要在 720×480 的 OSD 上画框时需要按比例换算（见 18.6）。
+- `VpssCamera.ai()` 输出 640×640 RGB888_PLANAR，就是为模型输入准备的通道；也可以对 `main()`/`live()` 的 NV12 帧推理，SDK 预处理会自行转换格式。
+
+### 18.4 图片文件推理
+
+```python
+result = det.detect_image("/tmp/test.jpg", threshold=0.25)
+```
+
+每个算法类都有对应的 `*_image(path)` 变体，适合离线验证模型和阈值。
+
+### 18.5 结果结构
+
+`AlgorithmResult`（检测/分类/OCR 共用）：
+
+- `boxes`：`Box` 列表。`Box` 有 `x1`、`y1`、`x2`、`y2`、`score`、`class_id`，以及只读属性 `width`、`height`。
+- `classes`：`ClassificationItem` 列表（`class_id`、`score`），分类 top-k 结果。
+- `labels`：模型 label 字符串表；`label_of(class_id)` 取标签，越界时返回 id 的字符串形式。
+- `text`：OCR 汇总文本。
+- `attributes`：`Attribute` 列表（`name`、`value`）；OCR 每个检测框对应一条 `ocr_text:<文本>` 属性，与 `boxes` 顺序一致。
+
+`Box` 另有 `landmarks`（`Point` 列表）：人脸检测模型（SCRFD，如 `scrfd_real.mud`）会填 5 点五官关键点（双眼、鼻尖、双嘴角）；普通目标检测模型该列表为空。
+
+`KeypointResult`：
+
+- `width`、`height`：源帧尺寸。
+- `points`：`Point` 列表（`x`、`y`、`score`），源帧坐标。
+
+`InstanceSegmentationResult`：
+
+- `width`、`height`：源帧尺寸。
+- `instances`：`InstanceSegment` 列表。每个实例有 `box`（`Box`）和 `outline`（`Point` 列表，多边形轮廓）。
+- 逐像素 mask 不导出。
+
+### 18.6 完整示例：检测 + OSD 画框
+
+在 ai 通道（640×640）上推理，把检测框换算到 720×480 OSD 画布上，叠加到显示通道 grp1/ch0：
+
+```python
+import tdl_py
+
+AI_W, AI_H = 640, 640       # VpssCamera.ai() 帧尺寸
+OSD_W, OSD_H = 720, 480     # OSD 画布尺寸
+SX = OSD_W / AI_W           # 检测框坐标 → OSD 坐标
+SY = OSD_H / AI_H
+
+
+def draw_rect_bgra(c, x1, y1, x2, y2, bgra, thick=2):
+    """在 ARGB8888（内存 BGRA 序）画布上画矩形边框，坐标已裁剪。"""
+    px = bytes(bgra)
+    x1 = max(0, min(x1, c.width - 1))
+    x2 = max(0, min(x2, c.width - 1))
+    y1 = max(0, min(y1, c.height - 1))
+    y2 = max(0, min(y2, c.height - 1))
+    if x2 <= x1 or y2 <= y1:
+        return
+    for t in range(thick):  # 上下两条横边
+        for y in (y1 + t, y2 - t):
+            start = y * c.stride + x1 * 4
+            c.data[start:start + (x2 - x1) * 4] = px * (x2 - x1)
+    for t in range(thick):  # 左右两条竖边
+        for x in (x1 + t, x2 - t):
+            for y in range(y1, y2):
+                start = y * c.stride + x * 4
+                c.data[start:start + 4] = px
+
+
+tdl_py.init()
+
+vo = tdl_py.VoOutput()
+vo.open()
+preview = tdl_py.MediaLink.vpss_to_vpss(0, 2, 1, 0)
+preview.bind()
+display = tdl_py.MediaLink.vpss_to_vo(1, 0, 0, 0)
+display.bind()
+
+det = tdl_py.Detector()
+det.load("/root/models/yolov8n.mud")
+
+osd = tdl_py.Osd(handle=203, canvas_count=2)
+osd.create()
+osd.attach(group=1, channel=0, layer=10)
+
+cam = tdl_py.VpssCamera.ai()
+cam.open()
+
+try:
+    while True:
+        with cam.read() as frame:          # 推理必须在帧有效期内
+            result = det.detect(frame, threshold=0.25)
+
+        c = osd.canvas()
+        c.data[:] = b"\x00" * c.size       # 双缓冲每帧完整重画
+        for box in result.boxes:
+            draw_rect_bgra(c,
+                           int(box.x1 * SX), int(box.y1 * SY),
+                           int(box.x2 * SX), int(box.y2 * SY),
+                           (0, 0, 255, 200))
+        osd.update()
+finally:
+    cam.close()
+    osd.destroy()
+    det.reset()
+    display.unbind()
+    preview.unbind()
+    vo.close()
+```
+
+注意：
+
+- `result` 是纯 Python 数据，离开 `with cam.read()` 块后仍然有效；失效的只是帧像素缓冲。
+- 若对 `live()`（720×480）帧推理，则 `SX = SY = 1`，无需换算。
+- 文字标签可借助第 13 节的方式把预渲染位图复制到画布，或交给 LVGL。
+
+### 18.7 人脸稠密关键点（二级模型）
+
+`FaceDenseLandmark` 对应 `face_dense_real.mud`（runtime 为 `face_dense_landmark`），它不接收整帧，而是对**单个人脸框**做 ROI 推理。完整链路：
+
+```text
+相机帧 → Detector（scrfd_real.mud / yolov8_face_real.mud）→ 人脸框
+       → 每个框：FaceDenseLandmark.estimate(frame, box) → 稠密关键点（帧坐标系）
+```
+
+```python
+det = tdl_py.Detector()
+det.load("/root/models/scrfd_real.mud")
+
+landmark = tdl_py.FaceDenseLandmark()
+landmark.load("/root/models/face_dense_real.mud")
+print("landmarks per face:", landmark.landmark_count)
+
+with tdl_py.VpssCamera.ai() as cam:
+    with cam.read() as frame:
+        faces = det.detect(frame, threshold=0.25)
+        for box in faces.boxes:
+            pts = landmark.estimate(frame, box, expand=0.2)
+            # pts: list[Point]，帧坐标系，可直接换算到 OSD 画布
+            print("face", box.x1, box.y1, "points:", len(pts))
+```
+
+- ROI 取人脸框的**外接正方形**，`expand` 按比例放大（如 `0.2` 表示边长 +20%），超出画面会自动裁剪。
+- ROI 裁剪和缩放由 VPSS 硬件完成（零拷贝），模型坐标自动映射回帧坐标系。
+- 该模型要求 NHWC uint8 输入；不满足时 `load()` 会报错（`face_dense_real.mud` 本身就是 NHWC uint8）。
+- 没有图片路径变体；离线验证可用 C++ 的 `tdl_face_dense_keypoint_demo`。
+- SCRFD 检测框自带 5 点五官 landmarks（`box.landmarks`），需要更精确的人脸对齐时可利用。
+
+---
+
+## 19. API 快速参考
+
+### 19.1 VpssCamera
 
 ```python
 tdl_py.VpssCamera(group, channel, timeout_ms=1000)
@@ -1103,7 +1326,7 @@ frame = camera.read()
 camera.close()
 ```
 
-### 18.2 Frame
+### 19.2 Frame
 
 ```python
 frame.width
@@ -1124,13 +1347,13 @@ frame.plane(index)
 frame.release()
 ```
 
-### 18.3 Osd
+### 19.3 Osd
 
 ```python
 osd = tdl_py.Osd(
     handle,
-    width=1280,
-    height=720,
+    width=720,
+    height=480,
     pixel_format=tdl_py.FORMAT_ARGB8888,
     canvas_count=2,
     bg_color=0,
@@ -1148,7 +1371,7 @@ osd.detach()
 osd.destroy()
 ```
 
-### 18.4 OsdCanvas
+### 19.4 OsdCanvas
 
 ```python
 canvas.addr
@@ -1160,7 +1383,7 @@ canvas.format
 canvas.data
 ```
 
-### 18.5 VoOutput
+### 19.5 VoOutput
 
 ```python
 vo = tdl_py.VoOutput(
@@ -1168,11 +1391,12 @@ vo = tdl_py.VoOutput(
     layer=0,
     channel=0,
     width=720,
-    height=1280,
+    height=480,
     pixel_format=tdl_py.FORMAT_NV12,
     interface_type=tdl_py.INTERFACE_MIPI,
-    interface_sync=tdl_py.SYNC_720x1280_60,
-    rotation=90,
+    interface_sync=tdl_py.SYNC_720x480_60,
+    rotation=0,
+    preserve_hardware_on_close=False,
 )
 
 vo.open()
@@ -1180,7 +1404,7 @@ vo.opened
 vo.close()
 ```
 
-### 18.6 MediaLink
+### 19.6 MediaLink
 
 ```python
 link = tdl_py.MediaLink.vpss_to_vpss(
@@ -1196,7 +1420,7 @@ link.bound
 link.unbind()
 ```
 
-### 18.7 状态查询
+### 19.7 状态查询
 
 ```python
 tdl_py.vo_is_enabled(device=0)
@@ -1204,9 +1428,67 @@ tdl_py.get_bind_source_vpss(group, channel=0)
 tdl_py.get_bind_source_vo(layer=0, channel=0)
 ```
 
+### 19.8 算法类
+
+```python
+det = tdl_py.Detector()
+cls = tdl_py.Classifier()
+kp = tdl_py.KeypointDetector()
+seg = tdl_py.InstanceSegmenter()
+ocr = tdl_py.PlateRecognizer()
+
+model.load(model_spec, firmware="")
+model.initialized
+model.model_type
+model.reset()
+
+result = det.detect(frame, threshold=0.5, iou_threshold=0.45)
+result = det.detect_image(path, threshold=0.5, iou_threshold=0.45)
+
+result = cls.classify(frame, threshold=0.0, top_k=5)
+result = cls.classify_image(path, threshold=0.0, top_k=5)
+
+kp_result = kp.estimate(frame)
+kp_result = kp.estimate_image(path)
+
+seg_result = seg.segment(frame)
+seg_result = seg.segment_image(path)
+
+result = ocr.recognize(frame, threshold=0.5)
+result = ocr.recognize_image(path, threshold=0.5)
+
+landmark = tdl_py.FaceDenseLandmark()      # 人脸稠密关键点（二级模型）
+landmark.load(model_spec, firmware="")
+landmark.initialized
+landmark.input_width
+landmark.input_height
+landmark.landmark_count
+landmark.reset()
+points = landmark.estimate(frame, box, expand=0.0)   # list[Point]，帧坐标系
+```
+
+### 19.9 推理结果结构
+
+```python
+result.boxes             # [Box]: x1 y1 x2 y2 score class_id width height landmarks
+result.classes           # [ClassificationItem]: class_id score
+result.labels            # [str, ...]
+result.label_of(class_id)
+result.text              # OCR 汇总文本
+result.attributes        # [Attribute]: name value（OCR 为 ocr_text:<文本>）
+
+kp_result.width
+kp_result.height
+kp_result.points         # [Point]: x y score
+
+seg_result.width
+seg_result.height
+seg_result.instances     # [InstanceSegment]: box outline
+```
+
 ---
 
-## 19. 最终建议
+## 20. 最终建议
 
 普通 Python OSD：
 
