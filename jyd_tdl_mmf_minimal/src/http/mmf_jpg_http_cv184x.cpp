@@ -57,11 +57,7 @@ static mmf_result_t ensure_http_pull_camera(mmf_jpg_http_server_t* server) {
   }
 
   mmf_camera_config_t camera_cfg;
-  mmf_camera_source_t source = server->config.camera_source;
-  if (server->config.mode == MMF_JPG_HTTP_MODE_DISPLAY_PULL && source == MMF_CAMERA_SRC_SCREEN) {
-    source = MMF_CAMERA_SRC_LIVE;
-  }
-  mmf_result_t ret = mmf_camera_get_default_config(source, &camera_cfg);
+  mmf_result_t ret = mmf_camera_get_default_config(server->config.camera_source, &camera_cfg);
   if (ret != MMF_OK) {
     return ret;
   }

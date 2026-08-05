@@ -2,7 +2,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -97,14 +96,11 @@ static int save_snapshot(mmf_camera_source_t source, const char* dir, int index)
 int main(int argc, char** argv) {
   int duration_s = argc >= 2 ? atoi(argv[1]) : 0;
   int port = argc >= 3 ? atoi(argv[2]) : 18090;
-  const char* snapshot_dir = argc >= 4 ? argv[3] : "/tmp/mmf_av_monitor";
   if (port <= 0 || port > 65535)
     port = 18090;
 
   signal(SIGINT, on_signal);
   signal(SIGTERM, on_signal);
-  mkdir(snapshot_dir, 0755);
-
   mmf_system_config_t sys = {MMF_TRUE, MMF_TRUE, 3000};
   mmf_result_t ret = mmf_system_init(&sys);
   if (ret != MMF_OK) {
@@ -114,22 +110,12 @@ int main(int argc, char** argv) {
 
   log_outputs();
 
-  mmf_display_config_t display_cfg;
-  mmf_display_t* display = NULL;
-  mmf_display_get_default_config(&display_cfg);
-  ret = mmf_display_open(&display_cfg, &display);
-  if (ret == MMF_OK) {
-    ret = mmf_display_bind_camera(display, MMF_CAMERA_SRC_LIVE);
-  }
-  printf("display live bind: %s (%d)\n", ret == MMF_OK ? "ok" : "fail", ret);
-  if (ret != MMF_OK)
-    printf("display warning: %s\n", mmf_system_last_error());
-
   mmf_jpg_http_config_t http_cfg;
   mmf_jpg_http_server_t* http = NULL;
   mmf_jpg_http_get_default_config(&http_cfg);
   http_cfg.port = (uint16_t)port;
-  http_cfg.mode = MMF_JPG_HTTP_MODE_DISPLAY_PULL;
+  /* Pull the shared VPSS display output; do not change its VO binding. */
+  http_cfg.mode = MMF_JPG_HTTP_MODE_CAMERA_PULL;
   http_cfg.camera_source = MMF_CAMERA_SRC_SCREEN;
   http_cfg.fps = 8;
   http_cfg.jpeg_quality = 92;
@@ -141,8 +127,6 @@ int main(int argc, char** argv) {
     printf("http start failed: %d %s\n", ret, mmf_system_last_error());
     if (http)
       mmf_jpg_http_close(http);
-    if (display)
-      mmf_display_close(display);
     mmf_system_deinit();
     return 1;
   }
@@ -150,16 +134,8 @@ int main(int argc, char** argv) {
          http_cfg.stream_path);
 
   const time_t start = time(NULL);
-  int tick = 0;
   while (!g_stop && (duration_s <= 0 || (int)(time(NULL) - start) < duration_s)) {
-    sample_frame(MMF_CAMERA_SRC_MAIN);
-    sample_frame(MMF_CAMERA_SRC_AI);
-    if ((tick % 5) == 0) {
-      save_snapshot(MMF_CAMERA_SRC_MAIN, snapshot_dir, tick / 5);
-      save_snapshot(MMF_CAMERA_SRC_AI, snapshot_dir, tick / 5);
-    }
     sleep(1);
-    tick++;
   }
 
   mmf_jpg_http_status_t http_status;
@@ -172,10 +148,6 @@ int main(int argc, char** argv) {
 
   mmf_jpg_http_stop_stream(http);
   mmf_jpg_http_close(http);
-  if (display) {
-    mmf_display_unbind(display);
-    mmf_display_close(display);
-  }
   mmf_system_deinit();
   return 0;
 }
