@@ -142,11 +142,223 @@ if(TDL_APP_HAS_FFMPEG)
     COMPILE_DEFINITIONS TDL_APP_HAS_FFMPEG=1)
 endif()
 
+# CAMPPlus uses the same Kaldi-compatible fbank implementation as the
+# validated speaker-recognition reference. These are target ARM static libs;
+# no Sherpa runtime or tdl_core.so is linked into this SDK.
+set(TDL_APP_KALDI_NATIVE_FBANK_DIR
+    "${CMAKE_CURRENT_LIST_DIR}/third_party/vendor/kaldi_native_fbank")
+set(TDL_APP_KALDI_NATIVE_FBANK_LIBRARY
+    "${TDL_APP_KALDI_NATIVE_FBANK_DIR}/lib/libkaldi-native-fbank-core.a")
+set(TDL_APP_KISSFFT_LIBRARY
+    "${TDL_APP_KALDI_NATIVE_FBANK_DIR}/lib/libkissfft-float.a")
+if(NOT EXISTS "${TDL_APP_KALDI_NATIVE_FBANK_LIBRARY}" OR
+   NOT EXISTS "${TDL_APP_KISSFFT_LIBRARY}")
+  message(FATAL_ERROR "Missing vendored Kaldi fbank libraries under ${TDL_APP_KALDI_NATIVE_FBANK_DIR}")
+endif()
+add_library(tdl_app_kaldi_native_fbank STATIC IMPORTED GLOBAL)
+set_target_properties(tdl_app_kaldi_native_fbank PROPERTIES
+  IMPORTED_LOCATION "${TDL_APP_KALDI_NATIVE_FBANK_LIBRARY}"
+  INTERFACE_INCLUDE_DIRECTORIES "${TDL_APP_KALDI_NATIVE_FBANK_DIR}/include"
+)
+add_library(tdl_app_kissfft STATIC IMPORTED GLOBAL)
+set_target_properties(tdl_app_kissfft PROPERTIES
+  IMPORTED_LOCATION "${TDL_APP_KISSFFT_LIBRARY}"
+)
+
+# Kept separate from tdl_app_sdk so the speaker application does not inherit
+# the legacy tdl_core.so dependency of the broad visual-algorithm target.
+add_library(tdl_app_speaker_core STATIC
+  src/algorithm/speaker_recognizer.cpp
+  src/algorithm/model_descriptor.cpp
+  src/media/audio_input.cpp
+  src/media/private/audio_runtime.cpp
+  src/media/sys_context.cpp
+)
+
+# Direct BM Runtime streaming ASR is intentionally isolated from tdl_app_sdk:
+# it uses the validated 39/320/5537 Zipformer model set and does not link
+# the legacy tdl_core.so speech implementation.
+add_library(tdl_app_npu_asr_core STATIC
+  src/algorithm/npu_asr_recognizer.cpp
+  src/algorithm/model_descriptor.cpp
+  src/media/audio_input.cpp
+  src/media/private/audio_runtime.cpp
+  src/media/sys_context.cpp
+)
+add_library(tdl_app_npu_kws_core STATIC
+  src/algorithm/npu_keyword_spotter.cpp
+  src/algorithm/model_descriptor.cpp
+)
+add_library(tdl_app_npu_kws_audio STATIC
+  src/media/audio_input.cpp
+  src/media/private/audio_runtime.cpp
+  src/media/sys_context.cpp
+)
+set_property(TARGET tdl_app_npu_kws_core PROPERTY CXX_STANDARD 17)
+target_compile_definitions(tdl_app_npu_kws_core PRIVATE
+  LIBESPEAK_NG_EXPORT=1
+  SHERPA_ONNX_ENABLE_DIRECTML=0
+  SHERPA_ONNX_ENABLE_SPEAKER_DIARIZATION=0
+  SHERPA_ONNX_ENABLE_TTS=1
+  kiss_fft_scalar=float)
+target_compile_options(tdl_app_npu_kws_core PRIVATE -fPIE)
+# ORT carries a different FlatBuffers build; keep archive symbols local so the
+# dual-os BM Runtime always uses its matching bmodel parser.
+target_link_options(tdl_app_npu_kws_core INTERFACE
+  -static-libstdc++
+  -static-libgcc
+  "-Wl,--exclude-libs,ALL"
+  "-Wl,-rpath-link,${TDL_APP_THIRD_PARTY_DIR}/lib")
+
+# KWS uses Sherpa's production ContextGraph decoder.  The encoder is the
+# CV184X bmodel, while the decoder and joiner are the original small ONNX
+# models.  This is deliberately separate from the legacy tdl_core runtime.
+set(TDL_APP_SHERPA_KWS_DIR
+    "${CMAKE_CURRENT_LIST_DIR}/third_party/vendor/sherpa_onnx")
+set(TDL_APP_SHERPA_KWS_LIB_DIR "${TDL_APP_SHERPA_KWS_DIR}/lib")
+set(TDL_APP_SHERPA_KWS_SOURCE_DIR
+    "/home/jyd/zwz/sophpi/sherpa-onnx_cv184x/third_party/sherpa-onnx")
+set(TDL_APP_SHERPA_KWS_ORT_INCLUDE_DIR
+    "/home/jyd/zwz/sophpi/sherpa-onnx_cv184x/build/arm-musl/_deps/onnxruntime-src/include")
+set(TDL_APP_SHERPA_KWS_DEPS_DIR
+    "/home/jyd/zwz/sophpi/sherpa-onnx_cv184x/build/arm-musl/_deps")
+set(TDL_APP_SHERPA_KWS_REQUIRED_FILES
+  "${TDL_APP_SHERPA_KWS_LIB_DIR}/libsherpa-onnx-core.a"
+  "${TDL_APP_SHERPA_KWS_LIB_DIR}/libsherpa-onnx-cv184x-bmrt.so"
+  "${TDL_APP_SHERPA_KWS_LIB_DIR}/libonnxruntime.a"
+  "${TDL_APP_SHERPA_KWS_DIR}/include/sherpa-onnx/csrc/keyword-spotter.h"
+  "${TDL_APP_SHERPA_KWS_ORT_INCLUDE_DIR}/onnxruntime_cxx_api.h")
+foreach(file IN LISTS TDL_APP_SHERPA_KWS_REQUIRED_FILES)
+  if(NOT EXISTS "${file}")
+    message(FATAL_ERROR "Missing vendored Sherpa KWS dependency: ${file}")
+  endif()
+endforeach()
+target_include_directories(tdl_app_npu_kws_core
+  PUBLIC "${CMAKE_CURRENT_LIST_DIR}/include"
+  PUBLIC "${CMAKE_CURRENT_LIST_DIR}/src"
+          "${TDL_APP_SHERPA_KWS_DIR}/include"
+          "${TDL_APP_SHERPA_KWS_SOURCE_DIR}"
+          "${TDL_APP_SHERPA_KWS_ORT_INCLUDE_DIR}"
+          "${TDL_APP_SHERPA_KWS_DEPS_DIR}/kaldi_decoder-src"
+          "${TDL_APP_SHERPA_KWS_DEPS_DIR}/kaldi_native_fbank-src"
+          "${TDL_APP_SHERPA_KWS_DEPS_DIR}/kaldifst-src"
+          "${TDL_APP_SHERPA_KWS_DEPS_DIR}/openfst-src/src/include"
+          "${TDL_APP_SHERPA_KWS_DEPS_DIR}/eigen-src"
+          "${TDL_APP_SHERPA_KWS_DEPS_DIR}/json-src/include"
+          "${TDL_APP_SHERPA_KWS_DEPS_DIR}/kissfft-src"
+          "${TDL_APP_SHERPA_KWS_DEPS_DIR}/simple-sentencepiece-src"
+          "${TDL_APP_SHERPA_KWS_DEPS_DIR}/piper_phonemize-src/src"
+          "${TDL_APP_SHERPA_KWS_DEPS_DIR}/piper_phonemize-src/src/include"
+          "${TDL_APP_SHERPA_KWS_DEPS_DIR}/espeak_ng-src/include"
+          "${TDL_APP_SHERPA_KWS_DEPS_DIR}/espeak_ng-src/src/include"
+          "${TDL_APP_SHERPA_KWS_DEPS_DIR}/espeak_ng-src/src/ucd-tools/src/include"
+          "${TDL_CV184X_INCLUDE_DIRS}"
+)
+target_link_libraries(tdl_app_npu_kws_core
+  PUBLIC
+         "${TDL_APP_SHERPA_KWS_LIB_DIR}/libsherpa-onnx-core.a"
+         "${TDL_APP_SHERPA_KWS_LIB_DIR}/libkaldi-native-fbank-core.a"
+         "${TDL_APP_SHERPA_KWS_LIB_DIR}/libkissfft-float.a"
+         "${TDL_APP_SHERPA_KWS_LIB_DIR}/libkaldi-decoder-core.a"
+         "${TDL_APP_SHERPA_KWS_LIB_DIR}/libsherpa-onnx-kaldifst-core.a"
+         "${TDL_APP_SHERPA_KWS_LIB_DIR}/libssentencepiece_core.a"
+         pthread
+         "${TDL_APP_SHERPA_KWS_LIB_DIR}/libsherpa-onnx-cv184x-bmrt.so"
+         "${TDL_BMRT_LIBRARY}"
+         "${TDL_BMLIB_LIBRARY}"
+         "${TDL_APP_SHERPA_KWS_LIB_DIR}/libonnxruntime.a"
+         m
+         "${TDL_APP_SHERPA_KWS_LIB_DIR}/libsherpa-onnx-fstfar.a"
+         "${TDL_APP_SHERPA_KWS_LIB_DIR}/libsherpa-onnx-fst.a"
+         dl
+         "${TDL_APP_SHERPA_KWS_LIB_DIR}/libpiper_phonemize.a"
+         "${TDL_APP_SHERPA_KWS_LIB_DIR}/libespeak-ng.a"
+         "${TDL_APP_SHERPA_KWS_LIB_DIR}/libucd.a"
+         dl pthread
+         "${TDL_APP_SHERPA_KWS_LIB_DIR}/libc_compat.a"
+         m dl rt pthread
+)
+target_include_directories(tdl_app_npu_kws_audio
+  PUBLIC "${CMAKE_CURRENT_LIST_DIR}/include"
+  PRIVATE "${CMAKE_CURRENT_LIST_DIR}/src" "${TDL_CV184X_INCLUDE_DIRS}"
+)
+target_link_libraries(tdl_app_npu_kws_audio
+  PUBLIC
+         cvi_audio cvi_RES1 cvi_vqe cvi_dnvqe cvi_VoiceEngine cvi_ssp cvi_ssp2
+         aaccomm2 aacenc2 aacdec2 aacsbrenc2 aacsbrdec2 sys
+         m dl rt pthread
+)
+target_include_directories(tdl_app_npu_asr_core
+  PUBLIC
+    "${CMAKE_CURRENT_LIST_DIR}/include"
+  PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/src"
+    "${TDL_APP_KALDI_NATIVE_FBANK_DIR}/include"
+    "${TDL_CV184X_INCLUDE_DIRS}"
+)
+target_link_libraries(tdl_app_npu_asr_core
+  PUBLIC
+    "${TDL_BMRT_LIBRARY}"
+    "${TDL_BMLIB_LIBRARY}"
+    cvi_audio
+    cvi_RES1
+    cvi_vqe
+    cvi_dnvqe
+    cvi_VoiceEngine
+    cvi_ssp
+    cvi_ssp2
+    aaccomm2
+    aacenc2
+    aacdec2
+    aacsbrenc2
+    aacsbrdec2
+    sys
+    tdl_app_kaldi_native_fbank
+    tdl_app_kissfft
+    m
+    dl
+    rt
+    pthread
+)
+target_include_directories(tdl_app_speaker_core
+  PUBLIC
+    "${CMAKE_CURRENT_LIST_DIR}/include"
+  PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/src"
+    "${TDL_APP_KALDI_NATIVE_FBANK_DIR}/include"
+    "${TDL_CV184X_INCLUDE_DIRS}"
+)
+target_link_libraries(tdl_app_speaker_core
+  PUBLIC
+    "${TDL_BMRT_LIBRARY}"
+    "${TDL_BMLIB_LIBRARY}"
+    cvi_audio
+    cvi_RES1
+    cvi_vqe
+    cvi_dnvqe
+    cvi_VoiceEngine
+    cvi_ssp
+    cvi_ssp2
+    aaccomm2
+    aacenc2
+    aacdec2
+    aacsbrenc2
+    aacsbrdec2
+    sys
+    tdl_app_kaldi_native_fbank
+    tdl_app_kissfft
+    m
+    dl
+    rt
+    pthread
+)
+
 target_include_directories(tdl_app_sdk
   PUBLIC
     "${CMAKE_CURRENT_LIST_DIR}/include"
   PRIVATE
     "${CMAKE_CURRENT_LIST_DIR}/src"
+    "${TDL_APP_KALDI_NATIVE_FBANK_DIR}/include"
     "${TDL_CV184X_INCLUDE_DIRS}"
 )
 
@@ -438,6 +650,32 @@ if(TDL_APP_BUILD_DEMOS)
     target_include_directories(tdl_vad_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
     target_link_libraries(tdl_vad_demo PRIVATE tdl_app_sdk)
 
+    add_executable(tdl_speaker_recognition_demo
+      apps/tdl_speaker_recognition_demo.cpp
+    )
+    target_include_directories(tdl_speaker_recognition_demo PRIVATE
+      "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
+    target_link_libraries(tdl_speaker_recognition_demo PRIVATE tdl_app_speaker_core)
+
+    add_executable(tdl_npu_asr_demo apps/tdl_npu_asr_demo.cpp)
+    target_include_directories(tdl_npu_asr_demo PRIVATE
+      "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
+    target_link_libraries(tdl_npu_asr_demo PRIVATE tdl_app_npu_asr_core)
+
+    add_executable(tdl_npu_keyword_spotter_demo apps/tdl_npu_keyword_spotter_demo.cpp)
+    set_property(TARGET tdl_npu_keyword_spotter_demo PROPERTY CXX_STANDARD 17)
+    target_include_directories(tdl_npu_keyword_spotter_demo PRIVATE
+      "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
+    target_link_libraries(tdl_npu_keyword_spotter_demo PRIVATE
+      tdl_app_npu_kws_core tdl_app_npu_kws_audio)
+
+    # Keeps the validated KWS runtime independent from MMF/AI libraries.
+    add_executable(tdl_npu_keyword_spotter_pcm_smoke
+      apps/tdl_npu_keyword_spotter_pcm_smoke.cpp)
+    target_include_directories(tdl_npu_keyword_spotter_pcm_smoke PRIVATE
+      "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
+    target_link_libraries(tdl_npu_keyword_spotter_pcm_smoke PRIVATE tdl_app_npu_kws_core)
+
     add_executable(tdl_face_detect_demo apps/tdl_face_detect_demo.cpp apps/demo_support.cpp)
     target_include_directories(tdl_face_detect_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
     target_link_libraries(tdl_face_detect_demo PRIVATE tdl_app_sdk)
@@ -597,7 +835,10 @@ if(TDL_APP_BUILD_DEMOS)
       tdl_lane_demo
       tdl_asr_demo
       tdl_dualos_asr_demo
+      tdl_npu_asr_demo
+      tdl_npu_keyword_spotter_demo
       tdl_vad_demo
+      tdl_speaker_recognition_demo
       tdl_face_detect_demo
       tdl_face_attribute_demo
       tdl_face_attr_pipeline_demo

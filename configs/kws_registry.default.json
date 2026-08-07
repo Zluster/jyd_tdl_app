@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "keywords": [
+    {
+      "text": "文森特卡索",
+      "pinyin": "wen2 sen1 te4 ka3 suo3",
+      "tokens": ["w", "én", "s", "ēn", "t", "è", "k", "ǎ", "s", "uǒ"],
+      "token_variants": [
+        ["w", "én", "sh", "ēn", "t", "è", "k", "ǎ", "s", "uǒ"],
+        ["w", "én", "sh", "ēng", "t", "è", "k", "ǎ", "s", "uǒ"],
+        ["w", "én", "s", "ōng", "t", "ài", "k", "ǎ", "s", "uǒ"]
+      ]
+    },
+    {
+      "text": "竞业达",
+      "pinyin": "jing4 ye4 da2",
+      "tokens": ["j", "ìng", "y", "è", "d", "á"],
+      "token_variants": [
+        ["j", "ìng", "y", "è", "d", "à"],
+        ["j", "īn", "y", "è", "d", "ǎ"],
+        ["j", "īn", "y", "è", "d", "à"]
+      ],
+      "score": 1.5,
+      "threshold": 0.15
+    }
+  ]
+}

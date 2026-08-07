@@ -141,7 +141,7 @@ struct AudioTalkVqeConfig {
   static AudioTalkVqeConfig agcAnr(int sample_rate = 16000) {
     AudioTalkVqeConfig config;
     config.work_sample_rate = sample_rate;
-    config.open_mask = 0x4 | 0x8 | 0x20;
+    config.open_mask = 0x4 | 0x8;
     return config;
   }
 };

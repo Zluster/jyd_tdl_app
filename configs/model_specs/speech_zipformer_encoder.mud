@@ -1,6 +1,6 @@
 [basic]
 type = bmodel
-model = ../../models/cv184x/recognition_speech_zipformer_encoder-s_71_80_BF16.bmodel
+model = ../../models/cv184x/recognition_speech_zipformer_encoder-s_71_80_BF16_cv184x.bmodel
 
 [extra]
 runtime = speech_recognition

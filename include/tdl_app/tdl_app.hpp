@@ -16,6 +16,8 @@
 #include "tdl_app/media_types.hpp"
 #include "tdl_app/model_descriptor.hpp"
 #include "tdl_app/multi_stage_pipeline.hpp"
+#include "tdl_app/npu_asr_recognizer.hpp"
+#include "tdl_app/npu_keyword_spotter.hpp"
 #include "tdl_app/pipeline.hpp"
 #include "tdl_app/plate_recognizer.hpp"
 #include "tdl_app/pose_classifier.hpp"

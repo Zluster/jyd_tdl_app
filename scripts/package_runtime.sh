@@ -62,6 +62,14 @@ cp -a "${RESOLVED_INSTALL_DIR}/bin/." "${RESOLVED_PKG_DIR}/bin/" 2>/dev/null || 
 cp -a "${RESOLVED_INSTALL_DIR}/lib/." "${RESOLVED_PKG_DIR}/lib/" 2>/dev/null || true
 cp -a "${RESOLVED_INSTALL_DIR}/configs/." "${RESOLVED_PKG_DIR}/configs/" 2>/dev/null || true
 cp -a "${THIRD_PARTY_DIR}/lib/." "${RESOLVED_PKG_DIR}/lib/"
+PROJECT_MODELS_DIR="${PROJECT_ROOT}/third_party/cv184x/models"
+if [ -d "${PROJECT_MODELS_DIR}" ]; then
+  cp -a "${PROJECT_MODELS_DIR}/." "${RESOLVED_PKG_DIR}/models/"
+fi
+SHERPA_KWS_BMRT="${PROJECT_ROOT}/third_party/vendor/sherpa_onnx/lib/libsherpa-onnx-cv184x-bmrt.so"
+if [ -f "${SHERPA_KWS_BMRT}" ]; then
+  cp -a "${SHERPA_KWS_BMRT}" "${RESOLVED_PKG_DIR}/lib/"
+fi
 # 复制 OpenCV 库（如果存在独立的 opencv 目录）
 if [ -d "${THIRD_PARTY_DIR}/opencv/lib" ]; then
   cp -a "${THIRD_PARTY_DIR}/opencv/lib/." "${RESOLVED_PKG_DIR}/lib/"
@@ -78,6 +86,21 @@ fi
 # fi
 cp -a "${THIRD_PARTY_DIR}/firmware/." "${RESOLVED_PKG_DIR}/firmware/" 2>/dev/null || true
 cp -a "${PROJECT_ROOT}/assets/." "${RESOLVED_PKG_DIR}/assets/" 2>/dev/null || true
+if [ -f "${PROJECT_ROOT}/tools/kws_keyword_registry.py" ]; then
+  mkdir -p "${RESOLVED_PKG_DIR}/tools"
+  cp -a "${PROJECT_ROOT}/tools/kws_keyword_registry.py" "${RESOLVED_PKG_DIR}/tools/"
+  if [ -d "${PROJECT_ROOT}/third_party/vendor/pypinyin" ]; then
+    cp -a "${PROJECT_ROOT}/third_party/vendor/pypinyin" "${RESOLVED_PKG_DIR}/tools/"
+  fi
+fi
+if [ -f "${PROJECT_ROOT}/configs/kws_registry.default.json" ]; then
+  cp -a "${PROJECT_ROOT}/configs/kws_registry.default.json" \
+    "${RESOLVED_PKG_DIR}/kws_registry.json"
+fi
+if [ -f "${PROJECT_ROOT}/configs/kws_keywords.default.txt" ]; then
+  cp -a "${PROJECT_ROOT}/configs/kws_keywords.default.txt" \
+    "${RESOLVED_PKG_DIR}/kws_keywords.txt"
+fi
 
 cat > "${RESOLVED_PKG_DIR}/env.sh" <<'EOF'
 #!/bin/sh
@@ -182,6 +205,36 @@ exec "${DIR}/bin/tdl_vad_demo" "$@"
 EOF
 chmod +x "${RESOLVED_PKG_DIR}/run_vad_demo.sh"
 
+cat > "${RESOLVED_PKG_DIR}/run_speaker_recognition_demo.sh" <<'EOF'
+#!/bin/sh
+set -eu
+DIR=$(cd "$(dirname "$0")" && pwd)
+. "${DIR}/env.sh"
+cd "${DIR}"
+exec "${DIR}/bin/tdl_speaker_recognition_demo" "$@"
+EOF
+chmod +x "${RESOLVED_PKG_DIR}/run_speaker_recognition_demo.sh"
+
+cat > "${RESOLVED_PKG_DIR}/run_npu_asr_demo.sh" <<'EOF'
+#!/bin/sh
+set -eu
+DIR=$(cd "$(dirname "$0")" && pwd)
+. "${DIR}/env.sh"
+cd "${DIR}"
+exec "${DIR}/bin/tdl_npu_asr_demo" "$@"
+EOF
+chmod +x "${RESOLVED_PKG_DIR}/run_npu_asr_demo.sh"
+
+cat > "${RESOLVED_PKG_DIR}/run_npu_keyword_spotter_demo.sh" <<'EOF'
+#!/bin/sh
+set -eu
+DIR=$(cd "$(dirname "$0")" && pwd)
+. "${DIR}/env.sh"
+cd "${DIR}"
+exec "${DIR}/bin/tdl_npu_keyword_spotter_demo" "$@"
+EOF
+chmod +x "${RESOLVED_PKG_DIR}/run_npu_keyword_spotter_demo.sh"
+
 cat > "${RESOLVED_PKG_DIR}/run_camera_capture_demo.sh" <<'EOF'
 #!/bin/sh
 set -eu
@@ -280,6 +333,14 @@ for mud_file in "${RESOLVED_PKG_DIR}/configs/model_specs/"*.mud; do
   fi
 done
 echo "Updated model paths in .mud files"
+
+# Runtime packages store project models under models/cv184x, including the
+# multi-file ASR/KWS bundles whose extra fields use the same relative layout.
+for mud_file in "${RESOLVED_PKG_DIR}/configs/model_specs/"*.mud; do
+  if [ -f "$mud_file" ]; then
+    sed -i 's|../../../third_party/cv184x/models/|../../models/|g' "$mud_file"
+  fi
+done
 
 tar cf - -C "$(dirname "${RESOLVED_PKG_DIR}")" "$(basename "${RESOLVED_PKG_DIR}")" | gzip -9 > "${RESOLVED_PKG_DIR}.tar.gz"
 echo "TDL_APP_PROFILE=${TDL_APP_PROFILE}"
