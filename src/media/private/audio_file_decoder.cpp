@@ -1,5 +1,28 @@
 #include "media/private/audio_file_decoder.hpp"
 
+#ifndef TDL_APP_HAS_FFMPEG
+
+// Built without FFmpeg: keep the SDK linkable and report a clear runtime
+// error when audio file decoding is requested.
+#include <string>
+
+namespace tdl_app {
+namespace private_audio {
+
+bool decodeAudioFileToPcm16Stereo(const std::string & /*path*/,
+                                  const Pcm16StereoSink & /*sink*/,
+                                  std::string *error) {
+  if (error) {
+    *error = "audio file decoding is unavailable: SDK was built without FFmpeg";
+  }
+  return false;
+}
+
+}  // namespace private_audio
+}  // namespace tdl_app
+
+#else  // TDL_APP_HAS_FFMPEG
+
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
@@ -294,3 +317,5 @@ bool decodeAudioFileToPcm16Stereo(const std::string &path,
 
 }  // namespace private_audio
 }  // namespace tdl_app
+
+#endif  // TDL_APP_HAS_FFMPEG

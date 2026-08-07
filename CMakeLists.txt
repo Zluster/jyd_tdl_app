@@ -10,6 +10,7 @@ option(TDL_APP_BUILD_DEMOS "Build command line demo applications" ON)
 option(TDL_APP_MEDIA_MINIMAL "Build only media/audio targets and skip algorithm sources/demos" OFF)
 option(TDL_APP_BUILD_MMF_MINIMAL "Build standalone C MMF API wrapper" ON)
 option(TDL_APP_BUILD_PYTHON "Build the tdl_py nanobind python module" ON)
+option(TDL_APP_PY_WITH_NPU "Enable NPU inference bindings in tdl_py" ON)
 set(TDL_APP_PYTHON_INCLUDE_DIR "${CMAKE_CURRENT_LIST_DIR}/python3.10"
     CACHE PATH "Target-platform Python 3.10 headers (Python.h)")
 set(TDL_APP_PROFILE "dual_os" CACHE STRING "Build profile")
@@ -123,14 +124,23 @@ find_file(TDL_APP_AVUTIL_LIBRARY
 find_file(TDL_APP_SWRESAMPLE_LIBRARY
   NAMES libswresample.so.4 libswresample.so.4.3.100
   PATHS "${TDL_APP_AUDIO_FFMPEG_ROOT}/lib" NO_DEFAULT_PATH)
-if(NOT TDL_APP_FFMPEG_INCLUDE_DIR OR NOT TDL_APP_AVFORMAT_LIBRARY OR
-   NOT TDL_APP_AVCODEC_LIBRARY OR NOT TDL_APP_AVUTIL_LIBRARY OR
-   NOT TDL_APP_SWRESAMPLE_LIBRARY)
-  message(FATAL_ERROR
-    "FFmpeg audio decode/resample dependencies were not found under ${TDL_APP_AUDIO_FFMPEG_ROOT}")
+if(TDL_APP_FFMPEG_INCLUDE_DIR AND TDL_APP_AVFORMAT_LIBRARY AND
+   TDL_APP_AVCODEC_LIBRARY AND TDL_APP_AVUTIL_LIBRARY AND
+   TDL_APP_SWRESAMPLE_LIBRARY)
+  set(TDL_APP_HAS_FFMPEG ON)
+else()
+  set(TDL_APP_HAS_FFMPEG OFF)
+  message(STATUS
+    "FFmpeg not found under ${TDL_APP_AUDIO_FFMPEG_ROOT}; "
+    "audio file decode/playback support is disabled")
 endif()
-set_property(SOURCE src/media/private/audio_file_decoder.cpp APPEND PROPERTY
-  COMPILE_OPTIONS "-isystem${TDL_APP_FFMPEG_INCLUDE_DIR}")
+
+if(TDL_APP_HAS_FFMPEG)
+  set_property(SOURCE src/media/private/audio_file_decoder.cpp APPEND PROPERTY
+    COMPILE_OPTIONS "-isystem${TDL_APP_FFMPEG_INCLUDE_DIR}")
+  set_property(SOURCE src/media/private/audio_file_decoder.cpp APPEND PROPERTY
+    COMPILE_DEFINITIONS TDL_APP_HAS_FFMPEG=1)
+endif()
 
 target_include_directories(tdl_app_sdk
   PUBLIC
@@ -144,21 +154,31 @@ target_link_libraries(tdl_app_sdk
   PUBLIC
     ${TDL_CV184X_LIBS}
     tdl_app_ini_compat
-    "${TDL_APP_AVFORMAT_LIBRARY}"
-    "${TDL_APP_AVCODEC_LIBRARY}"
-    "${TDL_APP_SWRESAMPLE_LIBRARY}"
-    "${TDL_APP_AVUTIL_LIBRARY}"
 )
 
-target_link_options(tdl_app_sdk PUBLIC
-  "-Wl,-rpath-link,${TDL_APP_AUDIO_FFMPEG_ROOT}/lib"
-  "-Wl,-rpath-link,${TDL_APP_AUDIO_FFMPEG_ROOT}/../lib")
+if(TDL_APP_HAS_FFMPEG)
+  target_link_libraries(tdl_app_sdk
+    PUBLIC
+      "${TDL_APP_AVFORMAT_LIBRARY}"
+      "${TDL_APP_AVCODEC_LIBRARY}"
+      "${TDL_APP_SWRESAMPLE_LIBRARY}"
+      "${TDL_APP_AVUTIL_LIBRARY}"
+  )
+  target_link_options(tdl_app_sdk PUBLIC
+    "-Wl,-rpath-link,${TDL_APP_AUDIO_FFMPEG_ROOT}/lib"
+    "-Wl,-rpath-link,${TDL_APP_AUDIO_FFMPEG_ROOT}/../lib")
+endif()
 
 if(TDL_APP_BUILD_MMF_MINIMAL)
   add_subdirectory(jyd_tdl_mmf_minimal)
 endif()
 
 if(TDL_APP_BUILD_PYTHON)
+  if(TDL_APP_PY_WITH_NPU AND TDL_APP_MEDIA_MINIMAL)
+    message(FATAL_ERROR
+      "TDL_APP_PY_WITH_NPU requires the algorithm sources; "
+      "disable TDL_APP_MEDIA_MINIMAL or set TDL_APP_PY_WITH_NPU=OFF.")
+  endif()
   if(NOT EXISTS "${TDL_APP_PYTHON_INCLUDE_DIR}/Python.h")
     message(FATAL_ERROR
       "Missing target Python headers: ${TDL_APP_PYTHON_INCLUDE_DIR}/Python.h\n"
@@ -186,6 +206,10 @@ if(TDL_APP_BUILD_PYTHON)
     CXX_VISIBILITY_PRESET hidden
   )
   target_compile_definitions(tdl_py PRIVATE NB_COMPACT_ASSERTIONS)
+  if(TDL_APP_PY_WITH_NPU)
+    target_compile_definitions(tdl_py PRIVATE TDL_PY_WITH_NPU)
+    target_include_directories(tdl_py PRIVATE "${CMAKE_CURRENT_LIST_DIR}/src")
+  endif()
   target_compile_options(tdl_py PRIVATE
     -fno-strict-aliasing
     -ffunction-sections
