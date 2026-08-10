@@ -29,7 +29,7 @@
 模块还提供：
 
 - 像素格式常量，例如 `FORMAT_NV12`、`FORMAT_NV21`、`FORMAT_ARGB8888`。
-- 双系统布局常量，例如 `CAPTURE_GROUP`、`DISPLAY_GROUP`、`REAR_GROUP`、`LIVE_CHANNEL`、`RGB_CHANNEL`，以及各通道尺寸常量 `MAIN_WIDTH/MAIN_HEIGHT`、`AI_WIDTH/AI_HEIGHT`、`LIVE_WIDTH/LIVE_HEIGHT`、`SUB_RGB_WIDTH/SUB_RGB_HEIGHT`、`SCREEN_WIDTH/SCREEN_HEIGHT`、`RGB_WIDTH/RGB_HEIGHT`。
+- 双系统布局常量，例如 `CAPTURE_GROUP`、`DISPLAY_GROUP`、`REAR_GROUP`、`LIVE_CHANNEL`、`RGB_CHANNEL`，以及各通道尺寸常量 `AI_WIDTH/AI_HEIGHT`、`LIVE_WIDTH/LIVE_HEIGHT`、`SUB_RGB_WIDTH/SUB_RGB_HEIGHT`、`SCREEN_WIDTH/SCREEN_HEIGHT`、`RGB_WIDTH/RGB_HEIGHT`。
 - VO 接口和时序常量。
 - 查询现有 VO、VPSS/VO bind 状态的函数。
 
@@ -41,13 +41,11 @@
 
 | Python 构造方法 | VPSS 通道 | 默认规格 | 像素格式 |
 |---|---:|---:|---|
-| `VpssCamera.main()` | grp0/ch0 | 1600×1200 | NV12 |
 | `VpssCamera.ai()` | grp0/ch1 | 640×640 | RGB888_PLANAR |
 | `VpssCamera.live()` | grp0/ch2 | 720×480 | NV12 |
 | `VpssCamera.sub_rgb()` | grp0/ch3 | 640×640 | NV21 |
 | `VpssCamera.screen()` | grp1/ch0 | 720×480 | NV12 |
 | `VpssCamera.rgb()` | grp0/ch0 | 720×480 | RGB888_PLANAR |
-| `VpssCamera.rear_main()` | grp3/ch0 | 1600×1200 | NV12 |
 | `VpssCamera.rear_ai()` | grp3/ch1 | 640×640 | RGB888_PLANAR |
 | `VpssCamera.rear_live()` | grp3/ch2 | 720×480 | NV12 |
 | `VpssCamera.rear_sub_rgb()` | grp3/ch3 | 640×640 | NV21 |
@@ -55,15 +53,12 @@
 
 VPSS group 布局：
 
-- `grp0`（`CAPTURE_GROUP`）：前摄采集组，ch0~ch3 分别为 main/ai/live/subrgb。
+- `grp0`（`CAPTURE_GROUP`）：前摄采集组，ch0~ch3 分别为 rgb/ai/live/subrgb。
 - `grp1`（`DISPLAY_GROUP`）：显示处理组，ch0 即 screen。
 - `grp2`：保留未用。
 - `grp3`（`REAR_GROUP`）：后摄采集组，通道编号与前摄一致。
 
-注意两点：
-
-- `rgb()` 与 `main()` 物理上共用 grp0/ch0，`rear_rgb()` 与 `rear_main()` 共用 grp3/ch0。同一时刻一个通道只能有一种配置，两者互斥；`rgb` 期望通道按 720×480 RGB888_PLANAR 配置。
-- rear 各工厂的规格是布局名义值，实际帧属性以读取时小核侧对该通道的配置为准（用 `frame.width`/`frame.format` 确认）。
+注意：rear 各工厂的规格是布局名义值，实际帧属性以读取时小核侧对该通道的配置为准（用 `frame.width`/`frame.format` 确认）。
 
 显示链路通常为：
 
@@ -1180,7 +1175,7 @@ with tdl_py.VpssCamera.ai() as cam:
 - 与取帧相同的生命周期约束：推理必须在 `frame.release()`、下一次 `cam.read()` 或 `cam.close()` 之前完成。
 - 推理调用期间释放 GIL，其他线程可以继续取帧或画 OSD。
 - 结果坐标是输入帧的坐标系。例如 `VpssCamera.ai()` 为 640×640，要在 720×480 的 OSD 上画框时需要按比例换算（见 18.6）。
-- `VpssCamera.ai()` 输出 640×640 RGB888_PLANAR，就是为模型输入准备的通道；也可以对 `main()`/`live()` 的 NV12 帧推理，SDK 预处理会自行转换格式。
+- `VpssCamera.ai()` 输出 640×640 RGB888_PLANAR，就是为模型输入准备的通道；也可以对 `live()` 的 NV12 帧推理，SDK 预处理会自行转换格式。
 
 ### 18.4 图片文件推理
 
@@ -1333,13 +1328,11 @@ with tdl_py.VpssCamera.ai() as cam:
 
 ```python
 tdl_py.VpssCamera(group, channel, timeout_ms=1000)
-tdl_py.VpssCamera.main(timeout_ms=1000)
 tdl_py.VpssCamera.ai(timeout_ms=1000)
 tdl_py.VpssCamera.live(timeout_ms=1000)
 tdl_py.VpssCamera.sub_rgb(timeout_ms=1000)
 tdl_py.VpssCamera.screen(timeout_ms=1000)
 tdl_py.VpssCamera.rgb(timeout_ms=1000)
-tdl_py.VpssCamera.rear_main(timeout_ms=1000)
 tdl_py.VpssCamera.rear_ai(timeout_ms=1000)
 tdl_py.VpssCamera.rear_live(timeout_ms=1000)
 tdl_py.VpssCamera.rear_sub_rgb(timeout_ms=1000)
@@ -1351,9 +1344,9 @@ camera.close()
 ```
 
 布局常量：`CAPTURE_GROUP`(0)、`DISPLAY_GROUP`(1)、`REAR_GROUP`(3)、
-`MAIN_CHANNEL`(0)、`AI_CHANNEL`(1)、`LIVE_CHANNEL`(2)、`SUB_RGB_CHANNEL`(3)、
-`DISPLAY_CHANNEL`(0)、`RGB_CHANNEL`(0)；尺寸常量 `MAIN_WIDTH/MAIN_HEIGHT`、
-`AI_WIDTH/AI_HEIGHT`、`LIVE_WIDTH/LIVE_HEIGHT`、`SUB_RGB_WIDTH/SUB_RGB_HEIGHT`、
+`AI_CHANNEL`(1)、`LIVE_CHANNEL`(2)、`SUB_RGB_CHANNEL`(3)、
+`DISPLAY_CHANNEL`(0)、`RGB_CHANNEL`(0)；尺寸常量 `AI_WIDTH/AI_HEIGHT`、
+`LIVE_WIDTH/LIVE_HEIGHT`、`SUB_RGB_WIDTH/SUB_RGB_HEIGHT`、
 `SCREEN_WIDTH/SCREEN_HEIGHT`、`RGB_WIDTH/RGB_HEIGHT`。
 
 ### 19.2 Frame

@@ -1133,14 +1133,11 @@ NB_MODULE(tdl_py, m) {
   m.attr("CAPTURE_GROUP") = tdl_app::DualOsLayout::kCaptureVpssGroup;   // 0
   m.attr("DISPLAY_GROUP") = tdl_app::DualOsLayout::kDisplayVpssGroup;   // 1
   m.attr("REAR_GROUP") = tdl_app::DualOsLayout::kRearVpssGroup;         // 3
-  m.attr("MAIN_CHANNEL") = tdl_app::DualOsLayout::kMainChannel;         // 0
   m.attr("AI_CHANNEL") = tdl_app::DualOsLayout::kAiChannel;             // 1
   m.attr("LIVE_CHANNEL") = tdl_app::DualOsLayout::kLiveChannel;         // 2
   m.attr("SUB_RGB_CHANNEL") = tdl_app::DualOsLayout::kSubRgbChannel;    // 3
   m.attr("DISPLAY_CHANNEL") = tdl_app::DualOsLayout::kDisplayChannel;   // 0
   m.attr("RGB_CHANNEL") = tdl_app::DualOsLayout::kRgbChannel;           // 0
-  m.attr("MAIN_WIDTH") = tdl_app::DualOsLayout::kMainWidth;
-  m.attr("MAIN_HEIGHT") = tdl_app::DualOsLayout::kMainHeight;
   m.attr("AI_WIDTH") = tdl_app::DualOsLayout::kAiWidth;
   m.attr("AI_HEIGHT") = tdl_app::DualOsLayout::kAiHeight;
   m.attr("LIVE_WIDTH") = tdl_app::DualOsLayout::kLiveWidth;
@@ -1204,14 +1201,6 @@ NB_MODULE(tdl_py, m) {
       "One frame outstanding at a time; read() invalidates the previous one.")
       .def(nb::init<int, int, int>(), nb::arg("group"), nb::arg("channel"),
            nb::arg("timeout_ms") = 1000)
-      .def_static("main",
-                  [](int timeout_ms) {
-                    return new PyVpssCamera(
-                        tdl_app::DualOsLayout::kCaptureVpssGroup,
-                        tdl_app::DualOsLayout::kMainChannel, timeout_ms);
-                  },
-                  nb::arg("timeout_ms") = 1000,
-                  "grp0/ch0 main 1600x1200 NV12")
       .def_static("ai",
                   [](int timeout_ms) {
                     return new PyVpssCamera(
@@ -1251,18 +1240,8 @@ NB_MODULE(tdl_py, m) {
                         tdl_app::DualOsLayout::kRgbChannel, timeout_ms);
                   },
                   nb::arg("timeout_ms") = 1000,
-                  "grp0/ch0 rgb 720x480 RGB888_PLANAR; shares ch0 with "
-                  "main(), mutually exclusive - actual channel config is "
-                  "owned by the small core")
-      .def_static("rear_main",
-                  [](int timeout_ms) {
-                    return new PyVpssCamera(
-                        tdl_app::DualOsLayout::kRearVpssGroup,
-                        tdl_app::DualOsLayout::kMainChannel, timeout_ms);
-                  },
-                  nb::arg("timeout_ms") = 1000,
-                  "grp3/ch0 rear main 1600x1200 NV12 (nominal; actual "
-                  "frame attributes come from the small-core channel config)")
+                  "grp0/ch0 rgb 720x480 RGB888_PLANAR; actual channel "
+                  "config is owned by the small core")
       .def_static("rear_ai",
                   [](int timeout_ms) {
                     return new PyVpssCamera(
@@ -1294,8 +1273,8 @@ NB_MODULE(tdl_py, m) {
                         tdl_app::DualOsLayout::kRgbChannel, timeout_ms);
                   },
                   nb::arg("timeout_ms") = 1000,
-                  "grp3/ch0 rear rgb 720x480 RGB888_PLANAR; shares ch0 with "
-                  "rear_main(), mutually exclusive")
+                  "grp3/ch0 rear rgb 720x480 RGB888_PLANAR (nominal; actual "
+                  "frame attributes come from the small-core channel config)")
       .def_prop_ro("group", &PyVpssCamera::group)
       .def_prop_ro("channel", &PyVpssCamera::channel)
       .def("open", &PyVpssCamera::open)

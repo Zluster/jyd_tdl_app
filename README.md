@@ -51,12 +51,12 @@ jyd_tdl_app/
 
 ```sh
 cd /home/jyd/zwz/sophpi/jyd_tdl_app
-ssh-keygen -f '/home/aixtr/.ssh/known_hosts' -R '10.0.1.1'
+ssh-keygen -f '/home/aixtr/.ssh/known_hosts' -R '10.0.0.1'
 export TDL_APP_PROFILE=dual_os
 export TDL_APP_BUILD_KWS=OFF
 export TDL_APP_THIRD_PARTY_DIR=/home/aixtr/jyd/jyd_tdl_app/third_party/cv184x
 export TOOLCHAIN_ROOT=/home/aixtr/jyd/sophpi/host-tools/gcc/arm-gnu-toolchain-11.3.rel1-x86_64-arm-none-linux-musleabihf
-./scripts/build_cv184x.sh && ./scripts/package_runtime.sh && scp package/tdl_app_sdk_cv184x.tar.gz root@10.0.1.1:/root
+./scripts/build_cv184x.sh && ./scripts/package_runtime.sh && scp package/tdl_app_sdk_cv184x.tar.gz root@10.0.0.1:/root
 ```
 
 在板子上：
