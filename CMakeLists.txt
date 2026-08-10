@@ -11,6 +11,7 @@ option(TDL_APP_MEDIA_MINIMAL "Build only media/audio targets and skip algorithm 
 option(TDL_APP_BUILD_MMF_MINIMAL "Build standalone C MMF API wrapper" ON)
 option(TDL_APP_BUILD_PYTHON "Build the tdl_py nanobind python module" ON)
 option(TDL_APP_PY_WITH_NPU "Enable NPU inference bindings in tdl_py" ON)
+option(TDL_APP_BUILD_KWS "Build Sherpa keyword-spotter targets and demos" ON)
 set(TDL_APP_PYTHON_INCLUDE_DIR "${CMAKE_CURRENT_LIST_DIR}/python3.10"
     CACHE PATH "Target-platform Python 3.10 headers (Python.h)")
 set(TDL_APP_PROFILE "dual_os" CACHE STRING "Build profile")
@@ -185,6 +186,7 @@ add_library(tdl_app_npu_asr_core STATIC
   src/media/private/audio_runtime.cpp
   src/media/sys_context.cpp
 )
+if(TDL_APP_BUILD_KWS)
 add_library(tdl_app_npu_kws_core STATIC
   src/algorithm/npu_keyword_spotter.cpp
   src/algorithm/model_descriptor.cpp
@@ -288,6 +290,7 @@ target_link_libraries(tdl_app_npu_kws_audio
          aaccomm2 aacenc2 aacdec2 aacsbrenc2 aacsbrdec2 sys
          m dl rt pthread
 )
+endif()
 target_include_directories(tdl_app_npu_asr_core
   PUBLIC
     "${CMAKE_CURRENT_LIST_DIR}/include"
@@ -662,19 +665,21 @@ if(TDL_APP_BUILD_DEMOS)
       "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
     target_link_libraries(tdl_npu_asr_demo PRIVATE tdl_app_npu_asr_core)
 
-    add_executable(tdl_npu_keyword_spotter_demo apps/tdl_npu_keyword_spotter_demo.cpp)
-    set_property(TARGET tdl_npu_keyword_spotter_demo PROPERTY CXX_STANDARD 17)
-    target_include_directories(tdl_npu_keyword_spotter_demo PRIVATE
-      "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
-    target_link_libraries(tdl_npu_keyword_spotter_demo PRIVATE
-      tdl_app_npu_kws_core tdl_app_npu_kws_audio)
+    if(TDL_APP_BUILD_KWS)
+      add_executable(tdl_npu_keyword_spotter_demo apps/tdl_npu_keyword_spotter_demo.cpp)
+      set_property(TARGET tdl_npu_keyword_spotter_demo PROPERTY CXX_STANDARD 17)
+      target_include_directories(tdl_npu_keyword_spotter_demo PRIVATE
+        "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
+      target_link_libraries(tdl_npu_keyword_spotter_demo PRIVATE
+        tdl_app_npu_kws_core tdl_app_npu_kws_audio)
 
-    # Keeps the validated KWS runtime independent from MMF/AI libraries.
-    add_executable(tdl_npu_keyword_spotter_pcm_smoke
-      apps/tdl_npu_keyword_spotter_pcm_smoke.cpp)
-    target_include_directories(tdl_npu_keyword_spotter_pcm_smoke PRIVATE
-      "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
-    target_link_libraries(tdl_npu_keyword_spotter_pcm_smoke PRIVATE tdl_app_npu_kws_core)
+      # Keeps the validated KWS runtime independent from MMF/AI libraries.
+      add_executable(tdl_npu_keyword_spotter_pcm_smoke
+        apps/tdl_npu_keyword_spotter_pcm_smoke.cpp)
+      target_include_directories(tdl_npu_keyword_spotter_pcm_smoke PRIVATE
+        "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
+      target_link_libraries(tdl_npu_keyword_spotter_pcm_smoke PRIVATE tdl_app_npu_kws_core)
+    endif()
 
     add_executable(tdl_face_detect_demo apps/tdl_face_detect_demo.cpp apps/demo_support.cpp)
     target_include_directories(tdl_face_detect_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
@@ -836,7 +841,6 @@ if(TDL_APP_BUILD_DEMOS)
       tdl_asr_demo
       tdl_dualos_asr_demo
       tdl_npu_asr_demo
-      tdl_npu_keyword_spotter_demo
       tdl_vad_demo
       tdl_speaker_recognition_demo
       tdl_face_detect_demo
@@ -854,6 +858,10 @@ if(TDL_APP_BUILD_DEMOS)
       tdl_benchmark_demo
       RUNTIME DESTINATION bin
     )
+
+    if(TDL_APP_BUILD_KWS)
+      install(TARGETS tdl_npu_keyword_spotter_demo RUNTIME DESTINATION bin)
+    endif()
 
     if(TDL_APP_HAS_FREETYPE)
       install(TARGETS

@@ -24,6 +24,26 @@ extern "C" {
 #include <cvi_common.h>
 #include "cvi_debug.h"
 
+typedef struct {
+	CVI_U8 index;
+	CVI_U8 r;
+	CVI_U8 g;
+	CVI_U8 b;
+} CVI_SYS_RGBLED_PIXEL_S;
+
+typedef struct {
+	CVI_U8 r;
+	CVI_U8 g;
+	CVI_U8 b;
+} CVI_SYS_RGBLED_COLOR_S;
+
+typedef struct {
+	CVI_U8 enabled;
+	CVI_U8 pixel_count;
+	CVI_U8 last_error;
+	CVI_U8 reserved;
+} CVI_SYS_RGBLED_STATUS_S;
+
 /**
  * @brief system initialization.
  *
@@ -209,6 +229,20 @@ CVI_S32 CVI_SYS_SetVIVPSSMode(const VI_VPSS_MODE_S *pstVIVPSSMode);
  */
 CVI_S32 CVI_SYS_GetVIVPSSMode(VI_VPSS_MODE_S *pstVIVPSSMode);
 
+CVI_S32 CVI_SYS_RGBLED_Enable(CVI_BOOL enable);
+
+CVI_S32 CVI_SYS_RGBLED_SetPixelCount(CVI_U8 pixel_count);
+
+CVI_S32 CVI_SYS_RGBLED_SetPixel(const CVI_SYS_RGBLED_PIXEL_S *pixel);
+
+CVI_S32 CVI_SYS_RGBLED_SetAll(const CVI_SYS_RGBLED_COLOR_S *color);
+
+CVI_S32 CVI_SYS_RGBLED_Show(CVI_VOID);
+
+CVI_S32 CVI_SYS_RGBLED_Clear(CVI_VOID);
+
+CVI_S32 CVI_SYS_RGBLED_GetStatus(CVI_SYS_RGBLED_STATUS_S *status);
+
 /**
  * @brief Get module name.
  *
@@ -241,4 +275,3 @@ CVI_S32 CVI_LOG_GetLevelConf(LOG_LEVEL_CONF_S *pstConf);
 #endif /* End of #ifdef __cplusplus */
 
 #endif /*__CVI_SYS_H__ */
-

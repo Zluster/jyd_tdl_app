@@ -62,10 +62,10 @@ cp -a "${RESOLVED_INSTALL_DIR}/bin/." "${RESOLVED_PKG_DIR}/bin/" 2>/dev/null || 
 cp -a "${RESOLVED_INSTALL_DIR}/lib/." "${RESOLVED_PKG_DIR}/lib/" 2>/dev/null || true
 cp -a "${RESOLVED_INSTALL_DIR}/configs/." "${RESOLVED_PKG_DIR}/configs/" 2>/dev/null || true
 cp -a "${THIRD_PARTY_DIR}/lib/." "${RESOLVED_PKG_DIR}/lib/"
-PROJECT_MODELS_DIR="${PROJECT_ROOT}/third_party/cv184x/models"
-if [ -d "${PROJECT_MODELS_DIR}" ]; then
-  cp -a "${PROJECT_MODELS_DIR}/." "${RESOLVED_PKG_DIR}/models/"
-fi
+# PROJECT_MODELS_DIR="${PROJECT_ROOT}/third_party/cv184x/models"
+# if [ -d "${PROJECT_MODELS_DIR}" ]; then
+#   cp -a "${PROJECT_MODELS_DIR}/." "${RESOLVED_PKG_DIR}/models/"
+# fi
 SHERPA_KWS_BMRT="${PROJECT_ROOT}/third_party/vendor/sherpa_onnx/lib/libsherpa-onnx-cv184x-bmrt.so"
 if [ -f "${SHERPA_KWS_BMRT}" ]; then
   cp -a "${SHERPA_KWS_BMRT}" "${RESOLVED_PKG_DIR}/lib/"
@@ -326,21 +326,21 @@ EOF
 chmod +x "${RESOLVED_PKG_DIR}/run_pp_ocr_demo.sh"
 
 # 更新模型配置文件中的路径
-for mud_file in "${RESOLVED_PKG_DIR}/configs/model_specs/"*.mud; do
-  if [ -f "$mud_file" ]; then
-    # 将 ../../models/ 替换为 ../../third_party/cv184x/models/
-    sed -i 's|model = \.\./\.\./models/|model = ../../../third_party/cv184x/models/|g' "$mud_file"
-  fi
-done
-echo "Updated model paths in .mud files"
+# for mud_file in "${RESOLVED_PKG_DIR}/configs/model_specs/"*.mud; do
+#   if [ -f "$mud_file" ]; then
+#     # 将 ../../models/ 替换为 ../../third_party/cv184x/models/
+#     sed -i 's|model = \.\./\.\./models/|model = ../../../third_party/cv184x/models/|g' "$mud_file"
+#   fi
+# done
+# echo "Updated model paths in .mud files"
 
 # Runtime packages store project models under models/cv184x, including the
 # multi-file ASR/KWS bundles whose extra fields use the same relative layout.
-for mud_file in "${RESOLVED_PKG_DIR}/configs/model_specs/"*.mud; do
-  if [ -f "$mud_file" ]; then
-    sed -i 's|../../../third_party/cv184x/models/|../../models/|g' "$mud_file"
-  fi
-done
+# for mud_file in "${RESOLVED_PKG_DIR}/configs/model_specs/"*.mud; do
+#   if [ -f "$mud_file" ]; then
+#     sed -i 's|../../../third_party/cv184x/models/|../../models/|g' "$mud_file"
+#   fi
+# done
 
 tar cf - -C "$(dirname "${RESOLVED_PKG_DIR}")" "$(basename "${RESOLVED_PKG_DIR}")" | gzip -9 > "${RESOLVED_PKG_DIR}.tar.gz"
 echo "TDL_APP_PROFILE=${TDL_APP_PROFILE}"

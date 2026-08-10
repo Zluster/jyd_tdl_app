@@ -92,6 +92,17 @@ copy_glob_to_dir "${OUT_DIR}/lib" \
   "${TOOLCHAIN_ROOT}/arm-none-linux-musleabihf/sysroot/lib/ld-musl-armhf.so.1" \
   "${TOOLCHAIN_ROOT}/arm-none-linux-musleabihf/sysroot/lib/libc.so"
 
+# libtdl_core links libbmodel.a (bmodel parse) and, for the audio models
+# (zipformer/fsmn), kaldi-native-fbank; missing either fails the app link.
+copy_glob_to_dir "${OUT_DIR}/lib" \
+  "${SOPHPI_ROOT}/install/soc_cv1843hp_jyd_common_sd_dualos_alios/rootfs/system/lib/libbmodel.a" \
+  "${LIBSOPHON_LIB}/libbmodel.a"
+
+copy_glob_to_dir "${OUT_DIR}/lib" \
+  "${TDL_INSTALL}/lib/libkaldi-native-fbank-core.a" \
+  "${SOPHPI_ROOT}/tdl_sdk/build/CV184X/_deps/kaldi-native-fbank-build/libkaldi-native-fbank-core.a" \
+  "${SOPHPI_ROOT}/tdl_sdk/build_jyd/CV184X/deps/kaldi-native-fbank-build/libkaldi-native-fbank-core.a"
+
 copy_glob_to_dir "${OUT_DIR}/opencv/lib" \
   "${TDL_INSTALL}/sample/3rd/opencv/lib/libopencv_core.so"* \
   "${TDL_INSTALL}/sample/3rd/opencv/lib/libopencv_imgproc.so"* \

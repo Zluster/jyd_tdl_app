@@ -29,7 +29,7 @@
 模块还提供：
 
 - 像素格式常量，例如 `FORMAT_NV12`、`FORMAT_NV21`、`FORMAT_ARGB8888`。
-- 双系统布局常量，例如 `CAPTURE_GROUP`、`DISPLAY_GROUP`、`LIVE_CHANNEL`。
+- 双系统布局常量，例如 `CAPTURE_GROUP`、`DISPLAY_GROUP`、`REAR_GROUP`、`LIVE_CHANNEL`、`RGB_CHANNEL`，以及各通道尺寸常量 `MAIN_WIDTH/MAIN_HEIGHT`、`AI_WIDTH/AI_HEIGHT`、`LIVE_WIDTH/LIVE_HEIGHT`、`SUB_RGB_WIDTH/SUB_RGB_HEIGHT`、`SCREEN_WIDTH/SCREEN_HEIGHT`、`RGB_WIDTH/RGB_HEIGHT`。
 - VO 接口和时序常量。
 - 查询现有 VO、VPSS/VO bind 状态的函数。
 
@@ -46,6 +46,24 @@
 | `VpssCamera.live()` | grp0/ch2 | 720×480 | NV12 |
 | `VpssCamera.sub_rgb()` | grp0/ch3 | 640×640 | NV21 |
 | `VpssCamera.screen()` | grp1/ch0 | 720×480 | NV12 |
+| `VpssCamera.rgb()` | grp0/ch0 | 720×480 | RGB888_PLANAR |
+| `VpssCamera.rear_main()` | grp3/ch0 | 1600×1200 | NV12 |
+| `VpssCamera.rear_ai()` | grp3/ch1 | 640×640 | RGB888_PLANAR |
+| `VpssCamera.rear_live()` | grp3/ch2 | 720×480 | NV12 |
+| `VpssCamera.rear_sub_rgb()` | grp3/ch3 | 640×640 | NV21 |
+| `VpssCamera.rear_rgb()` | grp3/ch0 | 720×480 | RGB888_PLANAR |
+
+VPSS group 布局：
+
+- `grp0`（`CAPTURE_GROUP`）：前摄采集组，ch0~ch3 分别为 main/ai/live/subrgb。
+- `grp1`（`DISPLAY_GROUP`）：显示处理组，ch0 即 screen。
+- `grp2`：保留未用。
+- `grp3`（`REAR_GROUP`）：后摄采集组，通道编号与前摄一致。
+
+注意两点：
+
+- `rgb()` 与 `main()` 物理上共用 grp0/ch0，`rear_rgb()` 与 `rear_main()` 共用 grp3/ch0。同一时刻一个通道只能有一种配置，两者互斥；`rgb` 期望通道按 720×480 RGB888_PLANAR 配置。
+- rear 各工厂的规格是布局名义值，实际帧属性以读取时小核侧对该通道的配置为准（用 `frame.width`/`frame.format` 确认）。
 
 显示链路通常为：
 
@@ -1202,8 +1220,8 @@ result = det.detect_image("/tmp/test.jpg", threshold=0.25)
 ```python
 import tdl_py
 
-AI_W, AI_H = 640, 640       # VpssCamera.ai() 帧尺寸
-OSD_W, OSD_H = 720, 480     # OSD 画布尺寸
+AI_W, AI_H = tdl_py.AI_WIDTH, tdl_py.AI_HEIGHT      # VpssCamera.ai() 帧尺寸
+OSD_W, OSD_H = tdl_py.LIVE_WIDTH, tdl_py.LIVE_HEIGHT  # OSD 画布默认尺寸
 SX = OSD_W / AI_W           # 检测框坐标 → OSD 坐标
 SY = OSD_H / AI_H
 
@@ -1320,11 +1338,23 @@ tdl_py.VpssCamera.ai(timeout_ms=1000)
 tdl_py.VpssCamera.live(timeout_ms=1000)
 tdl_py.VpssCamera.sub_rgb(timeout_ms=1000)
 tdl_py.VpssCamera.screen(timeout_ms=1000)
+tdl_py.VpssCamera.rgb(timeout_ms=1000)
+tdl_py.VpssCamera.rear_main(timeout_ms=1000)
+tdl_py.VpssCamera.rear_ai(timeout_ms=1000)
+tdl_py.VpssCamera.rear_live(timeout_ms=1000)
+tdl_py.VpssCamera.rear_sub_rgb(timeout_ms=1000)
+tdl_py.VpssCamera.rear_rgb(timeout_ms=1000)
 
 camera.open()
 frame = camera.read()
 camera.close()
 ```
+
+布局常量：`CAPTURE_GROUP`(0)、`DISPLAY_GROUP`(1)、`REAR_GROUP`(3)、
+`MAIN_CHANNEL`(0)、`AI_CHANNEL`(1)、`LIVE_CHANNEL`(2)、`SUB_RGB_CHANNEL`(3)、
+`DISPLAY_CHANNEL`(0)、`RGB_CHANNEL`(0)；尺寸常量 `MAIN_WIDTH/MAIN_HEIGHT`、
+`AI_WIDTH/AI_HEIGHT`、`LIVE_WIDTH/LIVE_HEIGHT`、`SUB_RGB_WIDTH/SUB_RGB_HEIGHT`、
+`SCREEN_WIDTH/SCREEN_HEIGHT`、`RGB_WIDTH/RGB_HEIGHT`。
 
 ### 19.2 Frame
 

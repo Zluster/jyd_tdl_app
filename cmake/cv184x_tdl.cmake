@@ -228,6 +228,34 @@ tdl_pick_library(TDL_SENSOR_GC2053_LIBRARY
   "${TDL_APP_THIRD_PARTY_DIR}/lib/libsns_gc2053.a"
   "${TDL_SOPHPI_ROOT}/tdl_app_sdk/third_party/cv184x/dual_os/lib/libsns_gc2053.so")
 
+# In the dual-OS split the ISP pipeline and sensor drivers belong to the
+# small core, so the big-core musl_arm_dual set does not always ship these.
+# Link them opportunistically, like the optional sensor libraries above.
+tdl_pick_library(TDL_ISP_ALGO_LIBRARY
+  "${TDL_APP_THIRD_PARTY_DIR}/lib/libisp_algo.so"
+  "${TDL_APP_THIRD_PARTY_DIR}/lib/libisp_algo.a"
+  "${TDL_SOPHPI_ROOT}/cvi_mpi/lib/musl_arm_dual/libisp_algo.so")
+
+tdl_pick_library(TDL_SENSOR_LIBRARY
+  "${TDL_APP_THIRD_PARTY_DIR}/lib/libsensor.so"
+  "${TDL_APP_THIRD_PARTY_DIR}/lib/libsensor.a"
+  "${TDL_SOPHPI_ROOT}/cvi_mpi/lib/musl_arm_dual/libsensor.so")
+
+tdl_pick_library(TDL_SENSOR_CFG_LIBRARY
+  "${TDL_APP_THIRD_PARTY_DIR}/lib/libsensor_cfg.so"
+  "${TDL_APP_THIRD_PARTY_DIR}/lib/libsensor_cfg.a"
+  "${TDL_SOPHPI_ROOT}/cvi_mpi/lib/musl_arm_dual/libsensor_cfg.so")
+
+tdl_pick_library(TDL_SENSOR_I2C_LIBRARY
+  "${TDL_APP_THIRD_PARTY_DIR}/lib/libsensor_i2c.so"
+  "${TDL_APP_THIRD_PARTY_DIR}/lib/libsensor_i2c.a"
+  "${TDL_SOPHPI_ROOT}/cvi_mpi/lib/musl_arm_dual/libsensor_i2c.so")
+
+tdl_pick_library(TDL_SNS_FULL_LIBRARY
+  "${TDL_APP_THIRD_PARTY_DIR}/lib/libsns_full.so"
+  "${TDL_APP_THIRD_PARTY_DIR}/lib/libsns_full.a"
+  "${TDL_SOPHPI_ROOT}/cvi_mpi/lib/musl_arm_dual/libsns_full.so")
+
 if(NOT TDL_BMRT_LIBRARY OR NOT TDL_BMLIB_LIBRARY OR NOT TDL_BMODEL_LIBRARY OR
    NOT TDL_MODEL_COMBINE_LIBRARY)
   message(FATAL_ERROR
@@ -262,20 +290,26 @@ set(TDL_CV184X_LIBS
   vo
   rgn
   isp
-  isp_algo
   ae
   awb
   af
-  sensor
-  sensor_cfg
-  sensor_i2c
-  sns_full
   ${TDL_TINYALSA_LIBRARY}
   "${TDL_ZLIB_LIBRARY}"
   dl
   rt
   pthread
 )
+
+foreach(optional_lib
+    "${TDL_ISP_ALGO_LIBRARY}"
+    "${TDL_SENSOR_LIBRARY}"
+    "${TDL_SENSOR_CFG_LIBRARY}"
+    "${TDL_SENSOR_I2C_LIBRARY}"
+    "${TDL_SNS_FULL_LIBRARY}")
+  if(optional_lib)
+    list(APPEND TDL_CV184X_LIBS "${optional_lib}")
+  endif()
+endforeach()
 
 if(TDL_SENSOR_CV2003_LIBRARY)
   list(APPEND TDL_CV184X_LIBS "${TDL_SENSOR_CV2003_LIBRARY}")
