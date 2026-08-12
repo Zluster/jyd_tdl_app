@@ -10,7 +10,7 @@
 import threading
 import time
 
-from maix import image
+import _maix_image as image
 
 from appfw import App, AppContext
 

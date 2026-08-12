@@ -58,6 +58,6 @@ class Display:
         # flush_is_last
         # display_show()
         if disp.flush_is_last():
-            calc_fps("flush")
+            # calc_fps("flush")
             mpy_embed.call_flush_callback(area.x1, area.y1, area.x2, area.y2, data_view)
         disp.flush_ready()
