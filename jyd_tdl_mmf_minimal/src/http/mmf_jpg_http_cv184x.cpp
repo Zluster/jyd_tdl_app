@@ -1,4 +1,7 @@
+#include <algorithm>
+
 #include "mmf_cv184x_common.hpp"
+#include "mmf_cv184x_resources.hpp"
 
 using namespace mmf_cv184x;
 
@@ -26,13 +29,170 @@ struct mmf_jpg_http_server {
   mmf_pixel_format_t pull_format = MMF_PIXFMT_UNKNOWN;
   uint32_t pull_quality = 0;
   uint32_t pull_venc_channel = 0;
+  CodecResourceLease display_venc_lease = MMF_CODEC_RESOURCE_LEASE_INIT;
+  bool display_rotate_vpss_created = false;
+  bool display_rotate_vpss_channel_enabled = false;
+  bool display_rotate_vpss_started = false;
+  bool display_rotate_vpss_source_bound = false;
+  bool display_venc_opened = false;
+  bool display_venc_bound = false;
+  uint64_t display_venc_sequence = 0;
+  int display_venc_last_error = CVI_SUCCESS;
 };
+
+constexpr int kDisplayVencTimeoutMs = 1000;
+constexpr int kDisplayVencMaxWidth = 2560;
+constexpr int kDisplayVencMaxHeight = 1440;
+constexpr int kDisplayVencBufferSize = 1024 * 1024;
+constexpr VPSS_GRP kDisplayRotateVpssGroup = 2;
+constexpr VPSS_CHN kDisplayRotateVpssChannel = 0;
+constexpr uint32_t kDisplayVencMaxFps = 30;
+
+static uint32_t normalize_display_venc_fps(uint32_t fps) {
+  return std::max(1U, std::min(kDisplayVencMaxFps, fps == 0 ? kDisplayVencMaxFps : fps));
+}
+
+static mmf_result_t report_display_venc_error(mmf_jpg_http_server_t* server,
+                                              const char* operation, int error) {
+  if (server != nullptr && server->display_venc_last_error != error) {
+    std::fprintf(stderr, "jpg-http display venc: %s failed, ret=0x%x\n", operation, error);
+    server->display_venc_last_error = error;
+  }
+  set_last_error(std::string("jpg-http display venc: ") + operation +
+                 " failed, ret=" + std::to_string(error));
+  return MMF_EIO;
+}
+
+static void close_http_display_venc(mmf_jpg_http_server_t* server) {
+  if (server == nullptr) {
+    return;
+  }
+
+  if (server->display_venc_bound) {
+    MMF_CHN_S source;
+    MMF_CHN_S destination;
+    std::memset(&source, 0, sizeof(source));
+    std::memset(&destination, 0, sizeof(destination));
+    source.enModId = CVI_ID_VPSS;
+    source.s32DevId = kDisplayRotateVpssGroup;
+    source.s32ChnId = kDisplayRotateVpssChannel;
+    destination.enModId = CVI_ID_VENC;
+    destination.s32ChnId = static_cast<CVI_S32>(server->config.venc_channel);
+    (void)CVI_SYS_UnBind(&source, &destination);
+    server->display_venc_bound = false;
+  }
+  if (server->display_venc_opened) {
+    (void)CVI_VENC_StopRecvFrame(static_cast<VENC_CHN>(server->config.venc_channel));
+    (void)CVI_VENC_DestroyChn(static_cast<VENC_CHN>(server->config.venc_channel));
+    server->display_venc_opened = false;
+  }
+  if (server->display_rotate_vpss_source_bound) {
+    MMF_CHN_S source;
+    MMF_CHN_S destination;
+    std::memset(&source, 0, sizeof(source));
+    std::memset(&destination, 0, sizeof(destination));
+    source.enModId = CVI_ID_VPSS;
+    source.s32DevId = mmf_cvi::DualOsLayout::kDisplayVpssGroup;
+    source.s32ChnId = mmf_cvi::DualOsLayout::kDisplayChannel;
+    destination.enModId = CVI_ID_VPSS;
+    destination.s32DevId = kDisplayRotateVpssGroup;
+    destination.s32ChnId = kDisplayRotateVpssChannel;
+    (void)CVI_SYS_UnBind(&source, &destination);
+    server->display_rotate_vpss_source_bound = false;
+  }
+  if (server->display_rotate_vpss_started) {
+    (void)CVI_VPSS_StopGrp(kDisplayRotateVpssGroup);
+    server->display_rotate_vpss_started = false;
+  }
+  if (server->display_rotate_vpss_channel_enabled) {
+    (void)CVI_VPSS_DisableChn(kDisplayRotateVpssGroup, kDisplayRotateVpssChannel);
+    server->display_rotate_vpss_channel_enabled = false;
+  }
+  if (server->display_rotate_vpss_created) {
+    (void)CVI_VPSS_DestroyGrp(kDisplayRotateVpssGroup);
+    server->display_rotate_vpss_created = false;
+  }
+  codec_resource_lease_release(&server->display_venc_lease);
+  server->display_venc_sequence = 0;
+  server->display_venc_last_error = CVI_SUCCESS;
+}
+
+static mmf_result_t ensure_http_display_rotate_vpss(mmf_jpg_http_server_t* server) {
+  if (server->display_rotate_vpss_source_bound) {
+    return MMF_OK;
+  }
+
+  VPSS_GRP_ATTR_S group_attr;
+  std::memset(&group_attr, 0, sizeof(group_attr));
+  group_attr.u32MaxW = server->config.width;
+  group_attr.u32MaxH = server->config.height;
+  group_attr.enPixelFormat = PIXEL_FORMAT_NV12;
+  group_attr.stFrameRate.s32SrcFrameRate = -1;
+  group_attr.stFrameRate.s32DstFrameRate = -1;
+  const int create_ret = CVI_VPSS_CreateGrp(kDisplayRotateVpssGroup, &group_attr);
+  if (create_ret != CVI_SUCCESS) {
+    return report_display_venc_error(server, "CVI_VPSS_CreateGrp", create_ret);
+  }
+  server->display_rotate_vpss_created = true;
+
+  VPSS_CHN_ATTR_S channel_attr;
+  std::memset(&channel_attr, 0, sizeof(channel_attr));
+  channel_attr.u32Width = server->config.width;
+  channel_attr.u32Height = server->config.height;
+  channel_attr.enVideoFormat = VIDEO_FORMAT_LINEAR;
+  channel_attr.enPixelFormat = PIXEL_FORMAT_NV12;
+  channel_attr.stFrameRate.s32SrcFrameRate = -1;
+  channel_attr.stFrameRate.s32DstFrameRate = -1;
+  channel_attr.u32Depth = 2;
+  channel_attr.bMirror = CVI_TRUE;
+  channel_attr.bFlip = CVI_TRUE;
+  channel_attr.stAspectRatio.enMode = ASPECT_RATIO_NONE;
+  const int set_attr_ret = CVI_VPSS_SetChnAttr(kDisplayRotateVpssGroup,
+                                              kDisplayRotateVpssChannel, &channel_attr);
+  if (set_attr_ret != CVI_SUCCESS) {
+    close_http_display_venc(server);
+    return report_display_venc_error(server, "CVI_VPSS_SetChnAttr", set_attr_ret);
+  }
+  const int enable_ret = CVI_VPSS_EnableChn(kDisplayRotateVpssGroup,
+                                            kDisplayRotateVpssChannel);
+  if (enable_ret != CVI_SUCCESS) {
+    close_http_display_venc(server);
+    return report_display_venc_error(server, "CVI_VPSS_EnableChn", enable_ret);
+  }
+  server->display_rotate_vpss_channel_enabled = true;
+  const int start_ret = CVI_VPSS_StartGrp(kDisplayRotateVpssGroup);
+  if (start_ret != CVI_SUCCESS) {
+    close_http_display_venc(server);
+    return report_display_venc_error(server, "CVI_VPSS_StartGrp", start_ret);
+  }
+  server->display_rotate_vpss_started = true;
+
+  MMF_CHN_S source;
+  MMF_CHN_S destination;
+  std::memset(&source, 0, sizeof(source));
+  std::memset(&destination, 0, sizeof(destination));
+  source.enModId = CVI_ID_VPSS;
+  source.s32DevId = mmf_cvi::DualOsLayout::kDisplayVpssGroup;
+  source.s32ChnId = mmf_cvi::DualOsLayout::kDisplayChannel;
+  destination.enModId = CVI_ID_VPSS;
+  destination.s32DevId = kDisplayRotateVpssGroup;
+  destination.s32ChnId = kDisplayRotateVpssChannel;
+  const int bind_ret = CVI_SYS_Bind(&source, &destination);
+  if (bind_ret != CVI_SUCCESS) {
+    close_http_display_venc(server);
+    return report_display_venc_error(server, "CVI_SYS_Bind display VPSS->rotate VPSS",
+                                     bind_ret);
+  }
+  server->display_rotate_vpss_source_bound = true;
+  return MMF_OK;
+}
 
 static void close_http_pull_resources(mmf_jpg_http_server_t* server) {
   if (server == nullptr) {
     return;
   }
   std::lock_guard<std::mutex> lock(server->pull_mutex);
+  close_http_display_venc(server);
   if (server->pull_encoder != nullptr) {
     mmf_jpg_encoder_close(server->pull_encoder);
     server->pull_encoder = nullptr;
@@ -46,6 +206,144 @@ static void close_http_pull_resources(mmf_jpg_http_server_t* server) {
   server->pull_format = MMF_PIXFMT_UNKNOWN;
   server->pull_quality = 0;
   server->pull_venc_channel = 0;
+}
+
+static mmf_result_t ensure_http_display_venc(mmf_jpg_http_server_t* server) {
+  if (server == nullptr) {
+    return MMF_EINVAL;
+  }
+  if (server->display_venc_bound) {
+    return MMF_OK;
+  }
+
+  mmf_result_t ret = ensure_http_display_rotate_vpss(server);
+  if (ret != MMF_OK) {
+    close_http_display_venc(server);
+    return ret;
+  }
+
+  ret = acquire_codec_resource(CodecResourceType::Venc, server->config.venc_channel,
+                               "jpg-http-display", 1000, &server->display_venc_lease);
+  if (ret != MMF_OK) {
+    set_last_error("jpg-http display venc: VENC channel is busy");
+    if (server->display_venc_last_error != static_cast<int>(ret)) {
+      std::fprintf(stderr, "jpg-http display venc: VENC%d resource busy, ret=%d\n",
+                   server->config.venc_channel, ret);
+      server->display_venc_last_error = static_cast<int>(ret);
+    }
+    return ret;
+  }
+
+  VENC_CHN_ATTR_S attr;
+  std::memset(&attr, 0, sizeof(attr));
+  attr.stVencAttr.u32PicWidth = server->config.width;
+  attr.stVencAttr.u32PicHeight = server->config.height;
+  attr.stVencAttr.u32MaxPicWidth = kDisplayVencMaxWidth;
+  attr.stVencAttr.u32MaxPicHeight = kDisplayVencMaxHeight;
+  attr.stVencAttr.u32BufSize = kDisplayVencBufferSize;
+  attr.stVencAttr.enType = PT_MJPEG;
+  attr.stVencAttr.bEsBufQueueEn = CVI_TRUE;
+  attr.stVencAttr.bIsoSendFrmEn = CVI_TRUE;
+  attr.stGopAttr.enGopMode = VENC_GOPMODE_NORMALP;
+  attr.stGopAttr.stNormalP.s32IPQpDelta = 2;
+  attr.stRcAttr.enRcMode = VENC_RC_MODE_MJPEGFIXQP;
+  const uint32_t frame_rate = normalize_display_venc_fps(server->config.fps);
+  attr.stRcAttr.stMjpegFixQp.u32SrcFrameRate = frame_rate;
+  attr.stRcAttr.stMjpegFixQp.fr32DstFrameRate = frame_rate;
+  attr.stRcAttr.stMjpegFixQp.u32Qfactor =
+      std::max(1U, std::min(99U, server->config.jpeg_quality));
+
+  const VENC_CHN channel = static_cast<VENC_CHN>(server->config.venc_channel);
+  const int create_ret = CVI_VENC_CreateChn(channel, &attr);
+  if (create_ret != CVI_SUCCESS) {
+    close_http_display_venc(server);
+    return report_display_venc_error(server, "CVI_VENC_CreateChn", create_ret);
+  }
+  server->display_venc_opened = true;
+
+  MMF_CHN_S source;
+  MMF_CHN_S destination;
+  std::memset(&source, 0, sizeof(source));
+  std::memset(&destination, 0, sizeof(destination));
+  source.enModId = CVI_ID_VPSS;
+  source.s32DevId = kDisplayRotateVpssGroup;
+  source.s32ChnId = kDisplayRotateVpssChannel;
+  destination.enModId = CVI_ID_VENC;
+  destination.s32ChnId = static_cast<CVI_S32>(server->config.venc_channel);
+  const int bind_ret = CVI_SYS_Bind(&source, &destination);
+  if (bind_ret != CVI_SUCCESS) {
+    close_http_display_venc(server);
+    return report_display_venc_error(server, "CVI_SYS_Bind rotate VPSS->VENC", bind_ret);
+  }
+  server->display_venc_bound = true;
+
+  VENC_RECV_PIC_PARAM_S recv;
+  std::memset(&recv, 0, sizeof(recv));
+  recv.s32RecvPicNum = -1;
+  const int start_ret = CVI_VENC_StartRecvFrame(channel, &recv);
+  if (start_ret != CVI_SUCCESS) {
+    close_http_display_venc(server);
+    return report_display_venc_error(server, "CVI_VENC_StartRecvFrame", start_ret);
+  }
+  server->display_venc_last_error = CVI_SUCCESS;
+  std::fprintf(stderr,
+               "jpg-http display venc: VPSS%d.%d -> VPSS%d.%d (mirror+flip) -> VENC%d at %u fps\n",
+               mmf_cvi::DualOsLayout::kDisplayVpssGroup,
+               mmf_cvi::DualOsLayout::kDisplayChannel, source.s32DevId,
+               source.s32ChnId, destination.s32ChnId, frame_rate);
+  return MMF_OK;
+}
+
+static mmf_result_t capture_http_display_jpeg(mmf_jpg_http_server_t* server,
+                                              std::vector<std::uint8_t>* jpeg,
+                                              uint64_t* sequence) {
+  const mmf_result_t ret = ensure_http_display_venc(server);
+  if (ret != MMF_OK) {
+    return ret;
+  }
+
+  const VENC_CHN channel = static_cast<VENC_CHN>(server->config.venc_channel);
+  VENC_CHN_STATUS_S status;
+  std::memset(&status, 0, sizeof(status));
+  const int query_ret = CVI_VENC_QueryStatus(channel, &status);
+  if (query_ret != CVI_SUCCESS) {
+    return report_display_venc_error(server, "CVI_VENC_QueryStatus", query_ret);
+  }
+  if (status.u32CurPacks == 0) {
+    return MMF_ENOTREADY;
+  }
+
+  VENC_STREAM_S stream;
+  std::memset(&stream, 0, sizeof(stream));
+  stream.pstPack = static_cast<VENC_PACK_S*>(
+      std::malloc(sizeof(VENC_PACK_S) * status.u32CurPacks));
+  if (stream.pstPack == nullptr) {
+    return MMF_ENOMEM;
+  }
+  const int stream_ret = CVI_VENC_GetStream(channel, &stream, kDisplayVencTimeoutMs);
+  if (stream_ret != CVI_SUCCESS) {
+    std::free(stream.pstPack);
+    return report_display_venc_error(server, "CVI_VENC_GetStream", stream_ret);
+  }
+
+  jpeg->clear();
+  for (CVI_U32 index = 0; index < stream.u32PackCount; ++index) {
+    const VENC_PACK_S& pack = stream.pstPack[index];
+    if (pack.u32Len > pack.u32Offset) {
+      const auto* begin = pack.pu8Addr + pack.u32Offset;
+      jpeg->insert(jpeg->end(), begin, begin + pack.u32Len - pack.u32Offset);
+    }
+  }
+  (void)CVI_VENC_ReleaseStream(channel, &stream);
+  std::free(stream.pstPack);
+  if (jpeg->empty()) {
+    return MMF_ENOTREADY;
+  }
+  if (sequence != nullptr) {
+    *sequence = ++server->display_venc_sequence;
+  }
+  server->display_venc_last_error = CVI_SUCCESS;
+  return MMF_OK;
 }
 
 static mmf_result_t ensure_http_pull_camera(mmf_jpg_http_server_t* server) {
@@ -185,6 +483,9 @@ static mmf_result_t capture_http_jpeg(mmf_jpg_http_server_t* server,
   }
 
   std::lock_guard<std::mutex> pull_lock(server->pull_mutex);
+  if (server->config.mode == MMF_JPG_HTTP_MODE_DISPLAY_PULL) {
+    return capture_http_display_jpeg(server, jpeg, sequence);
+  }
   mmf_result_t ret = ensure_http_pull_camera(server);
   if (ret != MMF_OK) {
     return ret;
@@ -259,6 +560,10 @@ static void http_producer_thread(mmf_jpg_http_server_t* server) {
       fps == 0 ? std::chrono::milliseconds(0) : std::chrono::milliseconds(1000 / fps);
   while (!server->stop.load() && server->streaming.load()) {
     if (server->client_count.load() == 0) {
+      if (server->config.mode == MMF_JPG_HTTP_MODE_DISPLAY_PULL) {
+        std::lock_guard<std::mutex> lock(server->pull_mutex);
+        close_http_display_venc(server);
+      }
       std::this_thread::sleep_for(std::chrono::milliseconds(100));
       continue;
     }
@@ -268,9 +573,10 @@ static void http_producer_thread(mmf_jpg_http_server_t* server) {
     if (ret == MMF_OK && !jpeg.empty()) {
       publish_http_jpeg_cache(server, jpeg.data(), jpeg.size(), sequence, 0);
     } else if (ret == MMF_EBUSY || ret == MMF_ENOTREADY) {
-      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+      std::this_thread::sleep_for(std::chrono::milliseconds(
+          server->config.mode == MMF_JPG_HTTP_MODE_DISPLAY_PULL ? 5 : 100));
     }
-    if (interval.count() > 0) {
+    if (server->config.mode != MMF_JPG_HTTP_MODE_DISPLAY_PULL && interval.count() > 0) {
       std::this_thread::sleep_for(interval);
     }
   }

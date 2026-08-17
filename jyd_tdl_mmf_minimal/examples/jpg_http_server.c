@@ -54,8 +54,10 @@ int main(int argc, char** argv) {
 
   mmf_system_init(&sys);
   mmf_jpg_http_get_default_config(&config);
-  config.mode = MMF_JPG_HTTP_MODE_CAMERA_PULL;
   config.camera_source = argc >= 3 ? parse_source(argv[2]) : MMF_CAMERA_SRC_LIVE;
+  config.mode = config.camera_source == MMF_CAMERA_SRC_SCREEN
+                    ? MMF_JPG_HTTP_MODE_DISPLAY_PULL
+                    : MMF_JPG_HTTP_MODE_CAMERA_PULL;
   config.port = argc >= 2 ? (uint16_t)atoi(argv[1]) : 18090;
   config.jpeg_quality = argc >= 4 ? (uint32_t)atoi(argv[3]) : 92;
   config.fps = argc >= 5 ? (uint32_t)atoi(argv[4]) : 8;
@@ -80,7 +82,9 @@ int main(int argc, char** argv) {
   }
 
   printf("jpg http server started\n");
-  printf("  source=%s venc=%u quality=%u fps=%u%s\n", source_name(config.camera_source),
+  printf("  source=%s mode=%s venc=%u quality=%u fps=%u%s\n",
+         source_name(config.camera_source),
+         config.mode == MMF_JPG_HTTP_MODE_DISPLAY_PULL ? "display" : "camera",
          config.venc_channel, config.jpeg_quality, config.fps,
          config.fps == 0 ? " (unlimited)" : "");
   printf("  snapshot: http://<board-ip>:%u%s\n", config.port, config.snapshot_path);
