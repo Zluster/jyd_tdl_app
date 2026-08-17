@@ -30,17 +30,17 @@ class mouse_indev:
         self.indev.set_type(lv.INDEV_TYPE.POINTER)
         self.indev.set_read_cb(self.mouse_read)
 
-        with open(path + 'mouse.png', 'rb') as f:
-            png_data = f.read()
+        # with open(path + 'mouse.png', 'rb') as f:
+        #     png_data = f.read()
 
-        img = lv.image_dsc_t({
-            "data_size": len(png_data),
-            "data": png_data,
-        })
+        # img = lv.image_dsc_t({
+        #     "data_size": len(png_data),
+        #     "data": png_data,
+        # })
 
-        mouse_img = lv.image(self.scr)
-        mouse_img.set_src(img)
-        self.indev.set_cursor(mouse_img)
+        # mouse_img = lv.image(self.scr)
+        # mouse_img.set_src(img)
+        # self.indev.set_cursor(mouse_img)
         
         self.timer = self.indev.get_read_timer()
         self.timer.set_period(16)
@@ -67,8 +67,8 @@ class mouse_indev:
                 self.b = value
             if not self.poll.poll()[0][1] & select.POLLIN:
                 break
-        data.point.x = self.x
-        data.point.y = self.y
+        data.point.x = self.hor_res - self.x
+        data.point.y = self.ver_res - self.y
 
         # data.point.x = int(data.point.x / 2) + 256
         # data.point.y = int(data.point.y / 2) #150
