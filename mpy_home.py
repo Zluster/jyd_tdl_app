@@ -956,7 +956,7 @@ class MainScreen:
             # if os.path.exists("/tmp/run_app.txt"):
             #     os.remove("/tmp/run_app.txt")
             # self.handler(app_info.name)
-            mpy_embed.on_app_launch(app_info.name)
+            mpy_embed.on_app_launch("/root/maixapp/apps/" + app_info.id + "/" + app_info.exec)
             # print(app_info.id, app_info.name, app_info.exec)
             # app.switch_app(app_info["id"], -1, app_info["exec"])
             pass
