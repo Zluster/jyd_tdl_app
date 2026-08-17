@@ -15,22 +15,22 @@ import time
 import mpy      # 仅用于显示通路（set_flush_buf / set_flush_callback）
 import tdl_py
 from mpyc import Mpyc
-# from appfw import AppFramework
-# from apps.demo.app import DemoApp
-# from apps.qrcode.app import QrApp
+from appfw import AppFramework
+from apps.demo.app import DemoApp
+from apps.qrcode.app import QrApp
 # from apps.blobcolor.app import BlobColorApp
 # from apps.apriltag.app import AprilTagApp
-# from apps.barcode.app import BarcodeApp
-# from apps.findlines.app import FindLinesApp
+from apps.barcode.app import BarcodeApp
+from apps.findlines.app import FindLinesApp
 # from apps.spectrum.app import SpectrumApp
-# from apps.ai.app import AiApp
+from apps.ai.app import AiApp
 
 #: AiApp 默认模型（.mud，按板上实际路径改；
 #: [basic] model 的相对路径相对 spec 文件位置解析，bmodel 必须存在）
 _AI_MODEL_PATH = "/root/tdl_app_sdk_cv184x/configs/model_specs/"
 
 #: 应用框架实例，main() 里创建。进入应用：fw.launch(SomeApp())
-# fw: AppFramework = None
+fw: AppFramework = None
 
 #: 应用拉起通道：菜单点击后把 app 路径发给本机 wss 服务执行
 _WSS_SOCK = "/tmp/jyd-wss-local.sock"
@@ -60,8 +60,8 @@ async def lv_tick_loop(m: Mpyc, freq: int = 25):
         except RuntimeError as e:
             # MicroPython 侧异常不终止 UI 循环，打印后继续
             print("Exception in task_handler:", e)
-        # if fw is not None:
-        #     fw.process(ms)   # 挂起的 launch/exit 在这里执行（task_handler 之外）
+        if fw is not None:
+            fw.process(ms)   # 挂起的 launch/exit 在这里执行（task_handler 之外）
         next_tick += delay
         now = time.perf_counter()
         if next_tick < now - delay:   # 欠账超过一帧：不补，直接对齐到现在
@@ -140,16 +140,16 @@ async def main():
             m.exec_file("/root/launcher/mpy_env.py", capture=False)
             m.register(on_app_launch)
 
-            # global fw
-            # fw = AppFramework(m)
+            global fw
+            fw = AppFramework(m)
 
             tick_task = asyncio.create_task(lv_tick_loop(m, 30))
 
             while True:
                 await asyncio.sleep(0.01)
     finally:
-        # if fw is not None:
-        #     fw.close()   # 框架级摄像头在程序退出时才关闭
+        if fw is not None:
+            fw.close()   # 框架级摄像头在程序退出时才关闭
         for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
             loop.remove_signal_handler(sig)
         signal.signal(signal.SIGINT, signal.SIG_IGN)
