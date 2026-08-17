@@ -300,30 +300,6 @@ set(TDL_CV184X_LIBS
   pthread
 )
 
-foreach(optional_lib
-    "${TDL_ISP_ALGO_LIBRARY}"
-    "${TDL_SENSOR_LIBRARY}"
-    "${TDL_SENSOR_CFG_LIBRARY}"
-    "${TDL_SENSOR_I2C_LIBRARY}"
-    "${TDL_SNS_FULL_LIBRARY}")
-  if(optional_lib)
-    list(APPEND TDL_CV184X_LIBS "${optional_lib}")
-  endif()
-endforeach()
-
-if(TDL_SENSOR_CV2003_LIBRARY)
-  list(APPEND TDL_CV184X_LIBS "${TDL_SENSOR_CV2003_LIBRARY}")
-endif()
-
-if(TDL_SENSOR_GC2053_LIBRARY)
-  list(APPEND TDL_CV184X_LIBS "${TDL_SENSOR_GC2053_LIBRARY}")
-else()
-  message(WARNING
-    "GC2053 sensor runtime library was not found in TDL_APP_THIRD_PARTY_DIR or "
-    "TDL_SOPHPI_ROOT. CV2003 builds remain available, but GC2053 runtime bring-up "
-    "will require building or installing libsns_gc2053.so in the dual_os bundle.")
-endif()
-
 if(TDL_HAS_AUDIO_RUNTIME)
   list(APPEND TDL_CV184X_LIBS "${TDL_KALDI_NATIVE_FBANK_LIBRARY}")
 endif()
