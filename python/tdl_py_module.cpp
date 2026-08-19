@@ -24,6 +24,7 @@
 #include <string>
 
 #include "cvi_comm_video.h"
+#include "cvi_region.h"
 #include "cvi_sys.h"
 #include "cvi_vo.h"
 #include "tdl_app/camera.hpp"
@@ -1462,6 +1463,28 @@ NB_MODULE(tdl_py, m) {
         },
         nb::arg("layer") = 0, nb::arg("channel") = 0,
         "Bind source feeding a VO channel as (module, dev, chn), or None");
+
+  m.def("rgn_destroy",
+        [](int handle, int group, int channel) {
+          std::string error;
+          if (!tdl_app::ensureMmfRuntimeInitialized(&error)) {
+            raise("MMF runtime init failed: " + error);
+          }
+          if (group >= 0) {
+            // Leftover regions may still be attached; detach is best effort.
+            MMF_CHN_S chn = makeMmfChannel(CVI_ID_VPSS, group, channel);
+            CVI_RGN_DetachFromChn(static_cast<RGN_HANDLE>(handle), &chn);
+          }
+          return CVI_RGN_Destroy(static_cast<RGN_HANDLE>(handle)) ==
+                 CVI_SUCCESS;
+        },
+        nb::arg("handle"), nb::arg("group") = -1, nb::arg("channel") = 0,
+        "Force-destroy an RGN handle regardless of which process created it "
+        "(cleanup for leftovers after a killed process; OsdRegion.destroy() "
+        "only destroys handles created by this object). Optionally detach "
+        "from the given VPSS group/channel first (best effort). Returns True "
+        "when an existing region was destroyed, False when the handle did "
+        "not exist.");
 
 #ifdef TDL_PY_WITH_NPU
   // --- NPU inference: result structures ------------------------------------
