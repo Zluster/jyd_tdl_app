@@ -18,9 +18,23 @@ authors = [
 
 license = { text = "MIT" }
 
+[project.optional-dependencies]
+bluetooth = ["dbus-fast>=5.0.22"]
+sensors = ["PyYAML>=6.0.3"]
+
 [tool.setuptools]
 # 本目录即包目录：把 "." 映射为包 dara（源码目录名与包名无关，无需改目录）
-packages = ["dara", "dara._mpyc"]
+packages = [
+    "dara",
+    "dara._mpyc",
+    "dara.bus",
+    "dara.core",
+    "dara.device",
+    "dara.iot",
+    "dara.iot.bluetooth",
+    "dara.peripheral",
+    "dara.peripheral._periphery",
+]
 package-dir = { "dara" = "." }
 
 [tool.setuptools.package-data]
@@ -31,4 +45,5 @@ dara = [
     "_mp/drive/*.png",
     "_mp/res/font/*.bin",
     "lv.pyi",
+    "py.typed",
 ]

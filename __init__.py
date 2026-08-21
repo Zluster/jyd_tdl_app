@@ -42,7 +42,17 @@ import importlib.util
 import os
 import sys
 
-_SUBMODULES = ("camera", "image", "nn", "lv")
+_SUBMODULES = (
+    "camera",
+    "image",
+    "nn",
+    "lv",
+    "bus",
+    "core",
+    "device",
+    "iot",
+    "peripheral",
+)
 
 #: from dara import * 导出的名字（经下方 __getattr__ 懒加载子模块）
 __all__ = list(_SUBMODULES)
