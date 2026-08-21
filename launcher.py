@@ -87,6 +87,7 @@ async def main():
     media_links = setup_display_path()  # 持有到 main 结束，勿删
     tdl_py.rgn_destroy(202, 1, 0)
     osd_screen = tdl_py.Osd(handle=202, canvas_count=2)
+    vo_out = None   # on_flush 懒创建的 VoOutput，finally 里最先关闭
 
     loop = asyncio.get_running_loop()
     main_task = asyncio.current_task()
@@ -101,14 +102,14 @@ async def main():
 
         is_flush = False
         def on_flush(x1, y1, x2, y2, data):
-            nonlocal is_flush, media_links
+            nonlocal is_flush, media_links, vo_out
             osd_screen.update()
-            
+
             if (not is_flush) and (not tdl_py.vo_is_enabled(0)):
                 is_flush = True
-                vo = tdl_py.VoOutput()
-                vo.open()
-                media_links.append(vo)
+                vo_out = tdl_py.VoOutput()
+                vo_out.open()
+                media_links.append(vo_out)
         mpy.set_flush_callback(on_flush, bytes_per_pixel=4)
 
         def on_app_launch(app_path : str):
@@ -148,6 +149,12 @@ async def main():
             while True:
                 await asyncio.sleep(0.01)
     finally:
+        # 最先关 VO：屏幕立即熄灭，避免 OSD 拆除瞬间露出底层摄像头画面
+        if vo_out is not None:
+            try:
+                vo_out.close()
+            except Exception as e:
+                print("launcher: vo close error:", e)
         if fw is not None:
             fw.close()   # 框架级摄像头在程序退出时才关闭
         for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):

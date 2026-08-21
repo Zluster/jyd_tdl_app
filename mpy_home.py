@@ -443,7 +443,7 @@ class MainScreen:
                 self.app_category_map["素材管理"].append(app)
             elif app.type & AppTypeFlags.TYPE_FILE_MANAGER:
                 self.app_category_map["文件管理"].append(app)
-            elif app.type & AppTypeFlags.TYPE_NONE:
+            elif app.type == AppTypeFlags.TYPE_NONE:
                 self.app_category_map["我的应用"].append(app)
             if app.subtype & AppTypeFlags.SUB_TYPE_CLASS_1:
                 self.app_category_map["1 人工智能的应用"].append(app)
