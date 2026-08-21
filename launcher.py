@@ -85,7 +85,7 @@ def setup_display_path():
 
 async def main():
     media_links = setup_display_path()  # 持有到 main 结束，勿删
-
+    tdl_py.rgn_destroy(202, 1, 0)
     osd_screen = tdl_py.Osd(handle=202, canvas_count=2)
 
     loop = asyncio.get_running_loop()
