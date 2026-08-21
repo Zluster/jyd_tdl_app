@@ -1,0 +1,34 @@
+# dara 打包配置：在本目录（包根）执行 python3 -m build --wheel
+# 注意：wheel 标签是 py3-none-any，但内含 ARM32 原生 .so，仅供 CV184x 板端安装
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dara"
+version = "0.1.0"
+description = "CV184x 板端 Python SDK：VPSS 取帧 / 传统视觉 / NPU 推理 / 嵌入 LVGL"
+readme = "README.md"
+requires-python = ">=3.10"
+
+authors = [
+    { name = "RMaixtr", email = "aixtr@outlook.com" },
+]
+
+license = { text = "MIT" }
+
+[tool.setuptools]
+# 本目录即包目录：把 "." 映射为包 dara（源码目录名与包名无关，无需改目录）
+packages = ["dara", "dara._mpyc"]
+package-dir = { "dara" = "." }
+
+[tool.setuptools.package-data]
+dara = [
+    "_libs/*.so",
+    "_mp/*.py",
+    "_mp/drive/*.py",
+    "_mp/drive/*.png",
+    "_mp/res/font/*.bin",
+    "lv.pyi",
+]
