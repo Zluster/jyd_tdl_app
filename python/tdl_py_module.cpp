@@ -33,15 +33,20 @@
 #include "tdl_app/osd_region.hpp"
 #include "tdl_app/sys_context.hpp"
 #include "tdl_app/vo_output.hpp"
+#include "tdl_app/rgb_led.hpp"
 
 #ifdef TDL_PY_WITH_NPU
 #include "algorithm/private/vpss_preprocessor.hpp"
 #include "tdl_app/classifier.hpp"
 #include "tdl_app/detector.hpp"
+#include "tdl_app/face_recognizer.hpp"
+#include "tdl_app/hand_gesture_recognizer.hpp"
 #include "tdl_app/instance_segmenter.hpp"
 #include "tdl_app/keypoint_detector.hpp"
 #include "tdl_app/model_descriptor.hpp"
 #include "tdl_app/plate_recognizer.hpp"
+#include "tdl_app/pose_classifier.hpp"
+#include "tdl_app/self_learning_classifier.hpp"
 #include "tdl_app/vision_task_types.hpp"
 #endif
 
@@ -1391,7 +1396,46 @@ NB_MODULE(tdl_py, m) {
       .def("bind", &PyMediaLink::bind)
       .def("unbind", &PyMediaLink::unbind)
       .def_prop_ro("bound", &PyMediaLink::isBound);
+  
+  // --- RGB LED ---------------------------------------------------------------
+  nb::class_<tdl_app::RgbLed>(m, "RgbLed",
+      "RGB LED controller through the dual-OS small core.")
+      .def(nb::init<std::uint8_t>(), nb::arg("pixel_count") = 14)
 
+      .def("set_pixel",
+          [](tdl_app::RgbLed &self, std::uint8_t index,
+              std::uint8_t r, std::uint8_t g, std::uint8_t b) {
+            std::string ignored_error;
+            return self.setPixel(index, {r, g, b}, &ignored_error);
+          },
+          nb::arg("index"), nb::arg("r"), nb::arg("g"), nb::arg("b"))
+
+      .def("set_all",
+           [](tdl_app::RgbLed &self, std::uint8_t r,
+              std::uint8_t g, std::uint8_t b) {
+             std::string ignored_error;
+             return self.setAll(r, g, b, &ignored_error);
+           },
+           nb::arg("r"), nb::arg("g"), nb::arg("b"))
+
+      .def("brightness",
+           [](tdl_app::RgbLed &self, std::uint8_t value) {
+             std::string error;
+            return self.setBrightness(value, &error);
+           },
+           nb::arg("value"))
+
+      .def("show", [](tdl_app::RgbLed &self) {
+        std::string error;
+        return self.show(&error);
+      })
+
+      .def("clear", [](tdl_app::RgbLed &self) {
+        std::string error;
+        return self.clear(&error);
+      });
+      
+  
   // --- state queries (for idempotent setup scripts) --------------------------
   m.def("vo_is_enabled",
         [](int device) {
@@ -1496,6 +1540,38 @@ NB_MODULE(tdl_py, m) {
       .def_ro("width", &tdl_app::KeypointResult::width)
       .def_ro("height", &tdl_app::KeypointResult::height)
       .def_ro("points", &tdl_app::KeypointResult::points);
+
+  nb::class_<tdl_app::HandGestureResult>(m, "HandGestureResult",
+      "One detected hand and its 21 keypoints. Coordinates are in the "
+      "source-frame coordinate system.")
+      .def_ro("box", &tdl_app::HandGestureResult::box)
+      .def_ro("keypoints", &tdl_app::HandGestureResult::keypoints)
+      .def_ro("score", &tdl_app::HandGestureResult::score)
+      .def_prop_ro("label", [](const tdl_app::HandGestureResult &self) {
+        return std::string(tdl_app::handGestureName(self.gesture));
+      })
+      .def_prop_ro("gesture", [](const tdl_app::HandGestureResult &self) {
+        return std::string(tdl_app::handGestureName(self.gesture));
+      });
+
+  nb::class_<tdl_app::SelfLearningClassResult>(m, "SelfLearningClassResult",
+      "One self-learning class ranked by cosine similarity.")
+      .def_ro("label", &tdl_app::SelfLearningClassResult::label)
+      .def_ro("score", &tdl_app::SelfLearningClassResult::score)
+      .def_ro("sample_count", &tdl_app::SelfLearningClassResult::sample_count);
+
+  nb::class_<tdl_app::SelfLearningClassificationProfile>(
+      m, "SelfLearningClassificationProfile")
+      .def_ro("feature_ms", &tdl_app::SelfLearningClassificationProfile::feature_ms)
+      .def_ro("match_ms", &tdl_app::SelfLearningClassificationProfile::match_ms)
+      .def_ro("total_ms", &tdl_app::SelfLearningClassificationProfile::total_ms);
+
+  nb::class_<tdl_app::SelfLearningClassificationResult>(
+      m, "SelfLearningClassificationResult",
+      "Top-k self-learning classification results.")
+      .def_ro("classes", &tdl_app::SelfLearningClassificationResult::classes)
+      .def_ro("feature_dim", &tdl_app::SelfLearningClassificationResult::feature_dim)
+      .def_prop_ro("empty", &tdl_app::SelfLearningClassificationResult::empty);
 
   nb::class_<tdl_app::InstanceSegment>(m, "InstanceSegment",
       "One segmented instance: detection box + polygon outline.")
@@ -1666,6 +1742,292 @@ NB_MODULE(tdl_py, m) {
       .def_prop_ro("initialized", &tdl_app::KeypointDetector::initialized)
       .def_prop_ro("model_type", &tdl_app::KeypointDetector::modelType);
 
+  nb::class_<tdl_app::PoseClassificationResult>(m, "PoseClassificationResult",
+      "One body-pose classification result. Keypoints remain in source-frame "
+      "coordinates.")
+      .def_ro("keypoints", &tdl_app::PoseClassificationResult::keypoints)
+      .def_ro("confidence", &tdl_app::PoseClassificationResult::confidence)
+      .def_ro("history_size", &tdl_app::PoseClassificationResult::history_size)
+      .def_prop_ro("label", [](const tdl_app::PoseClassificationResult &self) {
+        return std::string(tdl_app::humanPoseClassName(self.pose));
+      })
+      .def_prop_ro("raw_label",
+                   [](const tdl_app::PoseClassificationResult &self) {
+        return std::string(tdl_app::humanPoseClassName(self.raw_pose));
+      })
+      .def_prop_ro("keypoint_ms",
+                   [](const tdl_app::PoseClassificationResult &self) {
+        return self.profile.keypoint_ms;
+      })
+      .def_prop_ro("total_ms", [](const tdl_app::PoseClassificationResult &self) {
+        return self.profile.total_ms;
+      });
+
+  nb::class_<tdl_app::PoseClassifier>(m, "PoseClassifier",
+      "Online body-pose classifier: COCO-17 keypoints plus temporal "
+      "geometric rules. classify() accepts a VpssCamera frame.")
+      .def(nb::init<>())
+      .def("__init__",
+           [](tdl_app::PoseClassifier *self, const std::string &model_spec,
+              float keypoint_threshold, float ema_alpha, int smooth_frames,
+              const std::string &firmware) {
+             new (self) tdl_app::PoseClassifier();
+             tdl_app::PoseClassifier::Config config;
+             config.keypoint =
+                 tdl_app::ModelSessionConfig::fromSpec(model_spec, firmware);
+             config.keypoint_threshold = keypoint_threshold;
+             config.coordinate_ema_alpha = ema_alpha;
+             config.label_smooth_frames = smooth_frames;
+             std::string error;
+             bool ok = false;
+             {
+               nb::gil_scoped_release guard;
+               ok = self->load(config, &error);
+             }
+             if (!ok) raise("pose classifier load failed: " + error);
+           },
+           nb::arg("model"), nb::arg("keypoint_threshold") = 0.05f,
+           nb::arg("ema_alpha") = 0.65f, nb::arg("smooth_frames") = 5,
+           nb::arg("firmware") = "",
+           "Create and load a COCO-17 pose classifier.")
+      .def("load",
+           [](tdl_app::PoseClassifier &self, const std::string &model_spec,
+              float keypoint_threshold, float ema_alpha, int smooth_frames,
+              const std::string &firmware) {
+             tdl_app::PoseClassifier::Config config;
+             config.keypoint =
+                 tdl_app::ModelSessionConfig::fromSpec(model_spec, firmware);
+             config.keypoint_threshold = keypoint_threshold;
+             config.coordinate_ema_alpha = ema_alpha;
+             config.label_smooth_frames = smooth_frames;
+             std::string error;
+             bool ok = false;
+             {
+               nb::gil_scoped_release guard;
+               ok = self.load(config, &error);
+             }
+             if (!ok) raise("pose classifier load failed: " + error);
+           },
+           nb::arg("model"), nb::arg("keypoint_threshold") = 0.05f,
+           nb::arg("ema_alpha") = 0.65f, nb::arg("smooth_frames") = 5,
+           nb::arg("firmware") = "", "Load or replace the pose model.")
+      .def("classify", [](tdl_app::PoseClassifier &self, PyFrame &frame) {
+        const tdl_app::Frame sdk_frame = sdkFrameFrom(frame);
+        tdl_app::PoseClassificationResult result;
+        std::string error;
+        bool ok = false;
+        {
+          nb::gil_scoped_release guard;
+          ok = self.runFrame(sdk_frame, &result, &error);
+        }
+        if (!ok) raise("pose classification failed: " + error);
+        return result;
+      }, nb::arg("frame"),
+      "Classify one live frame (zero-copy camera input, GIL released).")
+      .def("classify_image",
+           [](tdl_app::PoseClassifier &self, const std::string &path) {
+             tdl_app::PoseClassificationResult result;
+             std::string error;
+             bool ok = false;
+             {
+               nb::gil_scoped_release guard;
+               ok = self.run(path, &result, &error);
+             }
+             if (!ok) raise("pose classification failed: " + error);
+             return result;
+           },
+           nb::arg("path"), "Classify one image file (GIL released).")
+      .def("reset_smoothing", &tdl_app::PoseClassifier::resetSmoothing,
+           "Clear the temporal keypoint and label history.")
+      .def("reset", &tdl_app::PoseClassifier::reset, "Unload the model.")
+      .def_prop_ro("initialized", &tdl_app::PoseClassifier::initialized);
+  m.attr("BodyPoseClassifier") = m.attr("PoseClassifier");
+
+  nb::class_<tdl_app::HandGestureRecognizer>(m, "HandGestureRecognizer",
+      "Online hand gesture recognition: hand detection, 21 keypoints, and "
+      "geometry-based gesture classification.")
+      .def(nb::init<>())
+      .def("load",
+           [](tdl_app::HandGestureRecognizer &self,
+              const std::string &detector_model,
+              const std::string &keypoint_model, float hand_threshold,
+              float iou_threshold, float roi_expand_ratio, int max_hands,
+              const std::string &firmware) {
+             tdl_app::HandGestureRecognizer::Config config;
+             config.detector_model_spec = detector_model;
+             config.keypoint_model_spec = keypoint_model;
+             config.hand_threshold = hand_threshold;
+             config.iou_threshold = iou_threshold;
+             config.roi_expand_ratio = roi_expand_ratio;
+             config.max_hands = max_hands;
+             config.firmware = firmware;
+             std::string error;
+             bool ok = false;
+             {
+               nb::gil_scoped_release guard;
+               ok = self.load(config, &error);
+             }
+             if (!ok) raise("hand gesture load failed: " + error);
+           },
+           nb::arg("detector_model"), nb::arg("keypoint_model"),
+           nb::arg("hand_threshold") = 0.35f,
+           nb::arg("iou_threshold") = 0.45f,
+           nb::arg("roi_expand_ratio") = 0.25f,
+           nb::arg("max_hands") = 2, nb::arg("firmware") = "",
+           "Load the hand detector and 21-keypoint model.")
+      .def("__init__",
+           [](tdl_app::HandGestureRecognizer *self,
+              const std::string &detector_model,
+              const std::string &keypoint_model, float hand_threshold,
+              int max_hands, const std::string &firmware) {
+             new (self) tdl_app::HandGestureRecognizer();
+             tdl_app::HandGestureRecognizer::Config config;
+             config.detector_model_spec = detector_model;
+             config.keypoint_model_spec = keypoint_model;
+             config.hand_threshold = hand_threshold;
+             config.max_hands = max_hands;
+             config.firmware = firmware;
+             std::string error;
+             bool ok = false;
+             {
+               nb::gil_scoped_release guard;
+               ok = self->load(config, &error);
+             }
+             if (!ok) raise("hand gesture load failed: " + error);
+           },
+           nb::arg("detector_model"), nb::arg("keypoint_model"),
+           nb::arg("hand_threshold") = 0.35f, nb::arg("max_hands") = 2,
+           nb::arg("firmware") = "",
+           "Create and load an online hand gesture recognizer.")
+      .def("recognize",
+           [](tdl_app::HandGestureRecognizer &self, PyFrame &frame) {
+             const tdl_app::Frame sdk_frame = sdkFrameFrom(frame);
+             std::vector<tdl_app::HandGestureResult> results;
+             std::string error;
+             bool ok = false;
+             {
+               nb::gil_scoped_release guard;
+               ok = self.recognizeFrame(sdk_frame, &results, &error);
+             }
+             if (!ok) raise("hand gesture inference failed: " + error);
+             return results;
+           },
+           nb::arg("frame"),
+           "Recognize gestures on one live camera frame (GIL released).")
+      .def("reset", [](tdl_app::HandGestureRecognizer &self) {
+        // HandGestureRecognizer has no public reset; replacing it is the
+        // supported way to release model resources from Python.
+        self.~HandGestureRecognizer();
+        new (&self) tdl_app::HandGestureRecognizer();
+      }, "Unload the hand gesture models.")
+      .def_prop_ro("initialized", &tdl_app::HandGestureRecognizer::initialized);
+
+  nb::class_<tdl_app::SelfLearningClassifier>(m, "SelfLearningClassifier",
+      "Sipeed/Maix-style self-learning image classifier. Samples are stored "
+      "as feature vectors and matched with cosine similarity.")
+      .def(nb::init<>())
+      .def("__init__",
+           [](tdl_app::SelfLearningClassifier *self,
+              const std::string &model_spec, const std::string &firmware) {
+             new (self) tdl_app::SelfLearningClassifier();
+             std::string error;
+             bool ok = false;
+             {
+               nb::gil_scoped_release guard;
+               ok = self->load(model_spec, firmware, &error);
+             }
+             if (!ok) raise("self-learning model load failed: " + error);
+           },
+           nb::arg("model_spec"), nb::arg("firmware") = "",
+           "Create and load a self-learning feature model.")
+      .def("load",
+           [](tdl_app::SelfLearningClassifier &self,
+              const std::string &model_spec, const std::string &firmware) {
+             std::string error;
+             bool ok = false;
+             {
+               nb::gil_scoped_release guard;
+               ok = self.load(model_spec, firmware, &error);
+             }
+             if (!ok) raise("self-learning model load failed: " + error);
+           },
+           nb::arg("model_spec"), nb::arg("firmware") = "",
+           "Load the feature model.")
+      .def("add_sample",
+           [](tdl_app::SelfLearningClassifier &self, const std::string &label,
+              const std::string &image_path) {
+             std::string error;
+             bool ok = false;
+             {
+               nb::gil_scoped_release guard;
+               ok = self.addSample(label, image_path, &error);
+             }
+             if (!ok) raise("self-learning add_sample failed: " + error);
+           },
+           nb::arg("label"), nb::arg("image"),
+           "Extract and add one labeled image sample.")
+      .def("classify",
+           [](tdl_app::SelfLearningClassifier &self, PyFrame &frame, int top_k) {
+             const tdl_app::Frame sdk_frame = sdkFrameFrom(frame);
+             tdl_app::SelfLearningClassificationResult result;
+             tdl_app::SelfLearningClassificationProfile profile;
+             std::string error;
+             bool ok = false;
+             {
+               nb::gil_scoped_release guard;
+               ok = self.classifyFrame(sdk_frame, top_k, &result, &profile,
+                                       &error);
+             }
+             if (!ok) raise("self-learning classify failed: " + error);
+             return result;
+           },
+           nb::arg("frame"), nb::arg("top_k") = 1,
+           "Classify one live camera frame.")
+      .def("classify_image",
+           [](tdl_app::SelfLearningClassifier &self, const std::string &path,
+              int top_k) {
+             tdl_app::SelfLearningClassificationResult result;
+             std::string error;
+             bool ok = false;
+             {
+               nb::gil_scoped_release guard;
+               ok = self.classify(path, top_k, &result, &error);
+             }
+             if (!ok) raise("self-learning classify failed: " + error);
+             return result;
+           },
+           nb::arg("image"), nb::arg("top_k") = 1,
+           "Classify one image file.")
+      .def("save_bank",
+           [](const tdl_app::SelfLearningClassifier &self,
+              const std::string &path) {
+             std::string error;
+             if (!self.saveBank(path, &error)) {
+               raise("self-learning save_bank failed: " + error);
+             }
+           }, nb::arg("path"))
+      .def("load_bank",
+           [](tdl_app::SelfLearningClassifier &self, const std::string &path) {
+             std::string error;
+             if (!self.loadBank(path, &error)) {
+               raise("self-learning load_bank failed: " + error);
+             }
+           }, nb::arg("path"))
+      .def("save", [](const tdl_app::SelfLearningClassifier &self,
+                      const std::string &path) {
+             std::string error;
+             if (!self.saveBank(path, &error)) {
+               raise("self-learning save failed: " + error);
+             }
+           }, nb::arg("path"), "Maix-compatible alias for save_bank().")
+      .def("clear", &tdl_app::SelfLearningClassifier::clearBank)
+      .def("learn", [](tdl_app::SelfLearningClassifier &) {},
+           "Maix-compatible no-op: prototypes are updated as samples are added.")
+      .def_prop_ro("initialized", &tdl_app::SelfLearningClassifier::initialized)
+      .def_prop_ro("feature_dim", &tdl_app::SelfLearningClassifier::featureDim)
+      .def_prop_ro("sample_count", &tdl_app::SelfLearningClassifier::sampleCount)
+      .def_prop_ro("class_count", &tdl_app::SelfLearningClassifier::classCount);
+
   nb::class_<tdl_app::InstanceSegmenter>(m, "InstanceSegmenter",
       "Instance segmentation (YOLOv8-seg etc.). segment() runs on a "
       "VpssCamera frame; segment_image() on a file path. Each instance "
@@ -1769,6 +2131,155 @@ NB_MODULE(tdl_py, m) {
       .def_prop_ro("initialized", &tdl_app::PlateRecognizer::initialized)
       .def_prop_ro("model_type", &tdl_app::PlateRecognizer::modelType);
 
+  nb::class_<tdl_app::FaceRecognitionResult>(m, "FaceRecognitionResult",
+      "One face recognition result. Box coordinates are in frame space.")
+      .def_ro("box", &tdl_app::FaceRecognitionResult::box)
+      .def_ro("name", &tdl_app::FaceRecognitionResult::name)
+      .def_ro("class_id", &tdl_app::FaceRecognitionResult::class_id)
+      .def_ro("similarity", &tdl_app::FaceRecognitionResult::similarity)
+      .def_ro("matched", &tdl_app::FaceRecognitionResult::matched)
+      .def_prop_ro("x", [](const tdl_app::FaceRecognitionResult &self) {
+        return self.box.x1;
+      })
+      .def_prop_ro("y", [](const tdl_app::FaceRecognitionResult &self) {
+        return self.box.y1;
+      })
+      .def_prop_ro("w", [](const tdl_app::FaceRecognitionResult &self) {
+        return self.box.width();
+      })
+      .def_prop_ro("h", [](const tdl_app::FaceRecognitionResult &self) {
+        return self.box.height();
+      })
+      .def_prop_ro("score", [](const tdl_app::FaceRecognitionResult &self) {
+        return self.similarity;
+      })
+      .def_prop_ro("points", [](const tdl_app::FaceRecognitionResult &self) {
+        return self.box.landmarks;
+      });
+
+  nb::class_<tdl_app::FaceRecognizer>(m, "FaceRecognizer",
+      "Online face recognition: SCRFD detection plus face embedding.")
+      .def(nb::init<>())
+      .def("__init__",
+           [](tdl_app::FaceRecognizer *self, const std::string &detect_model,
+              const std::string &feature_model, bool dual_buff,
+              const std::string &firmware) {
+             new (self) tdl_app::FaceRecognizer();
+             tdl_app::FaceRecognizer::Config config;
+             config.detector_model_spec = detect_model;
+             config.feature_model_spec = feature_model;
+             config.firmware = firmware;
+             std::string error;
+             bool ok = false;
+             {
+               nb::gil_scoped_release guard;
+               ok = self->load(config, &error);
+             }
+             if (!ok) raise("face recognizer load failed: " + error);
+             (void) dual_buff;
+           },
+           nb::arg("detect_model"), nb::arg("feature_model"),
+           nb::arg("dual_buff") = true, nb::arg("firmware") = "",
+           "Create and load a two-model face recognizer. dual_buff is "
+           "accepted for MaixPy API compatibility.")
+      .def("load",
+           [](tdl_app::FaceRecognizer &self,
+              const std::string &detector_model,
+              const std::string &feature_model, float face_threshold,
+              float match_threshold, int max_faces,
+              const std::string &firmware) {
+             tdl_app::FaceRecognizer::Config config;
+             config.detector_model_spec = detector_model;
+             config.feature_model_spec = feature_model;
+             config.face_threshold = face_threshold;
+             config.match_threshold = match_threshold;
+             config.max_faces = max_faces;
+             config.firmware = firmware;
+             std::string error;
+             bool ok = false;
+             {
+               nb::gil_scoped_release guard;
+               ok = self.load(config, &error);
+             }
+             if (!ok) raise("face recognizer load failed: " + error);
+           },
+           nb::arg("detector_model_spec"), nb::arg("feature_model_spec"),
+           nb::arg("face_threshold") = 0.25f,
+           nb::arg("match_threshold") = 0.50f,
+           nb::arg("max_faces") = 3, nb::arg("firmware") = "",
+           "Load SCRFD and feature models (GIL released).")
+      .def("enroll",
+           [](tdl_app::FaceRecognizer &self, PyFrame &frame,
+              const std::string &name) {
+             const tdl_app::Frame sdk_frame = sdkFrameFrom(frame);
+             std::string error;
+             bool ok = false;
+             {
+               nb::gil_scoped_release guard;
+               ok = self.enrollFrame(name, sdk_frame, &error);
+             }
+             if (!ok) raise("face enroll failed: " + error);
+           },
+           nb::arg("frame"), nb::arg("name"),
+           "Enroll the largest face from one live frame.")
+      .def("recognize",
+           [](tdl_app::FaceRecognizer &self, PyFrame &frame, float conf_th,
+              float iou_th, float match_th, bool get_feature) {
+             const tdl_app::Frame sdk_frame = sdkFrameFrom(frame);
+             std::vector<tdl_app::FaceRecognitionResult> results;
+             std::string error;
+             bool ok = false;
+             {
+               nb::gil_scoped_release guard;
+               ok = self.recognizeFrame(sdk_frame, conf_th, iou_th, match_th,
+                                        &results, &error);
+             }
+             if (!ok) raise("face recognition failed: " + error);
+             if (!get_feature) {
+               for (auto &result : results) result.feature.clear();
+             }
+             return results;
+           },
+           nb::arg("frame"), nb::arg("conf_th") = 0.5f,
+           nb::arg("iou_th") = 0.45f, nb::arg("match_th") = 0.85f,
+           nb::arg("get_feature") = false,
+           "Recognize faces in one live frame (MaixPy-compatible controls).")
+      .def("add_face",
+           [](tdl_app::FaceRecognizer &self,
+              const tdl_app::FaceRecognitionResult &face,
+              const std::string &label) {
+             std::string error;
+             if (!self.addFace(face, label, &error)) {
+               raise("add_face failed: " + error);
+             }
+           },
+           nb::arg("face"), nb::arg("label"),
+           "Add one result returned with get_feature=True to the face library.")
+      .def("save_faces",
+           [](const tdl_app::FaceRecognizer &self, const std::string &path) {
+             std::string error;
+             if (!self.saveFaces(path, &error)) {
+               raise("save_faces failed: " + error);
+             }
+           }, nb::arg("path"), "Save the registered face library.")
+      .def("load_faces",
+           [](tdl_app::FaceRecognizer &self, const std::string &path) {
+             std::string error;
+             if (!self.loadFaces(path, &error)) {
+               raise("load_faces failed: " + error);
+             }
+           }, nb::arg("path"), "Load a registered face library.")
+      .def("remove", &tdl_app::FaceRecognizer::remove, nb::arg("name"))
+      .def("clear", &tdl_app::FaceRecognizer::clear)
+      .def("names", &tdl_app::FaceRecognizer::names)
+      .def_prop_ro("labels", [](const tdl_app::FaceRecognizer &self) {
+        std::vector<std::string> labels{"unknown"};
+        const std::vector<std::string> names = self.names();
+        labels.insert(labels.end(), names.begin(), names.end());
+        return labels;
+      })
+
+      .def_prop_ro("initialized", &tdl_app::FaceRecognizer::initialized);
   nb::class_<PyFaceDenseLandmark>(m, "FaceDenseLandmark",
       "Dense facial landmark estimator (face_dense_real.mud). Second-stage "
       "model: detect faces first (Detector + scrfd_real.mud or "
