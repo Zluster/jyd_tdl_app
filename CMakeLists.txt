@@ -33,7 +33,9 @@ set(TDL_APP_FULL_ONLY_SOURCES
   src/algorithm/detector.cpp
   src/algorithm/face_attribute_classifier.cpp
   src/algorithm/face_detector.cpp
+  src/algorithm/face_recognizer.cpp
   src/algorithm/feature_extractor.cpp
+  src/algorithm/hand_gesture_recognizer.cpp
   src/algorithm/instance_segmenter.cpp
   src/algorithm/keypoint_detector.cpp
   src/algorithm/lane_detector.cpp
@@ -138,6 +140,10 @@ else()
 endif()
 
 if(TDL_APP_HAS_FFMPEG)
+  # tdl_app_sdk is static.  Keep FFmpeg only in binaries that reference its
+  # audio-file decoder instead of emitting unused FFmpeg DT_NEEDED entries.
+  add_link_options(-Wl,--as-needed)
+
   set_property(SOURCE src/media/private/audio_file_decoder.cpp APPEND PROPERTY
     COMPILE_OPTIONS "-isystem${TDL_APP_FFMPEG_INCLUDE_DIR}")
   set_property(SOURCE src/media/private/audio_file_decoder.cpp APPEND PROPERTY
@@ -707,6 +713,24 @@ if(TDL_APP_BUILD_DEMOS)
     target_include_directories(tdl_face_recognition_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
     target_link_libraries(tdl_face_recognition_demo PRIVATE tdl_app_sdk)
 
+    add_executable(tdl_camera_face_recognizer_test
+      apps/tdl_camera_face_recognizer_test.cpp
+    )
+    target_include_directories(tdl_camera_face_recognizer_test PRIVATE
+      "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
+    target_link_libraries(tdl_camera_face_recognizer_test PRIVATE tdl_app_sdk)
+    target_link_options(tdl_camera_face_recognizer_test PRIVATE
+      -Wl,--as-needed)
+
+    add_executable(tdl_camera_hand_gesture_test
+      apps/tdl_camera_hand_gesture_test.cpp
+    )
+    target_include_directories(tdl_camera_hand_gesture_test PRIVATE
+      "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
+    target_link_libraries(tdl_camera_hand_gesture_test PRIVATE tdl_app_sdk)
+    target_link_options(tdl_camera_hand_gesture_test PRIVATE
+      -Wl,--as-needed)
+
     add_executable(tdl_plate_recognize_demo
       apps/tdl_plate_recognize_demo.cpp
       apps/demo_support.cpp
@@ -871,6 +895,8 @@ if(TDL_APP_BUILD_DEMOS)
       tdl_face_attribute_demo
       tdl_face_attr_pipeline_demo
       tdl_face_recognition_demo
+      tdl_camera_face_recognizer_test
+      tdl_camera_hand_gesture_test
       tdl_plate_recognize_demo
       tdl_camera_detect_demo
       tdl_camera_scrfd_benchmark_demo

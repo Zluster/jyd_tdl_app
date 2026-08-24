@@ -1,6 +1,8 @@
 #include "tdl_app/sys_context.hpp"
 
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 #include <mutex>
 
 #include "cvi_common.h"
@@ -74,13 +76,20 @@ bool SysContext::open(std::string *error) {
 }
 
 void SysContext::close() {
+  const bool profile = std::getenv("TDL_BENCH_PROFILE") != nullptr;
+  if (profile)
+    std::fprintf(stderr, "[sys] close begin opened=%d own_sys=%d\n",
+                 opened_ ? 1 : 0, own_sys_ ? 1 : 0);
   if (own_sys_) {
+    if (profile) std::fprintf(stderr, "[sys] CVI_SYS_Exit begin\n");
     CVI_SYS_Exit();
+    if (profile) std::fprintf(stderr, "[sys] CVI_SYS_Exit end\n");
     std::lock_guard<std::mutex> lock(g_runtime_init_mutex);
     g_runtime_initialized = false;
     own_sys_ = false;
   }
   opened_ = false;
+  if (profile) std::fprintf(stderr, "[sys] close end\n");
 }
 
 bool SysContext::isOpen() const { return opened_; }

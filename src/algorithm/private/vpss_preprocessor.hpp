@@ -232,7 +232,20 @@ class VpssPreprocessor {
     return true;
   }
 
-  void close() {
+  void close() noexcept {
+    try {
+      closeImpl();
+    } catch (const std::exception &exception) {
+      std::fprintf(stderr, "VPSS preprocessor close ignored during shutdown: %s\n",
+                   exception.what());
+    } catch (...) {
+      std::fprintf(stderr,
+                   "VPSS preprocessor close ignored an unknown shutdown exception\n");
+    }
+  }
+
+ private:
+  void closeImpl() {
     std::lock_guard<std::recursive_mutex> lock(mutex_);
     if (channel_enabled_) {
       CVI_VPSS_DisableChn(group_id_, 0);
@@ -275,6 +288,8 @@ class VpssPreprocessor {
     direct_tensor_ = false;
     opened_ = false;
   }
+
+ public:
 
   bool isOpen() const { return opened_; }
   bm_device_mem_t inputMemory() const { return tensor_memory_; }

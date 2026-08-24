@@ -1,6 +1,7 @@
 #include "tdl_app/nn_feature.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cctype>
@@ -18,6 +19,7 @@
 #include <opencv2/imgproc.hpp>
 
 #include "algorithm/private/vpss_preprocessor.hpp"
+#include "algorithm/private/bmrt_utils.hpp"
 #include "bmlib_runtime.h"
 #include "bmruntime_interface.h"
 
@@ -29,6 +31,16 @@ constexpr int kInputChannels = 3;
 bool featureTraceEnabled() {
   const char *value = std::getenv("TDL_FEATURE_TRACE");
   return value && value[0] != '\0' && value[0] != '0';
+}
+
+bool featureProfileEnabled() {
+  const char *value = std::getenv("TDL_BENCH_PROFILE");
+  return value && value[0] != '\0' && value[0] != '0';
+}
+
+double elapsedMs(std::chrono::steady_clock::time_point begin,
+                 std::chrono::steady_clock::time_point end) {
+  return std::chrono::duration<double, std::milli>(end - begin).count();
 }
 
 void featureTrace(const char *message) {
@@ -146,9 +158,7 @@ class NnFeature::CustomRuntime {
             std::string *error) {
     close();
 
-    bm_status_t status = bm_dev_request(&handle_, 0);
-    if (status != BM_SUCCESS) {
-      setError(error, "bm_dev_request failed");
+    if (!bmrt_runtime::acquireDevice(&handle_, error)) {
       return false;
     }
 
@@ -156,7 +166,7 @@ class NnFeature::CustomRuntime {
       setenv("BMRUNTIME_USING_FIRMWARE", config.bmrt_firmware.c_str(), 0);
     }
 
-    runtime_ = bmrt_create(handle_);
+    runtime_ = bmrt_runtime::createRuntime(handle_);
     if (!runtime_) {
       setError(error, "bmrt_create failed");
       return false;
@@ -269,6 +279,7 @@ class NnFeature::CustomRuntime {
   bool inferFrame(const Frame &frame, const Box *roi, AlgorithmResult *result,
                   std::string *error) {
     std::lock_guard<std::mutex> lock(infer_mutex_);
+    const auto total_begin = std::chrono::steady_clock::now();
     if (!opened_) {
       setError(error, "feature runtime is not initialized");
       return false;
@@ -284,6 +295,7 @@ class NnFeature::CustomRuntime {
     if (!ensureHardwarePreprocessor(error)) {
       return false;
     }
+    const auto setup_end = std::chrono::steady_clock::now();
     if (host_launch_from_device_) {
       setError(error,
                "FEATURE_CLIP_IMAGE camera inference is unsupported on CV184X; "
@@ -299,15 +311,18 @@ class NnFeature::CustomRuntime {
                    error)) {
       return false;
     }
+    const auto preprocess_begin = std::chrono::steady_clock::now();
     if (!hardware_preprocessor_->preprocess(frame.native,
                                              roi ? &hardware_roi : nullptr,
                                              error)) {
       return false;
     }
+    const auto preprocess_end = std::chrono::steady_clock::now();
     featureTrace("VPSS feature preprocess complete");
 
     std::vector<float> embedding;
     bool launched = false;
+    const auto launch_begin = std::chrono::steady_clock::now();
     if (host_launch_from_device_) {
       const bm_shape_t input_shape = net_info_->stages[0].input_shapes[0];
       const size_t input_bytes =
@@ -328,12 +343,25 @@ class NnFeature::CustomRuntime {
     if (!launched) {
       return false;
     }
+    const auto launch_end = std::chrono::steady_clock::now();
+    const auto normalize_begin = std::chrono::steady_clock::now();
     if (l2_normalize_) {
       normalizeEmbedding(&embedding);
     }
+    const auto normalize_end = std::chrono::steady_clock::now();
     featureTrace("VPSS feature embedding normalized");
     *result = AlgorithmResult{};
     result->feature = std::move(embedding);
+    if (featureProfileEnabled()) {
+      std::fprintf(stderr,
+                   "[profile] feature face: total=%.3f ms setup=%.3f "
+                   "vpss=%.3f launch=%.3f normalize=%.3f\n",
+                   elapsedMs(total_begin, normalize_end),
+                   elapsedMs(total_begin, setup_end),
+                   elapsedMs(preprocess_begin, preprocess_end),
+                   elapsedMs(launch_begin, launch_end),
+                   elapsedMs(normalize_begin, normalize_end));
+    }
     featureTrace("VPSS feature result returned");
     return true;
   }
@@ -373,7 +401,20 @@ class NnFeature::CustomRuntime {
     return true;
   }
 
-  void close() {
+  void close() noexcept {
+    try {
+      closeImpl();
+    } catch (const std::exception &exception) {
+      std::fprintf(stderr, "feature close ignored during shutdown: %s\n",
+                   exception.what());
+    } catch (...) {
+      std::fprintf(stderr,
+                   "feature close ignored an unknown shutdown exception\n");
+    }
+  }
+
+ private:
+  void closeImpl() {
     featureTrace("feature close begin");
     hardware_preprocessor_.reset();
     featureTrace("feature VPSS released");
@@ -387,14 +428,21 @@ class NnFeature::CustomRuntime {
     host_output_shapes_.clear();
     if (runtime_) {
       featureTrace("feature BMRT destroy begin");
-      bmrt_destroy(runtime_);
+      try {
+        bmrt_runtime::destroyRuntime(runtime_);
+      } catch (const std::exception &exception) {
+        std::fprintf(stderr, "feature bmrt_destroy ignored during shutdown: %s\n",
+                     exception.what());
+      } catch (...) {
+        std::fprintf(stderr,
+                     "feature bmrt_destroy ignored an unknown shutdown exception\n");
+      }
       runtime_ = nullptr;
       featureTrace("feature BMRT destroyed");
     }
     if (handle_) {
       featureTrace("feature device free begin");
-      bm_dev_free(handle_);
-      handle_ = nullptr;
+      bmrt_runtime::releaseDevice(&handle_);
       featureTrace("feature device freed");
     }
     net_info_ = nullptr;

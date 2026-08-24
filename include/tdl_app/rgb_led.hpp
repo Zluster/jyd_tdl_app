@@ -36,6 +36,8 @@ class RgbLed {
   bool setPixelCount(std::uint8_t pixel_count, std::string *error = nullptr);
   bool setBrightness(std::uint8_t brightness, std::string *error = nullptr);
   bool setPixel(std::uint8_t index, Color color, std::string *error = nullptr);
+  bool setPixel(std::uint8_t index, std::uint8_t r, std::uint8_t g,
+                std::uint8_t b, std::string *error = nullptr);
   bool setAll(Color color, std::string *error = nullptr);
   bool setAll(std::uint8_t r, std::uint8_t g, std::uint8_t b,
               std::string *error = nullptr);

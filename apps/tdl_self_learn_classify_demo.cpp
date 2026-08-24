@@ -194,10 +194,5 @@ int main(int argc, char **argv) {
     }
   }
 
-  // The CV184X BMRT feature runtime can fault during process-global teardown
-  // after this one-shot file demo has already released every result. Flush the
-  // user-visible output and bypass that runtime shutdown path.
-  std::cout.flush();
-  std::fflush(nullptr);
-  std::_Exit(0);
+  return 0;
 }

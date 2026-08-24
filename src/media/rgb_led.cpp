@@ -158,6 +158,11 @@ bool RgbLed::setPixel(std::uint8_t index, Color color, std::string *error) {
   return applyPixel(index, error);
 }
 
+bool RgbLed::setPixel(std::uint8_t index, std::uint8_t r, std::uint8_t g,
+                    std::uint8_t b, std::string *error) {
+  return setPixel(index, Color{r, g, b}, error);
+}
+
 bool RgbLed::setAll(Color color, std::string *error) {
   if (!enabled_) {
     return setFailure(last_error_, "RGBLED is not enabled", error);
@@ -191,7 +196,7 @@ bool RgbLed::clear(std::string *error) {
     last_error_ = ret;
     return setFailure(ret, "CVI_SYS_RGBLED_Clear", error);
   }
-  return true;
+  return show(error);  // Apply the clear immediately.
 }
 
 bool RgbLed::show(std::string *error) {

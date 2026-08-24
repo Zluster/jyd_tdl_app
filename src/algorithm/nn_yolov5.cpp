@@ -21,6 +21,7 @@
 #include <opencv2/imgproc.hpp>
 
 #include "algorithm/private/vpss_preprocessor.hpp"
+#include "algorithm/private/bmrt_utils.hpp"
 
 namespace tdl_app {
 namespace {
@@ -167,9 +168,7 @@ class NnYolov5::CustomRuntime {
             std::string *error) {
     close();
 
-    bm_status_t status = bm_dev_request(&handle_, 0);
-    if (status != BM_SUCCESS) {
-      setError(error, "bm_dev_request failed");
+    if (!bmrt_runtime::acquireDevice(&handle_, error)) {
       return false;
     }
 
@@ -177,7 +176,7 @@ class NnYolov5::CustomRuntime {
       setenv("BMRUNTIME_USING_FIRMWARE", config.bmrt_firmware.c_str(), 0);
     }
 
-    runtime_ = bmrt_create(handle_);
+    runtime_ = bmrt_runtime::createRuntime(handle_);
     if (!runtime_) {
       setError(error, "bmrt_create failed");
       return false;
@@ -388,12 +387,11 @@ class NnYolov5::CustomRuntime {
     hardware_preprocessor_.reset();
     releaseOutputBuffers();
     if (runtime_) {
-      bmrt_destroy(runtime_);
+      bmrt_runtime::destroyRuntime(runtime_);
       runtime_ = nullptr;
     }
     if (handle_) {
-      bm_dev_free(handle_);
-      handle_ = nullptr;
+      bmrt_runtime::releaseDevice(&handle_);
     }
     opened_ = false;
     net_info_ = nullptr;

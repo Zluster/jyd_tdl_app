@@ -8,6 +8,7 @@
 #include <cctype>
 #include <cstdint>
 #include <cstring>
+#include <exception>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -231,9 +232,7 @@ class NnYolov8::CustomRuntime {
             std::string *error) {
     close();
 
-    bm_status_t status = bm_dev_request(&handle_, 0);
-    if (status != BM_SUCCESS) {
-      setError(error, "bm_dev_request failed");
+    if (!bmrt_runtime::acquireDevice(&handle_, error)) {
       return false;
     }
 
@@ -241,7 +240,7 @@ class NnYolov8::CustomRuntime {
       setenv("BMRUNTIME_USING_FIRMWARE", config.bmrt_firmware.c_str(), 0);
     }
 
-    runtime_ = bmrt_create(handle_);
+    runtime_ = bmrt_runtime::createRuntime(handle_);
     if (!runtime_) {
       setError(error, "bmrt_create failed");
       return false;
@@ -466,13 +465,21 @@ class NnYolov8::CustomRuntime {
     hardware_preprocessor_.reset();
     releaseOutputBuffers();
     if (runtime_) {
-      bmrt_destroy(runtime_);
+      // CV184X's a53lite runtime can throw while unloading its final kernel
+      // module even after all model resources have been released. Destruction
+      // must not terminate an otherwise successful application.
+      try {
+        bmrt_runtime::destroyRuntime(runtime_);
+      } catch (const std::exception &exception) {
+        std::fprintf(stderr, "yolov8 bmrt_destroy ignored during shutdown: %s\n",
+                     exception.what());
+      } catch (...) {
+        std::fprintf(stderr,
+                     "yolov8 bmrt_destroy ignored an unknown shutdown exception\n");
+      }
       runtime_ = nullptr;
     }
-    if (handle_) {
-      bm_dev_free(handle_);
-      handle_ = nullptr;
-    }
+    bmrt_runtime::releaseDevice(&handle_);
     opened_ = false;
     net_info_ = nullptr;
     branches_.clear();

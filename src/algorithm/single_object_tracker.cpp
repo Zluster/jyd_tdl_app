@@ -144,9 +144,7 @@ class MultiInputSession {
             std::string *error) {
     close();
 
-    bm_status_t status = bm_dev_request(&handle_, 0);
-    if (status != BM_SUCCESS) {
-      bmrt_runtime::setError(error, "bm_dev_request failed");
+    if (!bmrt_runtime::acquireDevice(&handle_, error)) {
       return false;
     }
 
@@ -154,7 +152,7 @@ class MultiInputSession {
       setenv("BMRUNTIME_USING_FIRMWARE", config.bmrt_firmware.c_str(), 0);
     }
 
-    runtime_ = bmrt_create(handle_);
+    runtime_ = bmrt_runtime::createRuntime(handle_);
     if (!runtime_) {
       bmrt_runtime::setError(error, "bmrt_create failed");
       return false;
@@ -241,12 +239,11 @@ class MultiInputSession {
     }
     output_memories_.clear();
     if (runtime_) {
-      bmrt_destroy(runtime_);
+      bmrt_runtime::destroyRuntime(runtime_);
       runtime_ = nullptr;
     }
     if (handle_) {
-      bm_dev_free(handle_);
-      handle_ = nullptr;
+      bmrt_runtime::releaseDevice(&handle_);
     }
     net_info_ = nullptr;
     net_name_.clear();

@@ -7,7 +7,9 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstdint>
+#include <cstdio>
 #include <cstring>
+#include <exception>
 #include <limits>
 #include <memory>
 #include <mutex>
@@ -35,6 +37,110 @@ constexpr int kInputChannels = 3;
 inline void setError(std::string *error, const std::string &message) {
   if (error) {
     *error = message;
+  }
+}
+
+// BMRT on CV184X permits several runtimes on one device but its a53lite
+// teardown is not reliable when every model owns and frees a separate handle.
+// Keep one process-wide device handle alive until the final model closes.
+struct SharedDeviceState {
+  std::mutex mutex;
+  bm_handle_t handle = nullptr;
+  unsigned int users = 0;
+  unsigned int runtimes = 0;
+};
+
+inline SharedDeviceState &sharedDeviceState() {
+  static SharedDeviceState state;
+  return state;
+}
+
+inline bool acquireDevice(bm_handle_t *handle, std::string *error) {
+  if (!handle) {
+    setError(error, "BMRT device handle output is null");
+    return false;
+  }
+  SharedDeviceState &state = sharedDeviceState();
+  std::lock_guard<std::mutex> lock(state.mutex);
+  if (!state.handle && bm_dev_request(&state.handle, 0) != BM_SUCCESS) {
+    setError(error, "bm_dev_request failed");
+    return false;
+  }
+  ++state.users;
+  if (std::getenv("TDL_BENCH_PROFILE"))
+    std::fprintf(stderr, "[bmrt] acquireDevice handle=%p users=%u\n",
+                 static_cast<void *>(state.handle), state.users);
+  *handle = state.handle;
+  return true;
+}
+
+inline void releaseDevice(bm_handle_t *handle) noexcept {
+  if (!handle || !*handle) return;
+  SharedDeviceState &state = sharedDeviceState();
+  std::lock_guard<std::mutex> lock(state.mutex);
+  *handle = nullptr;
+  if (state.users == 0) return;
+  --state.users;
+  if (std::getenv("TDL_BENCH_PROFILE"))
+    std::fprintf(stderr, "[bmrt] releaseDevice users=%u\n", state.users);
+  if (state.users != 0 || !state.handle) return;
+  if (std::getenv("TDL_BENCH_PROFILE"))
+    std::fprintf(stderr, "[bmrt] bm_dev_free begin handle=%p\n",
+                 static_cast<void *>(state.handle));
+  try {
+    bm_dev_free(state.handle);
+  } catch (const std::exception &exception) {
+    std::fprintf(stderr, "bm_dev_free ignored during shutdown: %s\n",
+                 exception.what());
+  } catch (...) {
+    std::fprintf(stderr,
+                 "bm_dev_free ignored an unknown shutdown exception\n");
+  }
+  state.handle = nullptr;
+  if (std::getenv("TDL_BENCH_PROFILE"))
+    std::fprintf(stderr, "[bmrt] bm_dev_free end\n");
+}
+
+inline void *createRuntime(bm_handle_t handle) {
+  void *runtime = bmrt_create(handle);
+  if (!runtime) return nullptr;
+  SharedDeviceState &state = sharedDeviceState();
+  std::lock_guard<std::mutex> lock(state.mutex);
+  ++state.runtimes;
+  if (std::getenv("TDL_BENCH_PROFILE"))
+    std::fprintf(stderr, "[bmrt] createRuntime runtime=%p runtimes=%u\n",
+                 runtime, state.runtimes);
+  return runtime;
+}
+
+inline void destroyRuntime(void *runtime) noexcept {
+  if (!runtime) return;
+  SharedDeviceState &state = sharedDeviceState();
+  bool final_runtime = false;
+  {
+    std::lock_guard<std::mutex> lock(state.mutex);
+    if (state.runtimes > 0) --state.runtimes;
+    final_runtime = state.runtimes == 0;
+    if (std::getenv("TDL_BENCH_PROFILE"))
+      std::fprintf(stderr,
+                   "[bmrt] destroyRuntime runtime=%p final=%d remaining=%u\n",
+                   runtime, final_runtime ? 1 : 0, state.runtimes);
+  }
+
+  try {
+    // CV184X's a53lite unload can throw while releasing the last model's
+    // coefficient module. The following bm_dev_free resets the final device
+    // handle, so only this final runtime omits the redundant coeff release.
+    if (final_runtime) {
+      bmrt_destroy_without_coeff(runtime);
+    } else {
+      bmrt_destroy(runtime);
+    }
+  } catch (const std::exception &exception) {
+    std::fprintf(stderr, "bmrt_destroy ignored during shutdown: %s\n",
+                 exception.what());
+  } catch (...) {
+    std::fprintf(stderr, "bmrt_destroy ignored an unknown shutdown exception\n");
   }
 }
 
@@ -206,9 +312,7 @@ class Session {
             std::string *error) {
     close();
 
-    bm_status_t status = bm_dev_request(&handle_, 0);
-    if (status != BM_SUCCESS) {
-      setError(error, "bm_dev_request failed");
+    if (!acquireDevice(&handle_, error)) {
       return false;
     }
 
@@ -216,7 +320,7 @@ class Session {
       setenv("BMRUNTIME_USING_FIRMWARE", config.bmrt_firmware.c_str(), 0);
     }
 
-    runtime_ = bmrt_create(handle_);
+    runtime_ = createRuntime(handle_);
     if (!runtime_) {
       setError(error, "bmrt_create failed");
       return false;
@@ -270,15 +374,45 @@ class Session {
   }
 
   void close() {
+    if (std::getenv("TDL_BENCH_PROFILE"))
+      std::fprintf(stderr, "[bmrt] Session close begin runtime=%p handle=%p opened=%d\n",
+                   static_cast<void *>(runtime_), static_cast<void *>(handle_),
+                   opened_ ? 1 : 0);
+    if (!runtime_ && !handle_ && !opened_) return;
+    if (std::getenv("TDL_BENCH_PROFILE"))
+      std::fprintf(stderr, "[bmrt] releaseDeviceOutputs begin\n");
     releaseDeviceOutputs();
+    if (std::getenv("TDL_BENCH_PROFILE"))
+      std::fprintf(stderr, "[bmrt] releaseDeviceOutputs end\n");
     if (runtime_) {
-      bmrt_destroy(runtime_);
+      if (handle_) {
+        if (std::getenv("TDL_BENCH_PROFILE"))
+          std::fprintf(stderr, "[bmrt] bm_thread_sync begin\n");
+        const bm_status_t sync_status = bm_thread_sync(handle_);
+        if (std::getenv("TDL_BENCH_PROFILE"))
+          std::fprintf(stderr, "[bmrt] bm_thread_sync end status=%d\n",
+                       static_cast<int>(sync_status));
+      }
+      // Some CV184X a53lite bmodels throw while unloading their final kernel
+      // module. All device buffers have already been released; avoid turning
+      // an otherwise successful application shutdown into std::terminate.
+      if (std::getenv("TDL_BENCH_PROFILE"))
+        std::fprintf(stderr, "[bmrt] bmrt_destroy begin runtime=%p\n",
+                     static_cast<void *>(runtime_));
+      try {
+        destroyRuntime(runtime_);
+      } catch (const std::exception &exception) {
+        std::fprintf(stderr, "bmrt_destroy ignored during shutdown: %s\n",
+                     exception.what());
+      } catch (...) {
+        std::fprintf(stderr,
+                     "bmrt_destroy ignored an unknown shutdown exception\n");
+      }
       runtime_ = nullptr;
+      if (std::getenv("TDL_BENCH_PROFILE"))
+        std::fprintf(stderr, "[bmrt] bmrt_destroy end\n");
     }
-    if (handle_) {
-      bm_dev_free(handle_);
-      handle_ = nullptr;
-    }
+    releaseDevice(&handle_);
     net_info_ = nullptr;
     net_name_.clear();
     input_height_ = 0;
@@ -286,6 +420,8 @@ class Session {
     nchw_layout_ = true;
     input_dtype_ = BM_FLOAT32;
     opened_ = false;
+    if (std::getenv("TDL_BENCH_PROFILE"))
+      std::fprintf(stderr, "[bmrt] Session close end\n");
   }
 
   bool launch(const std::vector<float> &input_tensor,

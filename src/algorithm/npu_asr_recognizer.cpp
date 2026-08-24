@@ -13,6 +13,7 @@
 #include "bmlib_runtime.h"
 #include "bmruntime_interface.h"
 #include "kaldi-native-fbank/csrc/online-feature.h"
+#include "algorithm/private/bmrt_utils.hpp"
 #include "tdl_app/model_descriptor.hpp"
 
 namespace tdl_app {
@@ -66,7 +67,7 @@ class RuntimeNet {
 
   bool load(bm_handle_t handle, const std::string &path, std::string *error) {
     reset();
-    runtime_ = bmrt_create(handle);
+    runtime_ = bmrt_runtime::createRuntime(handle);
     if (!runtime_ || !bmrt_load_bmodel(runtime_, path.c_str())) {
       setError(error, "failed to load ASR bmodel: " + path);
       reset();
@@ -118,7 +119,7 @@ class RuntimeNet {
     network_ = nullptr;
     name_.clear();
     if (runtime_) {
-      bmrt_destroy(runtime_);
+      bmrt_runtime::destroyRuntime(runtime_);
       runtime_ = nullptr;
     }
   }
@@ -204,11 +205,10 @@ class NpuStreamingAsr::Impl {
     const std::string tokens_path = joinPath(descriptor.descriptor_dir,
                                               descriptor.extra["tokens"]);
     if (!readTokens(tokens_path, &tokens_, error) ||
-        bm_dev_request(&handle_, 0) != BM_SUCCESS ||
+        !bmrt_runtime::acquireDevice(&handle_, error) ||
         !encoder_.load(handle_, encoder_path, error) ||
         !decoder_.load(handle_, decoder_path, error) ||
         !joiner_.load(handle_, joiner_path, error)) {
-      if (handle_ == nullptr) setError(error, "bm_dev_request failed");
       reset();
       return false;
     }
@@ -312,8 +312,7 @@ class NpuStreamingAsr::Impl {
     decoder_.reset();
     joiner_.reset();
     if (handle_) {
-      bm_dev_free(handle_);
-      handle_ = nullptr;
+      bmrt_runtime::releaseDevice(&handle_);
     }
     tokens_.clear();
     encoder_input_.clear();

@@ -15,6 +15,7 @@
 #include "bmruntime_interface.h"
 #include "kaldi-native-fbank/csrc/online-feature.h"
 #include "tdl_app/model_descriptor.hpp"
+#include "algorithm/private/bmrt_utils.hpp"
 
 namespace tdl_app {
 namespace {
@@ -216,11 +217,10 @@ class SpeakerRecognizer::Impl {
     if (!config.firmware.empty()) {
       setenv("BMRUNTIME_USING_FIRMWARE", config.firmware.c_str(), 0);
     }
-    if (bm_dev_request(&handle_, 0) != BM_SUCCESS) {
-      setError(error, "bm_dev_request failed");
+    if (!bmrt_runtime::acquireDevice(&handle_, error)) {
       return false;
     }
-    runtime_ = bmrt_create(handle_);
+    runtime_ = bmrt_runtime::createRuntime(handle_);
     const std::string model_path = resolveModelPath(descriptor);
     if (!runtime_ || !bmrt_load_bmodel(runtime_, model_path.c_str())) {
       setError(error, "failed to load speaker bmodel: " + model_path);
@@ -377,12 +377,11 @@ class SpeakerRecognizer::Impl {
     network_name_.clear();
     input_frames_ = 0;
     if (runtime_) {
-      bmrt_destroy(runtime_);
+      bmrt_runtime::destroyRuntime(runtime_);
       runtime_ = nullptr;
     }
     if (handle_) {
-      bm_dev_free(handle_);
-      handle_ = nullptr;
+      bmrt_runtime::releaseDevice(&handle_);
     }
   }
 
