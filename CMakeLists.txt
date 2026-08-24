@@ -80,6 +80,7 @@ set(TDL_APP_MEDIA_SOURCES
   src/media/osd_region.cpp
   src/media/mmf.cpp
   src/media/private/audio_file_decoder.cpp
+  src/media/rgb_led.cpp
   src/media/private/audio_runtime.cpp
   src/media/region_overlay.cpp
   src/media/sys_context.cpp
@@ -370,6 +371,11 @@ target_link_libraries(tdl_app_sdk
     ${TDL_CV184X_LIBS}
     tdl_app_ini_compat
 )
+
+if(TDL_SOPHPI_ROOT AND EXISTS "${TDL_SOPHPI_ROOT}/cvi_mpi/lib/libsys.a")
+  target_link_libraries(tdl_app_sdk PUBLIC
+    "${TDL_SOPHPI_ROOT}/cvi_mpi/lib/libsys.a")
+endif()
 
 if(TDL_APP_HAS_FFMPEG)
   target_link_libraries(tdl_app_sdk
@@ -799,6 +805,24 @@ if(TDL_APP_BUILD_DEMOS)
     )
     target_include_directories(tdl_benchmark_demo PRIVATE "${TDL_CV184X_INCLUDE_DIRS}" "${CMAKE_CURRENT_LIST_DIR}/apps")
     target_link_libraries(tdl_benchmark_demo PRIVATE tdl_app_sdk)
+
+    add_executable(dual_benchmark_led_test
+      apps/dual_benchmark_led_test.cpp
+      src/media/rgb_led.cpp
+    )
+    target_include_directories(dual_benchmark_led_test PRIVATE
+      "${CMAKE_CURRENT_LIST_DIR}/include"
+      "${CMAKE_CURRENT_LIST_DIR}/apps")
+    if(TDL_SOPHPI_ROOT AND EXISTS "${TDL_SOPHPI_ROOT}/cvi_mpi/lib/libsys.a")
+      target_link_libraries(dual_benchmark_led_test PRIVATE
+        "${TDL_SOPHPI_ROOT}/cvi_mpi/lib/libsys.a"
+        dl
+        rt
+        pthread
+      )
+    else()
+      message(FATAL_ERROR "dual_benchmark_led_test requires cvi_mpi/lib/libsys.a")
+    endif()
   endif()
 endif()
 
@@ -856,6 +880,7 @@ if(TDL_APP_BUILD_DEMOS)
       tdl_camera_feature_demo
       sophpi_ai_osd_demo
       tdl_benchmark_demo
+      dual_benchmark_led_test
       RUNTIME DESTINATION bin
     )
 
