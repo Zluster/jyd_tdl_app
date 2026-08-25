@@ -52,6 +52,8 @@ class SelfLearningClassifier {
 
   bool addSample(const std::string &label, const std::string &image_path,
                  std::string *error = nullptr);
+  bool addFrame(const std::string &label, const Frame &frame,
+                std::string *error = nullptr);
   bool classify(const std::string &image_path, int top_k,
                 SelfLearningClassificationResult *result,
                 std::string *error = nullptr);

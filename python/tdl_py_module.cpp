@@ -1966,6 +1966,20 @@ NB_MODULE(tdl_py, m) {
            },
            nb::arg("label"), nb::arg("image"),
            "Extract and add one labeled image sample.")
+      .def("add_frame",
+           [](tdl_app::SelfLearningClassifier &self, const std::string &label,
+              PyFrame &frame) {
+             const tdl_app::Frame sdk_frame = sdkFrameFrom(frame);
+             std::string error;
+             bool ok = false;
+             {
+               nb::gil_scoped_release guard;
+               ok = self.addFrame(label, sdk_frame, &error);
+             }
+             if (!ok) raise("self-learning add_frame failed: " + error);
+           },
+           nb::arg("label"), nb::arg("frame"),
+           "Extract and add one labeled live camera frame sample.")
       .def("classify",
            [](tdl_app::SelfLearningClassifier &self, PyFrame &frame, int top_k) {
              const tdl_app::Frame sdk_frame = sdkFrameFrom(frame);

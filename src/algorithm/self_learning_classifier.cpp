@@ -81,6 +81,26 @@ bool extractFeature(FeatureExtractor *extractor, const std::string &image_path,
   return true;
 }
 
+bool extractFeature(FeatureExtractor *extractor, const Frame &frame,
+                    std::vector<float> *feature, std::string *error) {
+  if (!extractor) {
+    setError(error, "feature extractor is null");
+    return false;
+  }
+  AlgorithmResult result;
+  InferOptions options;
+  if (!extractor->runFrame(frame, options, &result, error)) {
+    return false;
+  }
+  if (result.feature.empty()) {
+    setError(error, "feature extractor returned empty embedding");
+    return false;
+  }
+  *feature = result.feature;
+  l2Normalize(feature);
+  return true;
+}
+
 }  // namespace
 
 SelfLearningClassifier::SelfLearningClassifier() = default;
@@ -151,6 +171,35 @@ bool SelfLearningClassifier::addSample(const std::string &label,
   return true;
 }
 
+bool SelfLearningClassifier::addFrame(const std::string &label,
+                                      const Frame &frame,
+                                      std::string *error) {
+  if (!initialized()) {
+    setError(error, "self learning classifier is not initialized");
+    return false;
+  }
+  if (label.empty()) {
+    setError(error, "label is empty");
+    return false;
+  }
+
+  std::vector<float> feature;
+  if (!extractFeature(&extractor_, frame, &feature, error)) {
+    return false;
+  }
+  if (!samples_.empty() &&
+      feature.size() != samples_.front().feature.size()) {
+    setError(error, "feature dimension mismatch with existing bank");
+    return false;
+  }
+
+  Sample sample;
+  sample.label = label;
+  sample.feature = std::move(feature);
+  samples_.push_back(std::move(sample));
+  return true;
+}
+
 bool SelfLearningClassifier::classify(
     const std::string &image_path, int top_k,
     SelfLearningClassificationResult *result, std::string *error) {
@@ -171,39 +220,45 @@ bool SelfLearningClassifier::classify(
   if (!extractFeature(&extractor_, image_path, &feature, error)) {
     return false;
   }
+  if (feature.size() != samples_.front().feature.size()) {
+    setError(error, "feature dimension mismatch with bank");
+    return false;
+  }
+
   return classifyFeature(std::move(feature), top_k, result, error);
 }
 
 bool SelfLearningClassifier::classifyFrame(
     const Frame &frame, int top_k, SelfLearningClassificationResult *result,
     SelfLearningClassificationProfile *profile, std::string *error) {
-  if (!initialized() || !result || samples_.empty()) {
-    setError(error, !initialized() ? "self learning classifier is not initialized"
-                                   : (!result ? "classification result pointer is null"
-                                              : "feature bank is empty"));
+  if (!initialized()) {
+    setError(error, "self learning classifier is not initialized");
     return false;
   }
-  const auto total_begin = std::chrono::steady_clock::now();
-  const auto feature_begin = total_begin;
-  AlgorithmResult feature_result;
-  InferOptions options;
-  if (!extractor_.runFrame(frame, options, &feature_result, error) ||
-      feature_result.feature.empty()) {
-    if (error && error->empty()) *error = "feature extractor returned empty embedding";
+  if (!result) {
+    setError(error, "classification result pointer is null");
     return false;
   }
-  std::vector<float> feature = std::move(feature_result.feature);
-  l2Normalize(&feature);
-  const auto match_begin = std::chrono::steady_clock::now();
+  if (samples_.empty()) {
+    setError(error, "feature bank is empty");
+    return false;
+  }
+
+  const auto begin = std::chrono::steady_clock::now();
+  std::vector<float> feature;
+  if (!extractFeature(&extractor_, frame, &feature, error)) {
+    return false;
+  }
+  const auto extracted = std::chrono::steady_clock::now();
+  const bool ok = classifyFeature(std::move(feature), top_k, result, error);
+  const auto finished = std::chrono::steady_clock::now();
   if (profile) {
     profile->feature_ms = std::chrono::duration<double, std::milli>(
-                              match_begin - feature_begin).count();
-  }
-  const bool ok = classifyFeature(std::move(feature), top_k, result, error);
-  const auto end = std::chrono::steady_clock::now();
-  if (profile) {
-    profile->match_ms = std::chrono::duration<double, std::milli>(end - match_begin).count();
-    profile->total_ms = std::chrono::duration<double, std::milli>(end - total_begin).count();
+        extracted - begin).count();
+    profile->match_ms = std::chrono::duration<double, std::milli>(
+        finished - extracted).count();
+    profile->total_ms = std::chrono::duration<double, std::milli>(
+        finished - begin).count();
   }
   return ok;
 }
@@ -211,6 +266,14 @@ bool SelfLearningClassifier::classifyFrame(
 bool SelfLearningClassifier::classifyFeature(
     std::vector<float> feature, int top_k,
     SelfLearningClassificationResult *result, std::string *error) const {
+  if (!result) {
+    setError(error, "classification result pointer is null");
+    return false;
+  }
+  if (samples_.empty()) {
+    setError(error, "feature bank is empty");
+    return false;
+  }
   if (feature.size() != samples_.front().feature.size()) {
     setError(error, "feature dimension mismatch with bank");
     return false;
