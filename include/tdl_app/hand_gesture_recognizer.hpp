@@ -36,14 +36,15 @@ struct HandGestureResult {
   float score = 0.0f;
 };
 
-// Online hand gesture recognition: YOLOv8 hand detection followed by a
-// 21-keypoint model. Classification intentionally uses geometry rather than
-// cls_hand_gesture.mud because that model exposes only anonymous labels.
+// Online hand gesture recognition: YOLOv8 hand detection, 21 keypoints, and
+// the vendor 42-value keypoint gesture classifier.
 class HandGestureRecognizer {
  public:
   struct Config {
     std::string detector_model_spec;
     std::string keypoint_model_spec;
+    // Empty selects keypoint_hand_gesture.mud beside keypoint_model_spec.
+    std::string gesture_classifier_model_spec;
     std::string firmware;
     float hand_threshold = 0.35f;
     float iou_threshold = 0.45f;

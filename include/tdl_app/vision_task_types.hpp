@@ -10,11 +10,13 @@ namespace tdl_app {
 struct KeypointResult {
   int width = 0;
   int height = 0;
+  Box box;
   std::vector<Point> points;
 
   void clear() {
     width = 0;
     height = 0;
+    box = Box{};
     points.clear();
   }
 

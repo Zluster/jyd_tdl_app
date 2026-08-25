@@ -48,6 +48,7 @@ struct SharedDeviceState {
   bm_handle_t handle = nullptr;
   unsigned int users = 0;
   unsigned int runtimes = 0;
+  bool retain_until_process_exit = false;
 };
 
 inline SharedDeviceState &sharedDeviceState() {
@@ -84,6 +85,12 @@ inline void releaseDevice(bm_handle_t *handle) noexcept {
   if (std::getenv("TDL_BENCH_PROFILE"))
     std::fprintf(stderr, "[bmrt] releaseDevice users=%u\n", state.users);
   if (state.users != 0 || !state.handle) return;
+  if (state.retain_until_process_exit) {
+    if (std::getenv("TDL_BENCH_PROFILE"))
+      std::fprintf(stderr,
+                   "[bmrt] keeping final device handle until process exit\n");
+    return;
+  }
   if (std::getenv("TDL_BENCH_PROFILE"))
     std::fprintf(stderr, "[bmrt] bm_dev_free begin handle=%p\n",
                  static_cast<void *>(state.handle));
@@ -127,15 +134,22 @@ inline void destroyRuntime(void *runtime) noexcept {
                    runtime, final_runtime ? 1 : 0, state.runtimes);
   }
 
+  // On CV184X, destruction of the final runtime unloads an a53lite kernel
+  // module. That library uses a noexcept destructor and terminates the host
+  // process when the small core rejects the unload, so an outer catch cannot
+  // recover. Keep the final runtime and its device handle until process exit.
+  // This is bounded to one application lifetime, not one inference frame.
+  if (final_runtime) {
+    std::lock_guard<std::mutex> lock(state.mutex);
+    state.retain_until_process_exit = true;
+    if (std::getenv("TDL_BENCH_PROFILE"))
+      std::fprintf(stderr,
+                   "[bmrt] keeping final runtime until process exit\n");
+    return;
+  }
+
   try {
-    // CV184X's a53lite unload can throw while releasing the last model's
-    // coefficient module. The following bm_dev_free resets the final device
-    // handle, so only this final runtime omits the redundant coeff release.
-    if (final_runtime) {
-      bmrt_destroy_without_coeff(runtime);
-    } else {
-      bmrt_destroy(runtime);
-    }
+    bmrt_destroy(runtime);
   } catch (const std::exception &exception) {
     std::fprintf(stderr, "bmrt_destroy ignored during shutdown: %s\n",
                  exception.what());
@@ -363,9 +377,21 @@ class Session {
       return false;
     }
 
-    if (!parseInputShape(net_info_->stages[0].input_shapes[0], &input_height_,
-                         &input_width_, &nchw_layout_, error)) {
-      return false;
+    const bm_shape_t &input_shape = net_info_->stages[0].input_shapes[0];
+    // Most models use a 3-channel image tensor. Some compact classifiers,
+    // such as hand-gesture classification, consume a generic feature vector.
+    // Those still use launch(), but have no image dimensions or layout.
+    if (input_shape.num_dims == 4 &&
+        (input_shape.dims[1] == kInputChannels ||
+         input_shape.dims[3] == kInputChannels)) {
+      if (!parseInputShape(input_shape, &input_height_, &input_width_,
+                           &nchw_layout_, error)) {
+        return false;
+      }
+    } else {
+      input_height_ = 0;
+      input_width_ = 0;
+      nchw_layout_ = true;
     }
 
     input_dtype_ = net_info_->input_dtypes[0];
@@ -434,6 +460,10 @@ class Session {
     }
     if (!outputs) {
       setError(error, "output tensor vector is null");
+      return false;
+    }
+    if (input_tensor.size() != inputElementCount()) {
+      setError(error, "runtime input tensor element count does not match model");
       return false;
     }
 
@@ -598,6 +628,10 @@ class Session {
     return net_info_ && net_info_->input_zero_point
                ? net_info_->input_zero_point[0]
                : 0;
+  }
+  size_t inputElementCount() const {
+    return net_info_ ? shapeElementCount(net_info_->stages[0].input_shapes[0])
+                     : 0;
   }
   bm_handle_t handle() const { return handle_; }
 

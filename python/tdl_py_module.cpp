@@ -1539,6 +1539,8 @@ NB_MODULE(tdl_py, m) {
       "Pose/keypoint result; points are in source-frame coordinates.")
       .def_ro("width", &tdl_app::KeypointResult::width)
       .def_ro("height", &tdl_app::KeypointResult::height)
+      .def_ro("box", &tdl_app::KeypointResult::box,
+              "Detected person box when the underlying keypoint model provides one.")
       .def_ro("points", &tdl_app::KeypointResult::points);
 
   nb::class_<tdl_app::HandGestureResult>(m, "HandGestureResult",
@@ -1845,14 +1847,15 @@ NB_MODULE(tdl_py, m) {
 
   nb::class_<tdl_app::HandGestureRecognizer>(m, "HandGestureRecognizer",
       "Online hand gesture recognition: hand detection, 21 keypoints, and "
-      "geometry-based gesture classification.")
+      "vendor keypoint-model gesture classification.")
       .def(nb::init<>())
       .def("load",
            [](tdl_app::HandGestureRecognizer &self,
               const std::string &detector_model,
               const std::string &keypoint_model, float hand_threshold,
               float iou_threshold, float roi_expand_ratio, int max_hands,
-              const std::string &firmware) {
+              const std::string &firmware,
+              const std::string &gesture_classifier_model) {
              tdl_app::HandGestureRecognizer::Config config;
              config.detector_model_spec = detector_model;
              config.keypoint_model_spec = keypoint_model;
@@ -1861,6 +1864,7 @@ NB_MODULE(tdl_py, m) {
              config.roi_expand_ratio = roi_expand_ratio;
              config.max_hands = max_hands;
              config.firmware = firmware;
+             config.gesture_classifier_model_spec = gesture_classifier_model;
              std::string error;
              bool ok = false;
              {
@@ -1874,12 +1878,16 @@ NB_MODULE(tdl_py, m) {
            nb::arg("iou_threshold") = 0.45f,
            nb::arg("roi_expand_ratio") = 0.25f,
            nb::arg("max_hands") = 2, nb::arg("firmware") = "",
-           "Load the hand detector and 21-keypoint model.")
+           nb::arg("gesture_classifier_model") = "",
+           "Load hand detection, 21 keypoints, and gesture classification."
+           " An empty gesture_classifier_model selects keypoint_hand_gesture.mud"
+           " beside keypoint_model.")
       .def("__init__",
            [](tdl_app::HandGestureRecognizer *self,
               const std::string &detector_model,
               const std::string &keypoint_model, float hand_threshold,
-              int max_hands, const std::string &firmware) {
+              int max_hands, const std::string &firmware,
+              const std::string &gesture_classifier_model) {
              new (self) tdl_app::HandGestureRecognizer();
              tdl_app::HandGestureRecognizer::Config config;
              config.detector_model_spec = detector_model;
@@ -1887,6 +1895,7 @@ NB_MODULE(tdl_py, m) {
              config.hand_threshold = hand_threshold;
              config.max_hands = max_hands;
              config.firmware = firmware;
+             config.gesture_classifier_model_spec = gesture_classifier_model;
              std::string error;
              bool ok = false;
              {
@@ -1897,7 +1906,7 @@ NB_MODULE(tdl_py, m) {
            },
            nb::arg("detector_model"), nb::arg("keypoint_model"),
            nb::arg("hand_threshold") = 0.35f, nb::arg("max_hands") = 2,
-           nb::arg("firmware") = "",
+           nb::arg("firmware") = "", nb::arg("gesture_classifier_model") = "",
            "Create and load an online hand gesture recognizer.")
       .def("recognize",
            [](tdl_app::HandGestureRecognizer &self, PyFrame &frame) {

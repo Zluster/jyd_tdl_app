@@ -118,6 +118,16 @@ bool PoseClassifier::finishClassification(
     const KeypointResult &keypoints, double keypoint_ms,
     const std::chrono::steady_clock::time_point &begin,
     PoseClassificationResult *result, std::string *error) {
+  // YOLOv8-pose returns an empty result when no person passes its detection
+  // threshold. That is a normal camera-frame outcome, not an inference error.
+  if (keypoints.pointCount() == 0) {
+    result->clear();
+    result->keypoints = keypoints;
+    result->profile.keypoint_ms = keypoint_ms;
+    result->profile.total_ms = elapsedMs(begin, std::chrono::steady_clock::now());
+    resetSmoothing();
+    return true;
+  }
   if (keypoints.pointCount() != 17) {
     setError(error, "human pose classification requires exactly 17 COCO points");
     return false;

@@ -30,6 +30,7 @@ struct mmf_jpg_http_server {
   uint32_t pull_quality = 0;
   uint32_t pull_venc_channel = 0;
   CodecResourceLease display_venc_lease = MMF_CODEC_RESOURCE_LEASE_INIT;
+  VPSS_GRP display_rotate_vpss_group = -1;
   bool display_rotate_vpss_created = false;
   bool display_rotate_vpss_channel_enabled = false;
   bool display_rotate_vpss_started = false;
@@ -44,7 +45,6 @@ constexpr int kDisplayVencTimeoutMs = 1000;
 constexpr int kDisplayVencMaxWidth = 2560;
 constexpr int kDisplayVencMaxHeight = 1440;
 constexpr int kDisplayVencBufferSize = 1024 * 1024;
-constexpr VPSS_GRP kDisplayRotateVpssGroup = 2;
 constexpr VPSS_CHN kDisplayRotateVpssChannel = 0;
 constexpr uint32_t kDisplayVencMaxFps = 30;
 
@@ -68,13 +68,14 @@ static void close_http_display_venc(mmf_jpg_http_server_t* server) {
     return;
   }
 
-  if (server->display_venc_bound) {
+  const VPSS_GRP rotate_group = server->display_rotate_vpss_group;
+  if (server->display_venc_bound && rotate_group >= 0) {
     MMF_CHN_S source;
     MMF_CHN_S destination;
     std::memset(&source, 0, sizeof(source));
     std::memset(&destination, 0, sizeof(destination));
     source.enModId = CVI_ID_VPSS;
-    source.s32DevId = kDisplayRotateVpssGroup;
+    source.s32DevId = rotate_group;
     source.s32ChnId = kDisplayRotateVpssChannel;
     destination.enModId = CVI_ID_VENC;
     destination.s32ChnId = static_cast<CVI_S32>(server->config.venc_channel);
@@ -86,7 +87,7 @@ static void close_http_display_venc(mmf_jpg_http_server_t* server) {
     (void)CVI_VENC_DestroyChn(static_cast<VENC_CHN>(server->config.venc_channel));
     server->display_venc_opened = false;
   }
-  if (server->display_rotate_vpss_source_bound) {
+  if (server->display_rotate_vpss_source_bound && rotate_group >= 0) {
     MMF_CHN_S source;
     MMF_CHN_S destination;
     std::memset(&source, 0, sizeof(source));
@@ -95,23 +96,24 @@ static void close_http_display_venc(mmf_jpg_http_server_t* server) {
     source.s32DevId = mmf_cvi::DualOsLayout::kDisplayVpssGroup;
     source.s32ChnId = mmf_cvi::DualOsLayout::kDisplayChannel;
     destination.enModId = CVI_ID_VPSS;
-    destination.s32DevId = kDisplayRotateVpssGroup;
+    destination.s32DevId = rotate_group;
     destination.s32ChnId = kDisplayRotateVpssChannel;
     (void)CVI_SYS_UnBind(&source, &destination);
     server->display_rotate_vpss_source_bound = false;
   }
-  if (server->display_rotate_vpss_started) {
-    (void)CVI_VPSS_StopGrp(kDisplayRotateVpssGroup);
+  if (server->display_rotate_vpss_started && rotate_group >= 0) {
+    (void)CVI_VPSS_StopGrp(rotate_group);
     server->display_rotate_vpss_started = false;
   }
-  if (server->display_rotate_vpss_channel_enabled) {
-    (void)CVI_VPSS_DisableChn(kDisplayRotateVpssGroup, kDisplayRotateVpssChannel);
+  if (server->display_rotate_vpss_channel_enabled && rotate_group >= 0) {
+    (void)CVI_VPSS_DisableChn(rotate_group, kDisplayRotateVpssChannel);
     server->display_rotate_vpss_channel_enabled = false;
   }
-  if (server->display_rotate_vpss_created) {
-    (void)CVI_VPSS_DestroyGrp(kDisplayRotateVpssGroup);
+  if (server->display_rotate_vpss_created && rotate_group >= 0) {
+    (void)CVI_VPSS_DestroyGrp(rotate_group);
     server->display_rotate_vpss_created = false;
   }
+  server->display_rotate_vpss_group = -1;
   codec_resource_lease_release(&server->display_venc_lease);
   server->display_venc_sequence = 0;
   server->display_venc_last_error = CVI_SUCCESS;
@@ -129,11 +131,17 @@ static mmf_result_t ensure_http_display_rotate_vpss(mmf_jpg_http_server_t* serve
   group_attr.enPixelFormat = PIXEL_FORMAT_NV12;
   group_attr.stFrameRate.s32SrcFrameRate = -1;
   group_attr.stFrameRate.s32DstFrameRate = -1;
-  const int create_ret = CVI_VPSS_CreateGrp(kDisplayRotateVpssGroup, &group_attr);
+  const int available_group = CVI_VPSS_GetAvailableGrp();
+  if (available_group < 0) {
+    return report_display_venc_error(server, "CVI_VPSS_GetAvailableGrp", available_group);
+  }
+  const VPSS_GRP rotate_group = static_cast<VPSS_GRP>(available_group);
+  const int create_ret = CVI_VPSS_CreateGrp(rotate_group, &group_attr);
   if (create_ret != CVI_SUCCESS) {
     return report_display_venc_error(server, "CVI_VPSS_CreateGrp", create_ret);
   }
   server->display_rotate_vpss_created = true;
+  server->display_rotate_vpss_group = rotate_group;
 
   VPSS_CHN_ATTR_S channel_attr;
   std::memset(&channel_attr, 0, sizeof(channel_attr));
@@ -147,20 +155,20 @@ static mmf_result_t ensure_http_display_rotate_vpss(mmf_jpg_http_server_t* serve
   channel_attr.bMirror = CVI_TRUE;
   channel_attr.bFlip = CVI_TRUE;
   channel_attr.stAspectRatio.enMode = ASPECT_RATIO_NONE;
-  const int set_attr_ret = CVI_VPSS_SetChnAttr(kDisplayRotateVpssGroup,
+  const int set_attr_ret = CVI_VPSS_SetChnAttr(rotate_group,
                                               kDisplayRotateVpssChannel, &channel_attr);
   if (set_attr_ret != CVI_SUCCESS) {
     close_http_display_venc(server);
     return report_display_venc_error(server, "CVI_VPSS_SetChnAttr", set_attr_ret);
   }
-  const int enable_ret = CVI_VPSS_EnableChn(kDisplayRotateVpssGroup,
+  const int enable_ret = CVI_VPSS_EnableChn(rotate_group,
                                             kDisplayRotateVpssChannel);
   if (enable_ret != CVI_SUCCESS) {
     close_http_display_venc(server);
     return report_display_venc_error(server, "CVI_VPSS_EnableChn", enable_ret);
   }
   server->display_rotate_vpss_channel_enabled = true;
-  const int start_ret = CVI_VPSS_StartGrp(kDisplayRotateVpssGroup);
+  const int start_ret = CVI_VPSS_StartGrp(rotate_group);
   if (start_ret != CVI_SUCCESS) {
     close_http_display_venc(server);
     return report_display_venc_error(server, "CVI_VPSS_StartGrp", start_ret);
@@ -175,7 +183,7 @@ static mmf_result_t ensure_http_display_rotate_vpss(mmf_jpg_http_server_t* serve
   source.s32DevId = mmf_cvi::DualOsLayout::kDisplayVpssGroup;
   source.s32ChnId = mmf_cvi::DualOsLayout::kDisplayChannel;
   destination.enModId = CVI_ID_VPSS;
-  destination.s32DevId = kDisplayRotateVpssGroup;
+  destination.s32DevId = rotate_group;
   destination.s32ChnId = kDisplayRotateVpssChannel;
   const int bind_ret = CVI_SYS_Bind(&source, &destination);
   if (bind_ret != CVI_SUCCESS) {
@@ -266,7 +274,7 @@ static mmf_result_t ensure_http_display_venc(mmf_jpg_http_server_t* server) {
   std::memset(&source, 0, sizeof(source));
   std::memset(&destination, 0, sizeof(destination));
   source.enModId = CVI_ID_VPSS;
-  source.s32DevId = kDisplayRotateVpssGroup;
+  source.s32DevId = server->display_rotate_vpss_group;
   source.s32ChnId = kDisplayRotateVpssChannel;
   destination.enModId = CVI_ID_VENC;
   destination.s32ChnId = static_cast<CVI_S32>(server->config.venc_channel);

@@ -505,6 +505,7 @@ class PoseYolov8Runtime : public KeypointRuntime {
     result->width = image_width;
     result->height = image_height;
     if (best_candidate) {
+      result->box = best_candidate->box;
       result->points = best_candidate->points;
     }
     return true;

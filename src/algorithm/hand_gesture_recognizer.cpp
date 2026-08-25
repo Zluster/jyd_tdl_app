@@ -7,8 +7,10 @@
 #include <vector>
 
 #include "cvi_comm_video.h"
+#include "algorithm/private/bmrt_utils.hpp"
 #include "tdl_app/detector.hpp"
 #include "tdl_app/keypoint_detector.hpp"
+#include "tdl_app/model_descriptor.hpp"
 
 namespace tdl_app {
 namespace {
@@ -17,12 +19,6 @@ constexpr int kHandPointCount = 21;
 
 void setError(std::string *error, const std::string &message) {
   if (error) *error = message;
-}
-
-float distance(const Point &a, const Point &b) {
-  const float dx = a.x - b.x;
-  const float dy = a.y - b.y;
-  return std::sqrt(dx * dx + dy * dy);
 }
 
 float clamp(float value, float lower, float upper) {
@@ -79,81 +75,97 @@ void mapRoi(const Roi &roi, KeypointResult *keypoints) {
   keypoints->height = std::max(keypoints->height, roi.y + roi.height);
 }
 
-bool isFingerExtended(const KeypointResult &points, int mcp, int pip,
-                      int tip) {
-  const Point &wrist = points.points[0];
-  const float tip_distance = distance(points.points[tip], wrist);
-  const float pip_distance = distance(points.points[pip], wrist);
-  const float base_distance = distance(points.points[mcp], wrist);
-  return tip_distance > pip_distance * 1.12f &&
-         tip_distance > base_distance * 1.35f;
+std::string defaultGestureClassifierSpec(const std::string &keypoint_spec) {
+  const std::string::size_type slash = keypoint_spec.find_last_of("/\\\\");
+  if (slash == std::string::npos) {
+    return "keypoint_hand_gesture.mud";
+  }
+  return keypoint_spec.substr(0, slash + 1) + "keypoint_hand_gesture.mud";
 }
 
-HandGesture classify(const KeypointResult &points, float *score) {
-  if (score) *score = 0.0f;
-  if (points.points.size() != kHandPointCount) return HandGesture::Unknown;
-
-  const float palm_width = distance(points.points[5], points.points[17]);
-  if (palm_width < 2.0f) return HandGesture::Unknown;
-
-  const bool index = isFingerExtended(points, 5, 6, 8);
-  const bool middle = isFingerExtended(points, 9, 10, 12);
-  const bool ring = isFingerExtended(points, 13, 14, 16);
-  const bool little = isFingerExtended(points, 17, 18, 20);
-  const float thumb_length = distance(points.points[4], points.points[2]);
-  const float thumb_base = distance(points.points[3], points.points[2]);
-  const bool thumb = thumb_length > thumb_base * 1.35f &&
-                     thumb_length > palm_width * 0.45f;
-  const float thumb_index_distance = distance(points.points[4], points.points[8]);
-  const bool thumb_index_touch = thumb_index_distance < palm_width * 0.36f;
-  const int extended = static_cast<int>(thumb) + static_cast<int>(index) +
-                       static_cast<int>(middle) + static_cast<int>(ring) +
-                       static_cast<int>(little);
-
-  if (thumb_index_touch && middle && ring && little) {
-    if (score) *score = clamp(1.0f - thumb_index_distance / (palm_width * 0.36f),
-                              0.0f, 1.0f);
-    return HandGesture::Ok;
-  }
-  if (thumb_index_touch && !middle && !ring && !little) {
-    if (score) *score = clamp(1.0f - thumb_index_distance / (palm_width * 0.45f),
-                              0.0f, 1.0f);
-    return HandGesture::Pinch;
-  }
-  if (index && little && !middle && !ring) {
-    if (score) *score = 0.85f;
-    return HandGesture::Rock;
-  }
-  if (extended == 0) {
-    if (score) *score = 0.80f;
-    return HandGesture::Fist;
-  }
-  if (thumb && !index && !middle && !ring && !little) {
-    if (score) *score = 0.80f;
-    return HandGesture::ThumbUp;
-  }
-  if (!thumb && index && !middle && !ring && !little) {
-    if (score) *score = 0.85f;
-    return HandGesture::One;
-  }
-  if (!thumb && index && middle && !ring && !little) {
-    if (score) *score = 0.85f;
-    return HandGesture::Two;
-  }
-  if (!thumb && index && middle && ring && !little) {
-    if (score) *score = 0.85f;
-    return HandGesture::Three;
-  }
-  if (!thumb && index && middle && ring && little) {
-    if (score) *score = 0.85f;
-    return HandGesture::Four;
-  }
-  if (extended == 5) {
-    if (score) *score = 0.90f;
-    return HandGesture::Five;
-  }
+HandGesture gestureFromVendorLabel(const std::string &label) {
+  if (label == "fist") return HandGesture::Fist;
+  if (label == "one") return HandGesture::One;
+  if (label == "two") return HandGesture::Two;
+  if (label == "three" || label == "three2") return HandGesture::Three;
+  if (label == "four") return HandGesture::Four;
+  if (label == "five") return HandGesture::Five;
+  if (label == "ok") return HandGesture::Ok;
   return HandGesture::Unknown;
 }
+
+class KeypointGestureClassifier {
+ public:
+  bool open(const std::string &model_spec, const std::string &firmware,
+            std::string *error) {
+    reset();
+    if (!loadModelDescriptor(model_spec, &descriptor_, error)) return false;
+
+    EngineConfig config;
+    config.model_descriptor_file = model_spec;
+    config.bmrt_firmware = firmware;
+    if (!session_.open(config, descriptor_, error)) return false;
+    if (session_.inputElementCount() != kHandPointCount * 2) {
+      setError(error, "hand gesture classifier requires 42 input values");
+      reset();
+      return false;
+    }
+    if (descriptor_.labels.size() != 9 || session_.netInfo()->output_num != 1) {
+      setError(error, "hand gesture classifier requires nine labeled outputs");
+      reset();
+      return false;
+    }
+    return true;
+  }
+
+  bool classify(const KeypointResult &keypoints, HandGesture *gesture,
+                float *score, std::string *error) const {
+    if (!gesture || !score || !session_.opened()) {
+      setError(error, "hand gesture classifier is not initialized");
+      return false;
+    }
+    if (keypoints.points.size() != kHandPointCount || keypoints.width <= 0 ||
+        keypoints.height <= 0) {
+      setError(error, "hand gesture classifier requires 21 crop-relative points");
+      return false;
+    }
+
+    std::vector<float> input;
+    input.reserve(kHandPointCount * 2);
+    for (const Point &point : keypoints.points) {
+      input.push_back(clamp(point.x / keypoints.width, 0.0f, 1.0f));
+      input.push_back(clamp(point.y / keypoints.height, 0.0f, 1.0f));
+    }
+    std::vector<bmrt_runtime::OutputTensor> outputs;
+    if (!session_.launch(input, &outputs, error) || outputs.size() != 1 ||
+        outputs[0].data.size() != descriptor_.labels.size()) {
+      if (error && error->empty()) {
+        setError(error, "unexpected hand gesture classifier output");
+      }
+      return false;
+    }
+
+    const std::vector<float> &logits = outputs[0].data;
+    const size_t best = static_cast<size_t>(std::distance(
+        logits.begin(), std::max_element(logits.begin(), logits.end())));
+    const float max_logit = logits[best];
+    float sum = 0.0f;
+    for (float logit : logits) sum += std::exp(logit - max_logit);
+    *gesture = gestureFromVendorLabel(descriptor_.labels[best]);
+    *score = sum > 0.0f ? 1.0f / sum : 0.0f;
+    return true;
+  }
+
+  bool initialized() const { return session_.opened(); }
+  void reset() {
+    session_.close();
+    descriptor_ = ModelDescriptor{};
+  }
+
+ private:
+  ModelDescriptor descriptor_;
+  bmrt_runtime::Session session_;
+};
 
 }  // namespace
 
@@ -186,9 +198,17 @@ struct HandGestureRecognizer::Impl {
     return true;
   }
 
+  bool openGestureClassifier(std::string *error) {
+    const std::string model_spec = config.gesture_classifier_model_spec.empty()
+        ? defaultGestureClassifierSpec(config.keypoint_model_spec)
+        : config.gesture_classifier_model_spec;
+    return gesture_classifier.open(model_spec, config.firmware, error);
+  }
+
   Config config;
   Detector detector;
   KeypointDetector keypoint;
+  KeypointGestureClassifier gesture_classifier;
   bool keypoint_loaded = false;
   bool loaded = false;
 };
@@ -213,17 +233,20 @@ bool HandGestureRecognizer::load(const Config &config, std::string *error) {
   impl_->loaded = false;
   impl_->keypoint.reset();
   impl_->keypoint_loaded = false;
+  impl_->gesture_classifier.reset();
+  impl_->config = config;
   if (!impl_->detector.load(ModelSessionConfig::fromSpec(
           config.detector_model_spec, config.firmware), error)) {
     return false;
   }
-  impl_->config = config;
+  if (!impl_->openGestureClassifier(error)) return false;
   impl_->loaded = true;
   return true;
 }
 
 bool HandGestureRecognizer::initialized() const {
-  return impl_ && impl_->loaded && impl_->detector.initialized();
+  return impl_ && impl_->loaded && impl_->detector.initialized() &&
+         impl_->gesture_classifier.initialized();
 }
 
 bool HandGestureRecognizer::recognizeFrame(
@@ -274,8 +297,11 @@ bool HandGestureRecognizer::recognizeFrame(
                                       &result.keypoints, error)) {
       return false;
     }
+    if (!impl_->gesture_classifier.classify(result.keypoints, &result.gesture,
+                                            &result.score, error)) {
+      return false;
+    }
     mapRoi(roi, &result.keypoints);
-    result.gesture = classify(result.keypoints, &result.score);
     results->push_back(std::move(result));
   }
   return true;
