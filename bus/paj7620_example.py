@@ -10,7 +10,6 @@ import time
 
 from sensor_api import SensorApi
 from sensor_uart import (PAJ7620_AUTO_UPLOAD_INTERVAL_MS,
-                         SENSOR_PAJ7620U2_GESTURE_NONE,
                          SENSOR_TYPE_PAJ7620U2, paj7620_gesture_name,
                          paj7620_status_name)
 
@@ -28,7 +27,6 @@ def main() -> int:
         print(f"PAJ7620U2 listening on {args.device} at {args.baud} 8N1; "
               "press Ctrl+C to stop.")
         last_sequence = 0
-        last_gesture = SENSOR_PAJ7620U2_GESTURE_NONE
         last_status: int | None = None
         try:
             while True:
@@ -53,14 +51,11 @@ def main() -> int:
                     print(f"status={paj7620_status_name(value['status'])}"
                           f"({value['status']})")
                     last_status = value["status"]
-                if value["gesture"] == SENSOR_PAJ7620U2_GESTURE_NONE:
-                    last_gesture = SENSOR_PAJ7620U2_GESTURE_NONE
-                elif value["gesture"] != last_gesture:
+                if value["gesture"] != 0:
                     print(f"gesture={paj7620_gesture_name(value['gesture'])}"
                           f"({value['gesture']}) "
                           f"flags_43=0x{value['gesture_flags']:02X} "
                           f"flags_44=0x{value['wave_flags']:02X}")
-                    last_gesture = value["gesture"]
         except KeyboardInterrupt:
             pass
         finally:

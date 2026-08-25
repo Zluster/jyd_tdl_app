@@ -21,6 +21,13 @@ class SensorApi:
     def write(self, sensor_type: int, sensor_number: int, value: int) -> int:
         return self.uart.set_value(sensor_type, sensor_number, value)
 
+    def set_ws2812b_pixel(self, led_index: int, color: int,
+                          sensor_number: int = 1) -> int:
+        return self.uart.set_ws2812b_pixel(sensor_number, led_index, color)
+
+    def set_ws2812b_frame(self, colors: object, sensor_number: int = 1) -> int:
+        return self.uart.set_ws2812b_frame(sensor_number, colors)
+
     def set_auto_upload(self, sensor_type: int, sensor_number: int,
                         enabled: bool, interval_ms: int) -> int:
         return self.uart.set_auto_upload(sensor_type, sensor_number,
@@ -43,3 +50,13 @@ def sensor_api_open(device: str, baud_rate: int = 115200) -> SensorApi:
 
 def sensor_api_close(api: SensorApi) -> None:
     api.close()
+
+
+def sensor_api_set_ws2812b_pixel(api: SensorApi, led_index: int, color: int,
+                                 sensor_number: int = 1) -> int:
+    return api.set_ws2812b_pixel(led_index, color, sensor_number)
+
+
+def sensor_api_set_ws2812b_frame(api: SensorApi, colors: object,
+                                 sensor_number: int = 1) -> int:
+    return api.set_ws2812b_frame(colors, sensor_number)

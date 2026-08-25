@@ -75,15 +75,26 @@ SENSOR_UART_COMMAND_READ_SENSOR = 6
 SENSOR_UART_COMMAND_WRITE_SENSOR = 7
 SENSOR_UART_COMMAND_QUERY_SENSOR = 8
 
+WS2812B_LED_COUNT = 128
+WS2812B_FRAME_CHUNK_LEDS = 8
+WS2812B_COMMAND_SET_PIXEL = 0x01
+WS2812B_COMMAND_FRAME_BEGIN = 0x02
+WS2812B_COMMAND_FRAME_CHUNK = 0x03
+WS2812B_COMMAND_FRAME_COMMIT = 0x04
+WS2812B_COMMAND_GET_STATUS = 0x05
+WS2812B_STATUS_OK = 0x00
+
 FRAME_HEADER = 0x55
 FRAME_TAIL = 0xAA
-FRAME_OVERHEAD = 8
+# header + 2-byte payload length + type + sensor type + sensor number + CRC16 + tail
+FRAME_OVERHEAD = 9
 RX_FRAME_TIMEOUT = 0.030
 QUERY_RESPONSE_TIMEOUT = 0.300
 QUERY_HOP_TIMEOUT = 0.004
 AUTO_UPLOAD_INTERVAL_MS = 1000
 PAJ7620_AUTO_UPLOAD_INTERVAL_MS = 100
 CONFIG_FRAME_GAP = AUTO_UPLOAD_INTERVAL_MS / SENSOR_UART_SENSOR_NUMBER_MAX / 1000.0
+WS2812B_REQUEST_RETRIES = 3
 
 COMMAND_TARGETS = (
     SENSOR_TYPE_PHOTORESISTOR_ADC, SENSOR_TYPE_AHT10, SENSOR_TYPE_BMP390,
@@ -169,9 +180,15 @@ def _decode(sensor_type: int, data: bytes) -> tuple[bool, dict[str, Any]]:
         if sensor_type == SENSOR_TYPE_VL53L0X and len(data) >= 4:
             return True, {"distance_mm": struct.unpack_from("<I", data)[0]}
         if sensor_type == SENSOR_TYPE_MFRC522 and len(data) >= 8:
-            return True, {"uid": data[:4], "tag_type": data[4:6], "present": data[6] != 0}
+            return True, {"uid": data[:4], "tag_type": data[4:6],
+                          "present": data[6] in (1, 2),
+                          "status": data[6], "version": data[7]}
         if sensor_type == SENSOR_TYPE_WS2812B and len(data) >= 4:
-            return True, {"ws2812b_ack": struct.unpack_from("<I", data)[0]}
+            value = {"ws2812b_ack": struct.unpack_from("<I", data)[0]}
+            if len(data) >= 8:
+                value.update(command=data[0], status=data[1], argument0=data[2],
+                             argument1=data[3], value=struct.unpack_from("<I", data, 4)[0])
+            return True, value
         if sensor_type == SENSOR_TYPE_ZW101 and len(data) >= 2:
             value = {"operation": data[0], "status": data[1], "module_status": 0,
                      "fingerprint_id": 0, "score": 0, "result_marker": 0}
@@ -207,6 +224,7 @@ class SensorUart:
     def __init__(self, device: str, baud_rate: int = 115200) -> None:
         self.port = SerialPort(device, baud_rate)
         self._tx_lock = threading.Lock()
+        self._ws2812b_lock = threading.Lock()
         self._cache_lock = threading.Lock()
         self._cache: dict[tuple[int, int], SensorData] = {}
         self._scan_cache: list[tuple[int, int]] = []
@@ -237,8 +255,8 @@ class SensorUart:
                     payload: bytes = b"") -> bytes:
         if len(payload) > SENSOR_UART_MAX_PAYLOAD:
             raise OSError(errno.EINVAL, "payload exceeds 32 bytes")
-        body = bytes((len(payload), frame_type & 0xFF, sensor_type & 0xFF,
-                      sensor_number & 0xFF)) + payload
+        body = struct.pack("<HBBB", len(payload), frame_type & 0xFF,
+                           sensor_type & 0xFF, sensor_number & 0xFF) + payload
         crc = crc16_modbus(body)
         return bytes((FRAME_HEADER,)) + body + struct.pack("<H", crc) + bytes((FRAME_TAIL,))
 
@@ -257,10 +275,11 @@ class SensorUart:
 
     def query(self, sensor_type: int, sensor_number: int) -> int:
         self._validate_number(sensor_number)
-        payload = bytearray(4)
         if sensor_type == SENSOR_TYPE_WS2812B:
-            payload[1] = 0x55
-        elif sensor_type != SENSOR_TYPE_ZW101:
+            payload = bytearray((WS2812B_COMMAND_GET_STATUS,))
+        else:
+            payload = bytearray(4)
+        if sensor_type not in (SENSOR_TYPE_WS2812B, SENSOR_TYPE_ZW101):
             payload[3] = 0x72
         self.write(SENSOR_FRAME_TYPE_QUERY, sensor_type, sensor_number, payload)
         return 0
@@ -274,6 +293,95 @@ class SensorUart:
         self.write(SENSOR_FRAME_TYPE_QUERY, sensor_type, sensor_number,
                    struct.pack("<I", value & 0xFFFFFFFF))
         return 0
+
+    def set_ws2812b_pixel(self, sensor_number: int, led_index: int,
+                          color: int) -> int:
+        self._validate_number(sensor_number)
+        self._validate_ws2812b_color(color)
+        if not 0 <= led_index < WS2812B_LED_COUNT:
+            raise OSError(errno.EINVAL, "WS2812B led index must be 0..127")
+        payload = bytes((WS2812B_COMMAND_SET_PIXEL, led_index))
+        payload += struct.pack("<I", color & 0x00FFFFFF)
+        with self._ws2812b_lock:
+            self._ws2812b_request(sensor_number, payload,
+                                   WS2812B_COMMAND_SET_PIXEL,
+                                   expected_argument0=led_index)
+        return 0
+
+    def set_ws2812b_frame(self, sensor_number: int, colors: Any) -> int:
+        self._validate_number(sensor_number)
+        color_values = list(colors)
+        if len(color_values) != WS2812B_LED_COUNT:
+            raise OSError(errno.EINVAL, "WS2812B frame must contain 128 colors")
+        for color in color_values:
+            self._validate_ws2812b_color(color)
+
+        with self._ws2812b_lock:
+            transaction_id = (getattr(self, "_ws2812b_transaction_id", 0) + 1) & 0xFF
+            self._ws2812b_transaction_id = transaction_id
+            begin = bytes((WS2812B_COMMAND_FRAME_BEGIN, transaction_id))
+            self._ws2812b_request(sensor_number, begin,
+                                  WS2812B_COMMAND_FRAME_BEGIN, transaction_id,
+                                  expected_argument0=transaction_id)
+
+            for start in range(0, WS2812B_LED_COUNT, WS2812B_FRAME_CHUNK_LEDS):
+                chunk = color_values[start:start + WS2812B_FRAME_CHUNK_LEDS]
+                payload = bytes((WS2812B_COMMAND_FRAME_CHUNK, transaction_id,
+                                 start, len(chunk)))
+                payload += b"".join(bytes(((color >> 16) & 0xFF,
+                                           (color >> 8) & 0xFF,
+                                           color & 0xFF)) for color in chunk)
+                self._ws2812b_request(sensor_number, payload,
+                                      WS2812B_COMMAND_FRAME_CHUNK, transaction_id,
+                                      expected_argument0=transaction_id,
+                                      expected_argument1=start)
+
+            commit = bytes((WS2812B_COMMAND_FRAME_COMMIT, transaction_id))
+            self._ws2812b_request(sensor_number, commit,
+                                  WS2812B_COMMAND_FRAME_COMMIT, transaction_id,
+                                  expected_argument0=transaction_id)
+        return 0
+
+    @staticmethod
+    def _validate_ws2812b_color(color: int) -> None:
+        if not isinstance(color, int) or not 0 <= color <= 0x00FFFFFF:
+            raise OSError(errno.EINVAL, "WS2812B color must be 0x000000..0xFFFFFF")
+
+    def _ws2812b_request(self, sensor_number: int, payload: bytes,
+                         command: int, transaction_id: int | None = None,
+                         expected_argument0: int | None = None,
+                         expected_argument1: int | None = None) -> dict[str, Any]:
+        for _ in range(WS2812B_REQUEST_RETRIES):
+            try:
+                previous = self.read(SENSOR_TYPE_WS2812B, sensor_number).sequence
+            except OSError:
+                previous = 0
+            started = self._write_timed(SENSOR_FRAME_TYPE_QUERY, SENSOR_TYPE_WS2812B,
+                                        sensor_number, payload)
+            deadline = started / 1_000_000 + QUERY_RESPONSE_TIMEOUT + \
+                sensor_number * QUERY_HOP_TIMEOUT
+            while time.monotonic() < deadline:
+                try:
+                    data = self.read(SENSOR_TYPE_WS2812B, sensor_number)
+                    if data.sequence != previous and data.received_monotonic_us >= started:
+                        previous = data.sequence
+                        value = data.value
+                        if (value.get("command") == command and
+                                (expected_argument0 is None or
+                                 value.get("argument0") == expected_argument0) and
+                                (expected_argument1 is None or
+                                 value.get("argument1") == expected_argument1)):
+                            status = value.get("status", WS2812B_STATUS_OK)
+                            if status != WS2812B_STATUS_OK:
+                                raise OSError(errno.EPROTO,
+                                              f"WS2812B command 0x{command:02X} failed: "
+                                              f"status 0x{status:02X}")
+                            return value
+                except OSError as exc:
+                    if exc.errno == errno.EPROTO:
+                        raise
+                time.sleep(0.001)
+        raise TimeoutError(f"WS2812B command 0x{command:02X} response timeout")
 
     def set_auto_upload(self, sensor_type: int, sensor_number: int,
                         enabled: bool, interval_ms: int) -> int:
@@ -371,10 +479,11 @@ class SensorUart:
                 started = self._write_timed(SENSOR_FRAME_TYPE_QUERY, sensor_type,
                                             sensor_number, bytes(4))
             else:
-                payload = bytearray(4)
                 if sensor_type == SENSOR_TYPE_WS2812B:
-                    payload[1] = 0x55
-                elif sensor_type != SENSOR_TYPE_ZW101:
+                    payload = bytearray((WS2812B_COMMAND_GET_STATUS,))
+                else:
+                    payload = bytearray(4)
+                if sensor_type not in (SENSOR_TYPE_WS2812B, SENSOR_TYPE_ZW101):
                     payload[3] = 0x72
                 started = self._write_timed(SENSOR_FRAME_TYPE_QUERY, sensor_type,
                                             sensor_number, payload)
@@ -435,26 +544,36 @@ class SensorUart:
                 self._frame.append(value)
             return
         self._frame.append(value)
-        if len(self._frame) == 2:
-            if self._frame[1] > SENSOR_UART_MAX_PAYLOAD:
+        if len(self._frame) == 3:
+            payload_length = struct.unpack_from("<H", self._frame, 1)[0]
+            if payload_length > SENSOR_UART_MAX_PAYLOAD:
                 with self._cache_lock:
                     self._stats.format_errors += 1
                 self._reset_parser()
                 return
-            self._expected = self._frame[1] + FRAME_OVERHEAD
+            self._expected = payload_length + FRAME_OVERHEAD
         if self._expected and len(self._frame) == self._expected:
             self._process_frame(bytes(self._frame), time.monotonic_ns() // 1000)
             self._reset_parser()
 
     def _process_frame(self, frame: bytes, received_us: int) -> None:
-        payload_length = frame[1]
-        crc_index = payload_length + 5
+        if (len(frame) < FRAME_OVERHEAD or frame[0] != FRAME_HEADER):
+            with self._cache_lock:
+                self._stats.format_errors += 1
+            return
+        payload_length = struct.unpack_from("<H", frame, 1)[0]
+        if (payload_length > SENSOR_UART_MAX_PAYLOAD or
+                len(frame) != payload_length + FRAME_OVERHEAD):
+            with self._cache_lock:
+                self._stats.format_errors += 1
+            return
+        crc_index = payload_length + 6
         received_crc = struct.unpack_from("<H", frame, crc_index)[0]
         if received_crc != crc16_modbus(frame[1:crc_index]):
             with self._cache_lock:
                 self._stats.crc_errors += 1
             return
-        frame_type = frame[2]
+        frame_type = frame[3]
         if frame_type == SENSOR_FRAME_TYPE_QUERY:
             with self._cache_lock:
                 self._stats.query_echoes += 1
@@ -469,8 +588,8 @@ class SensorUart:
             with self._cache_lock:
                 self._stats.format_errors += 1
             return
-        sensor_type, sensor_number = frame[3], frame[4]
-        payload = frame[5:crc_index]
+        sensor_type, sensor_number = frame[4], frame[5]
+        payload = frame[6:crc_index]
         with self._cache_lock:
             if legacy_tail:
                 self._stats.legacy_tails += 1

@@ -76,6 +76,18 @@ def setValue(api: SensorApi, sensor_type: int, sensor_number: int,
     api.write(sensor_type, sensor_number, value)
 
 
+def setWs2812bPixel(api: SensorApi, led_index: int, color: int,
+                    sensor_number: int = 1) -> None:
+    """设置单颗 WS2812B 灯珠，颜色格式为 0x00RRGGBB。"""
+    api.set_ws2812b_pixel(led_index, color, sensor_number)
+
+
+def setWs2812bFrame(api: SensorApi, colors: object,
+                    sensor_number: int = 1) -> None:
+    """一次提交 128 颗 WS2812B 的颜色。"""
+    api.set_ws2812b_frame(colors, sensor_number)
+
+
 def read(api: SensorApi, sensor_type: int,
          sensor_number: int) -> SensorData | None:
     """读取接收线程缓存的数据；没有数据时返回 None。"""

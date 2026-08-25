@@ -1,6 +1,14 @@
 #!/usr/bin/env python3
 """最简单的传感器 API 调用测试。"""
 
+import sys
+from pathlib import Path
+
+# Allow direct execution from the linux_uart_Python project directory.
+PROJECT_DIR = Path(__file__).resolve().parent.parent
+if str(PROJECT_DIR) not in sys.path:
+    sys.path.insert(0, str(PROJECT_DIR))
+
 from api_call_example import (getValue, initialize, listenning, read,
                               scanning, setUploadMode, setValue)
 
