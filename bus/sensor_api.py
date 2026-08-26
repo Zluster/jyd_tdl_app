@@ -1,62 +1,18 @@
-"""Simple high-level API corresponding to sensor_api.c."""
+"""Compatibility imports; new code should use jydbus_api."""
 
-from __future__ import annotations
+from jydbus_api import (JydbusApi, jydbusApi, jydbus_api_close,
+                        jydbus_api_open, jydbus_api_set_ws2812b_frame,
+                        jydbus_api_set_ws2812b_pixel)
 
-from sensor_uart import SensorData, SensorUart, SensorUartCommandResult
+SensorApi = JydbusApi
+sensor_api_open = jydbus_api_open
+sensor_api_close = jydbus_api_close
+sensor_api_set_ws2812b_pixel = jydbus_api_set_ws2812b_pixel
+sensor_api_set_ws2812b_frame = jydbus_api_set_ws2812b_frame
 
-
-class SensorApi:
-    def __init__(self, device: str, baud_rate: int = 115200) -> None:
-        self.uart = SensorUart(device, baud_rate)
-
-    def close(self) -> None:
-        self.uart.close()
-
-    def query(self, sensor_type: int, sensor_number: int) -> int:
-        return self.uart.query(sensor_type, sensor_number)
-
-    def read(self, sensor_type: int, sensor_number: int) -> SensorData:
-        return self.uart.read(sensor_type, sensor_number)
-
-    def write(self, sensor_type: int, sensor_number: int, value: int) -> int:
-        return self.uart.set_value(sensor_type, sensor_number, value)
-
-    def set_ws2812b_pixel(self, led_index: int, color: int,
-                          sensor_number: int = 1) -> int:
-        return self.uart.set_ws2812b_pixel(sensor_number, led_index, color)
-
-    def set_ws2812b_frame(self, colors: object, sensor_number: int = 1) -> int:
-        return self.uart.set_ws2812b_frame(sensor_number, colors)
-
-    def set_auto_upload(self, sensor_type: int, sensor_number: int,
-                        enabled: bool, interval_ms: int) -> int:
-        return self.uart.set_auto_upload(sensor_type, sensor_number,
-                                         enabled, interval_ms)
-
-    def command(self, command: int, sensor_type: int = 0,
-                sensor_number: int = 0, value: int = 0) -> SensorUartCommandResult:
-        return self.uart.execute_command(command, sensor_type, sensor_number, value)
-
-    def __enter__(self) -> "SensorApi":
-        return self
-
-    def __exit__(self, exc_type: object, exc: object, traceback: object) -> None:
-        self.close()
-
-
-def sensor_api_open(device: str, baud_rate: int = 115200) -> SensorApi:
-    return SensorApi(device, baud_rate)
-
-
-def sensor_api_close(api: SensorApi) -> None:
-    api.close()
-
-
-def sensor_api_set_ws2812b_pixel(api: SensorApi, led_index: int, color: int,
-                                 sensor_number: int = 1) -> int:
-    return api.set_ws2812b_pixel(led_index, color, sensor_number)
-
-
-def sensor_api_set_ws2812b_frame(api: SensorApi, colors: object,
-                                 sensor_number: int = 1) -> int:
-    return api.set_ws2812b_frame(colors, sensor_number)
+__all__ = (
+    "JydbusApi", "jydbusApi", "SensorApi", "jydbus_api_open",
+    "jydbus_api_close", "jydbus_api_set_ws2812b_pixel",
+    "jydbus_api_set_ws2812b_frame", "sensor_api_open", "sensor_api_close",
+    "sensor_api_set_ws2812b_pixel", "sensor_api_set_ws2812b_frame",
+)

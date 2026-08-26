@@ -7,10 +7,16 @@ import argparse
 import errno
 import sys
 import time
+from pathlib import Path
 
-from sensor_api import SensorApi
-from sensor_uart import (PAJ7620_AUTO_UPLOAD_INTERVAL_MS,
-                         SENSOR_TYPE_PAJ7620U2, paj7620_gesture_name,
+# Allow `python3 examples/paj7620_example.py` from the project directory.
+PROJECT_DIR = Path(__file__).resolve().parent.parent
+if str(PROJECT_DIR) not in sys.path:
+    sys.path.insert(0, str(PROJECT_DIR))
+
+from jydbus_api import jydbusApi
+from jydbus_uart import (PAJ7620_AUTO_UPLOAD_INTERVAL_MS,
+                         JYDBUS_TYPE_PAJ7620U2, paj7620_gesture_name,
                          paj7620_status_name)
 
 
@@ -21,8 +27,8 @@ def main() -> int:
     parser.add_argument("--number", type=int, default=1)
     args = parser.parse_args()
 
-    with SensorApi(args.device, args.baud) as api:
-        api.set_auto_upload(SENSOR_TYPE_PAJ7620U2, args.number, True,
+    with jydbusApi(args.device, args.baud) as api:
+        api.set_auto_upload(JYDBUS_TYPE_PAJ7620U2, args.number, True,
                             PAJ7620_AUTO_UPLOAD_INTERVAL_MS)
         print(f"PAJ7620U2 listening on {args.device} at {args.baud} 8N1; "
               "press Ctrl+C to stop.")
@@ -31,7 +37,7 @@ def main() -> int:
         try:
             while True:
                 try:
-                    data = api.read(SENSOR_TYPE_PAJ7620U2, args.number)
+                    data = api.read(JYDBUS_TYPE_PAJ7620U2, args.number)
                 except OSError as exc:
                     if exc.errno != errno.ENODATA:
                         raise
@@ -60,7 +66,7 @@ def main() -> int:
             pass
         finally:
             try:
-                api.set_auto_upload(SENSOR_TYPE_PAJ7620U2, args.number, False, 0)
+                api.set_auto_upload(JYDBUS_TYPE_PAJ7620U2, args.number, False, 0)
             except OSError as exc:
                 print(f"disable auto upload failed: {exc}", file=sys.stderr)
     return 0

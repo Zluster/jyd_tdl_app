@@ -34,12 +34,14 @@ python3 tests/api_simple_test.py
 
 详细条件见 `tests/README.md`。
 
+扫描和 MFRC522 等专项硬件调试脚本也统一位于 `tests/`。
+
 ## 通用传感器通信
 
 交互式工具：
 
 ```bash
-python3 example_dual_uart.py --device /dev/ttyS2 --baud 115200
+python3 examples/example_dual_uart.py --device /dev/ttyS2 --baud 115200
 ```
 
 常用命令：
@@ -55,25 +57,47 @@ python3 example_dual_uart.py --device /dev/ttyS2 --baud 115200
 基础 API：
 
 ```python
-from sensor_api import SensorApi
+from jydbus_api import jydbusApi
 
-with SensorApi("/dev/ttyS2", 115200) as api:
+with jydbusApi("/dev/ttyS2", 115200) as api:
     api.query(0x03, 1)
     print(api.read(0x03, 1).value)
 ```
 
 `read()` 只读取接收线程缓存，不会隐式发送查询；首次读取前应先查询或开启自动上传。
 
+推荐使用 Jydbus 专用类。所有对象共享同一个 `jydbusApi`，因此只打开一次串口：
+
+```python
+from jydbus_api import jydbusApi
+from jydbus_devices import JydbusAHT10, JydbusBMP390
+
+with jydbusApi("/dev/ttyS2", 115200) as api:
+    aht10 = JydbusAHT10(api, 1)
+    bmp390 = JydbusBMP390(api, 2)
+    print(aht10.query_value())
+    print(bmp390.query_value())
+```
+
+也可以按协议类型创建对应类：
+
+```python
+device = api.jydbus(0x03, 1)  # 返回 JydbusBMP390
+```
+
+全部类名和方法见 `API_使用说明.md`，可运行示例见
+`examples/jydbus_classes_example.py`。
+
 WS2812B 灯板（类型 `0x07`）支持单灯和整屏控制。灯珠编号为 `0～127`，颜色为
 `0x00RRGGBB`：
 
 ```python
-from sensor_api import SensorApi
+from jydbus_api import jydbusApi
 
 colors = [0x000000] * 128
 colors[15] = 0xFF0000
 
-with SensorApi("/dev/ttyS2", 115200) as api:
+with jydbusApi("/dev/ttyS2", 115200) as api:
     api.set_ws2812b_pixel(15, 0x0000FF)
     api.set_ws2812b_frame(colors)
 ```
@@ -85,7 +109,7 @@ with SensorApi("/dev/ttyS2", 115200) as api:
 PAJ7620U2 由 GD32 的 `PB6/SCL`、`PB7/SDA` 驱动，Linux 通过 UART 获取结果：
 
 ```bash
-python3 paj7620_example.py --device /dev/ttyS2 --baud 115200 --number 1
+python3 examples/paj7620_example.py --device /dev/ttyS2 --baud 115200 --number 1
 ```
 
 程序会为传感器类型 `0x15` 开启手势事件上报；GD32 每识别一个新手势立即上传一次，不会周期性发送空状态或重复帧，连续相同手势也会分别打印。按 `Ctrl+C` 后会自动关闭。详细说明见 `../linux_uart/PAJ7620U2_使用说明.md`。

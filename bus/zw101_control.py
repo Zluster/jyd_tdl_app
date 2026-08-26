@@ -6,8 +6,8 @@ import errno
 import time
 from dataclasses import dataclass
 
-from sensor_uart import (SENSOR_FRAME_TYPE_QUERY, SENSOR_TYPE_ZW101,
-                         SensorUart)
+from jydbus_uart import (JYDBUS_FRAME_TYPE_QUERY, JYDBUS_TYPE_ZW101,
+                         JydbusUart)
 
 ZW101_CONTROL_DEFAULT_TIMEOUT_MS = 35000
 ZW101_CONTROL_MAX_TEMPLATE_ID = 49
@@ -38,21 +38,21 @@ def _validate(sensor_number: int, command: int, fingerprint_id: int) -> None:
         raise OSError(errno.ERANGE, "fingerprint ID must be 0..49")
 
 
-def zw101_control_send(uart: SensorUart, sensor_number: int,
+def zw101_control_send(uart: JydbusUart, sensor_number: int,
                        command: int, fingerprint_id: int = 0) -> int:
     _validate(sensor_number, command, fingerprint_id)
-    return uart.write(SENSOR_FRAME_TYPE_QUERY, SENSOR_TYPE_ZW101, sensor_number,
+    return uart.write(JYDBUS_FRAME_TYPE_QUERY, JYDBUS_TYPE_ZW101, sensor_number,
                       bytes((command, fingerprint_id, 0, 0)))
 
 
-def zw101_control_execute(uart: SensorUart, sensor_number: int, command: int,
+def zw101_control_execute(uart: JydbusUart, sensor_number: int, command: int,
                           fingerprint_id: int = 0,
                           timeout_ms: int = ZW101_CONTROL_DEFAULT_TIMEOUT_MS) -> Zw101ControlResult:
     if timeout_ms <= 0:
         raise OSError(errno.EINVAL, "timeout must be positive")
     _validate(sensor_number, command, fingerprint_id)
     try:
-        previous_sequence = uart.read(SENSOR_TYPE_ZW101, sensor_number).sequence
+        previous_sequence = uart.read(JYDBUS_TYPE_ZW101, sensor_number).sequence
     except OSError:
         previous_sequence = 0
     zw101_control_send(uart, sensor_number, command, fingerprint_id)
@@ -60,7 +60,7 @@ def zw101_control_execute(uart: SensorUart, sensor_number: int, command: int,
     deadline = started + timeout_ms / 1000.0
     while time.monotonic() < deadline:
         try:
-            data = uart.read(SENSOR_TYPE_ZW101, sensor_number)
+            data = uart.read(JYDBUS_TYPE_ZW101, sensor_number)
         except OSError:
             data = None
         if data is not None and data.sequence != previous_sequence:
@@ -81,20 +81,20 @@ def zw101_control_execute(uart: SensorUart, sensor_number: int, command: int,
     raise TimeoutError(errno.ETIMEDOUT, "ZW101 operation timed out")
 
 
-def zw101_control_enroll(uart: SensorUart, sensor_number: int,
+def zw101_control_enroll(uart: JydbusUart, sensor_number: int,
                          fingerprint_id: int) -> int:
     return zw101_control_send(uart, sensor_number, ZW101_CONTROL_ENROLL, fingerprint_id)
 
 
-def zw101_control_match(uart: SensorUart, sensor_number: int,
+def zw101_control_match(uart: JydbusUart, sensor_number: int,
                         timeout_ms: int = ZW101_CONTROL_DEFAULT_TIMEOUT_MS) -> Zw101ControlResult:
     return zw101_control_execute(uart, sensor_number, ZW101_CONTROL_MATCH, 0, timeout_ms)
 
 
-def zw101_control_delete(uart: SensorUart, sensor_number: int,
+def zw101_control_delete(uart: JydbusUart, sensor_number: int,
                          fingerprint_id: int) -> int:
     return zw101_control_send(uart, sensor_number, ZW101_CONTROL_DELETE, fingerprint_id)
 
 
-def zw101_control_clear_database(uart: SensorUart, sensor_number: int) -> int:
+def zw101_control_clear_database(uart: JydbusUart, sensor_number: int) -> int:
     return zw101_control_send(uart, sensor_number, ZW101_CONTROL_CLEAR_DATABASE, 0)

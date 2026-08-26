@@ -6,18 +6,18 @@
 
 ## 1. 传感器 API
 
-优先使用 `SensorApi`：
+优先使用 `jydbusApi`：
 
 ```python
 import time
 
-from sensor_api import SensorApi
-from sensor_uart import SENSOR_TYPE_BMP390
+from jydbus_api import jydbusApi
+from jydbus_uart import JYDBUS_TYPE_BMP390
 
-with SensorApi("/dev/ttyS2", 115200) as api:
-    api.query(SENSOR_TYPE_BMP390, 1)  # 只发送查询帧
+with jydbusApi("/dev/ttyS2", 115200) as api:
+    api.query(JYDBUS_TYPE_BMP390, 1)  # 只发送查询帧
     time.sleep(0.35)                  # 等待设备响应
-    data = api.read(SENSOR_TYPE_BMP390, 1)
+    data = api.read(JYDBUS_TYPE_BMP390, 1)
     print(data.value)
 ```
 
@@ -26,20 +26,20 @@ with SensorApi("/dev/ttyS2", 115200) as api:
 | 方法 | 作用 | 返回值 |
 |---|---|---|
 | `query(type, number)` | 发送一次查询，不等待响应 | 成功返回 `0` |
-| `read(type, number)` | 读取接收线程缓存的最新数据 | `SensorData` |
+| `read(type, number)` | 读取接收线程缓存的最新数据 | `JydbusData` |
 | `write(type, number, value)` | 写入 32 位设置值 | 成功返回 `0` |
-| `command(cmd, type=0, number=0, value=0)` | 执行统一命令 1～8 | `SensorUartCommandResult` |
+| `command(cmd, type=0, number=0, value=0)` | 执行统一命令 1～8 | `JydbusUartCommandResult` |
 | `close()` | 关闭串口 | 无 |
 
 需要“发送并等待响应”时，使用命令 8：
 
 ```python
-from sensor_api import SensorApi
-from sensor_uart import SENSOR_UART_COMMAND_QUERY_SENSOR, SENSOR_TYPE_AHT10
+from jydbus_api import jydbusApi
+from jydbus_uart import JYDBUS_UART_COMMAND_QUERY_SENSOR, JYDBUS_TYPE_AHT10
 
-with SensorApi("/dev/ttyS2") as api:
-    result = api.command(SENSOR_UART_COMMAND_QUERY_SENSOR,
-                         SENSOR_TYPE_AHT10, 1)
+with jydbusApi("/dev/ttyS2") as api:
+    result = api.command(JYDBUS_UART_COMMAND_QUERY_SENSOR,
+                         JYDBUS_TYPE_AHT10, 1)
     if result.status == 0 and result.data_valid:
         print(result.data.value)
 ```
@@ -48,19 +48,19 @@ with SensorApi("/dev/ttyS2") as api:
 
 | 命令 | 常量 | 功能 |
 |---:|---|---|
-| 1 | `SENSOR_UART_COMMAND_SCAN` | 扫描传感器 |
-| 2 | `SENSOR_UART_COMMAND_QUERY_ALL` | 查询全部传感器 |
-| 3 | `SENSOR_UART_COMMAND_ENABLE_AUTO_UPLOAD` | 开启自动上传 |
-| 4 | `SENSOR_UART_COMMAND_DISABLE_AUTO_UPLOAD` | 关闭自动上传 |
-| 5 | `SENSOR_UART_COMMAND_SET_WS2812B_RED` | 第一个 WS2812B 设为红色 |
-| 6 | `SENSOR_UART_COMMAND_READ_SENSOR` | 读取缓存 |
-| 7 | `SENSOR_UART_COMMAND_WRITE_SENSOR` | 写入数值 |
-| 8 | `SENSOR_UART_COMMAND_QUERY_SENSOR` | 查询并等待响应 |
+| 1 | `JYDBUS_UART_COMMAND_SCAN` | 扫描传感器 |
+| 2 | `JYDBUS_UART_COMMAND_QUERY_ALL` | 查询全部传感器 |
+| 3 | `JYDBUS_UART_COMMAND_ENABLE_AUTO_UPLOAD` | 开启自动上传 |
+| 4 | `JYDBUS_UART_COMMAND_DISABLE_AUTO_UPLOAD` | 关闭自动上传 |
+| 5 | `JYDBUS_UART_COMMAND_SET_WS2812B_RED` | 第一个 WS2812B 设为红色 |
+| 6 | `JYDBUS_UART_COMMAND_READ_SENSOR` | 读取缓存 |
+| 7 | `JYDBUS_UART_COMMAND_WRITE_SENSOR` | 写入数值 |
+| 8 | `JYDBUS_UART_COMMAND_QUERY_SENSOR` | 查询并等待响应 |
 
 ### 扫描帧协议
 
-扫描使用统一命令 `SENSOR_UART_COMMAND_SCAN = 1`，对应帧类型
-`SENSOR_FRAME_TYPE_SCAN = 0x03`。主机发送一次扫描请求，在线节点分别返回
+扫描使用统一命令 `JYDBUS_UART_COMMAND_SCAN = 1`，对应帧类型
+`JYDBUS_FRAME_TYPE_SCAN = 0x03`。主机发送一次扫描请求，在线节点分别返回
 一帧扫描应答。
 
 请求帧（主机 → 总线）：
@@ -93,7 +93,7 @@ CRC16-Modbus 的计算范围从 `LEN` 开始，一直到 payload 最后一个字
 最简单的 Python 调用方式：
 
 ```python
-from api_call_example import getScanData, initialize
+from examples.api_call_example import getScanData, initialize
 
 api = initialize("/dev/ttyS2", 115200)
 try:
@@ -103,7 +103,7 @@ finally:
     api.close()
 ```
 
-`getScanData()` 返回的每项包含 `sensor_type`、`sensor_name`、
+`getScanData()` 返回的每项包含 `sensor_type`、`jydbus_name`、
 `sensor_number`、`response_received`、`response_ms` 和 `send_result`。
 `status == 0` 且列表非空表示扫描成功；空列表时检查设备是否运行应用程序、
 TX/RX/GND 是否交叉连接以及波特率是否为 `115200`。统计信息中的
@@ -113,20 +113,20 @@ TX/RX/GND 是否交叉连接以及波特率是否为 `115200`。统计信息中�
 
 | 类型 | 常量 | `data.value` 主要字段 |
 |---:|---|---|
-| `0x02` | `SENSOR_TYPE_AHT10` | `temperature_c`, `humidity_percent` |
-| `0x03` | `SENSOR_TYPE_BMP390` | `temperature_c`, `pressure_pa` |
-| `0x04` | `SENSOR_TYPE_MAX30102` | `heart_rate_bpm`, `spo2_percent` |
-| `0x05` | `SENSOR_TYPE_VL53L0X` | `distance_mm` |
-| `0x06` | `SENSOR_TYPE_MFRC522` | `uid`, `tag_type`, `present` |
-| `0x07` | `SENSOR_TYPE_WS2812B` | `ws2812b_ack` |
-| `0x08` | `SENSOR_TYPE_ZW101` | `operation`, `status`, `fingerprint_id`, `score` |
-| `0x09` | `SENSOR_TYPE_BUTTON_PB1` | `button_level` |
-| `0x0A` | `SENSOR_TYPE_JOYSTICK` | `x_adc`, `y_adc` |
-| `0x0F` | `SENSOR_TYPE_PHOTORESISTOR_ADC` | `adc` |
-| `0x11` | `SENSOR_TYPE_WATER_LEVEL_ADC` | `water_level_adc` |
-| `0x12` | `SENSOR_TYPE_SOIL_MOISTURE_ADC` | `soil_moisture_adc` |
-| `0x13` | `SENSOR_TYPE_ZSPD4003` | `heart_rate_bpm`, `spo2_percent`, `status`, `signal_quality` |
-| `0x14` | `SENSOR_TYPE_KNOB_SWITCH_ADC` | `knob_switch_adc` |
+| `0x02` | `JYDBUS_TYPE_AHT10` | `temperature_c`, `humidity_percent` |
+| `0x03` | `JYDBUS_TYPE_BMP390` | `temperature_c`, `pressure_pa` |
+| `0x04` | `JYDBUS_TYPE_MAX30102` | `heart_rate_bpm`, `spo2_percent` |
+| `0x05` | `JYDBUS_TYPE_VL53L0X` | `distance_mm` |
+| `0x06` | `JYDBUS_TYPE_MFRC522` | `uid`, `tag_type`, `present` |
+| `0x07` | `JYDBUS_TYPE_WS2812B` | `ws2812b_ack` |
+| `0x08` | `JYDBUS_TYPE_ZW101` | `operation`, `status`, `fingerprint_id`, `score` |
+| `0x09` | `JYDBUS_TYPE_BUTTON_PB1` | `button_level` |
+| `0x0A` | `JYDBUS_TYPE_JOYSTICK` | `x_adc`, `y_adc` |
+| `0x0F` | `JYDBUS_TYPE_PHOTORESISTOR_ADC` | `adc` |
+| `0x11` | `JYDBUS_TYPE_WATER_LEVEL_ADC` | `water_level_adc` |
+| `0x12` | `JYDBUS_TYPE_SOIL_MOISTURE_ADC` | `soil_moisture_adc` |
+| `0x13` | `JYDBUS_TYPE_ZSPD4003` | `heart_rate_bpm`, `spo2_percent`, `status`, `signal_quality` |
+| `0x14` | `JYDBUS_TYPE_KNOB_SWITCH_ADC` | `knob_switch_adc` |
 
 ### WS2812B 灯板控制
 
@@ -134,13 +134,13 @@ WS2812B 类型为 `0x07`，灯珠索引为 `0～127`，颜色使用 `0x00RRGGBB`
 单灯控制和 128 灯整屏控制示例：
 
 ```python
-from sensor_api import SensorApi
+from jydbus_api import jydbusApi
 
 colors = [0x000000] * 128
 colors[0] = 0xFF0000       # 第 0 颗红色
 colors[127] = 0x0000FF     # 第 127 颗蓝色
 
-with SensorApi("/dev/ttyS2", 115200) as api:
+with jydbusApi("/dev/ttyS2", 115200) as api:
     api.set_ws2812b_pixel(12, 0x00FF00)  # 第 12 颗绿色
     api.set_ws2812b_frame(colors)        # 一次提交整屏 128 颗颜色
 ```
@@ -148,7 +148,7 @@ with SensorApi("/dev/ttyS2", 115200) as api:
 `set_ws2812b_frame()` 会在内部将 128 颗颜色分成 16 个通信块传输，
 所有块校验成功后才提交到灯板；任意块失败会抛出异常，灯板保持原显示。
 
-`SensorData` 常用字段：
+`JydbusData` 常用字段：
 
 ```text
 sensor_type, sensor_number     传感器类型和编号
@@ -159,21 +159,95 @@ sequence                       每次收到新数据递增
 updated_monotonic_ms           本机单调时钟时间戳
 ```
 
-底层控制可直接使用 `SensorUart`：
+底层控制可直接使用 `JydbusUart`：
 
 ```python
 import time
 
-from sensor_uart import SensorUart
+from jydbus_uart import JydbusUart
 
-with SensorUart("/dev/ttyS2", 115200) as uart:
+with JydbusUart("/dev/ttyS2", 115200) as uart:
     uart.query(0x03, 1)
     time.sleep(0.35)
     print(uart.read_all())
     print(uart.get_stats())
 ```
 
-需要兼容原 C 风格时，也可使用 `sensor_api_open()` / `sensor_api_close()`；新代码推荐使用 `with SensorApi(...)`。
+函数式入口为 `jydbus_api_open()` / `jydbus_api_close()`；新代码推荐使用
+`with jydbusApi(...)`。为匹配现有集成，也提供完全相同的 `jydbusApi` 类别名。
+旧 `SensorApi` 和 `sensor_api_*` 名称仍可兼容使用。
+
+### 每种 Jydbus 设备对应的类
+
+专用类定义在 `jydbus_devices.py`。一个 `jydbusApi` 代表一条 UART 总线；所有传感器
+对象必须共享它，不能为每个传感器重复打开 `/dev/ttyS2`：
+
+```python
+from jydbus_api import jydbusApi
+from jydbus_devices import JydbusAHT10, JydbusBMP390
+
+with jydbusApi("/dev/ttyS2", 115200) as api:
+    aht10 = JydbusAHT10(api, sensor_number=1)
+    bmp390 = JydbusBMP390(api, sensor_number=2)
+
+    print(aht10.query_value())
+    print(bmp390.query_value())
+```
+
+类与类型对应关系：
+
+| 类型 | 类 |
+|---:|---|
+| `0x02` | `JydbusAHT10` |
+| `0x03` | `JydbusBMP390` |
+| `0x04` | `JydbusMAX30102` |
+| `0x05` | `JydbusVL53L0X` |
+| `0x06` | `JydbusMFRC522` |
+| `0x07` | `JydbusWS2812B` |
+| `0x08` | `JydbusZW101` |
+| `0x09` | `JydbusButtonPB1` |
+| `0x0A` | `JydbusJoystick` |
+| `0x0F` | `JydbusPhotoresistorADC` |
+| `0x11` | `JydbusWaterLevelADC` |
+| `0x12` | `JydbusSoilMoistureADC` |
+| `0x13` | `JydbusZSPD4003` |
+| `0x14` | `JydbusKnobSwitchADC` |
+| `0x15` | `JydbusPAJ7620U2` |
+
+所有类继承 `JydbusDevice`，提供以下通用方法：
+
+| 方法 | 作用 |
+|---|---|
+| `query()` | 只发送查询，不等待响应 |
+| `query_data()` | 查询并等待响应，返回 `JydbusData` |
+| `query_value()` | 查询并返回解码后的字典 |
+| `read()` | 读取接收线程缓存，返回 `JydbusData` |
+| `read_value()` | 读取缓存并返回解码后的字典 |
+| `write(value)` | 写入 32 位配置值 |
+| `set_auto_upload(enabled, interval_ms=None)` | 开启或关闭该节点自动上传 |
+
+也可以让 `jydbusApi` 根据类型自动选择类：
+
+```python
+with jydbusApi("/dev/ttyS2") as api:
+    bmp390 = api.jydbus(0x03, 1)
+    print(type(bmp390).__name__)  # JydbusBMP390
+```
+
+WS2812B 专用方法：
+
+```python
+from jydbus_devices import JydbusWS2812B
+
+with jydbusApi("/dev/ttyS2") as api:
+    leds = JydbusWS2812B(api, 1)
+    leds.set_pixel(0, 0xFF0000)
+    leds.set_frame([0x000000] * 128)
+```
+
+`JydbusZW101` 提供 `set_timeout()`、`enroll()`、`match()`、`delete()` 和
+`clear()`；这些方法复用 `jydbusApi` 的 UART，不会再次打开串口。原有
+`Zw101Device` 接口继续保留，兼容旧代码。
 
 ## 2. ZW101 API
 

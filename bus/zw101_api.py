@@ -5,7 +5,7 @@ from __future__ import annotations
 import errno
 import threading
 
-from sensor_uart import SensorUart
+from jydbus_uart import JydbusUart
 from zw101_control import (ZW101_CONTROL_CLEAR_DATABASE, ZW101_CONTROL_DELETE,
                            ZW101_CONTROL_ENROLL, ZW101_CONTROL_MATCH,
                            ZW101_CONTROL_DEFAULT_TIMEOUT_MS, Zw101ControlResult,
@@ -19,7 +19,7 @@ class Zw101Device:
     def __init__(self, uart_device: str, node_number: int = 1) -> None:
         if node_number == 0:
             raise OSError(errno.EINVAL, "node number must be nonzero")
-        self.uart = SensorUart(uart_device, ZW101_API_UART_BAUD)
+        self.uart = JydbusUart(uart_device, ZW101_API_UART_BAUD)
         self.node_number = node_number
         self.timeout_ms = ZW101_CONTROL_DEFAULT_TIMEOUT_MS
         self._operation_lock = threading.Lock()

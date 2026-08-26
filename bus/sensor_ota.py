@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Callable
 
 from serial_port import SerialPort
-from sensor_uart import crc16_modbus
+from jydbus_uart import crc16_modbus
 
 SENSOR_OTA_SLOT_A = 0
 SENSOR_OTA_SLOT_B = 1

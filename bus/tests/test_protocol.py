@@ -15,61 +15,61 @@ if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
 import sensor_ota
-import sensor_uart
+import jydbus_uart
 
 
-def receiver() -> sensor_uart.SensorUart:
-    uart = object.__new__(sensor_uart.SensorUart)
+def receiver() -> jydbus_uart.JydbusUart:
+    uart = object.__new__(jydbus_uart.JydbusUart)
     uart._cache_lock = threading.Lock()
     uart._cache = {}
     uart._scan_cache = []
-    uart._stats = sensor_uart.SensorUartStats()
+    uart._stats = jydbus_uart.JydbusUartStats()
     uart._sequence = 0
     return uart
 
 
 def response(sensor_type: int, sensor_number: int, payload: bytes,
-             frame_type: int = sensor_uart.SENSOR_FRAME_TYPE_DATA) -> bytes:
-    return sensor_uart.SensorUart.build_frame(frame_type, sensor_type,
+             frame_type: int = jydbus_uart.JYDBUS_FRAME_TYPE_DATA) -> bytes:
+    return jydbus_uart.JydbusUart.build_frame(frame_type, sensor_type,
                                               sensor_number, payload)
 
 
 class SensorProtocolTests(unittest.TestCase):
     def test_crc_and_frame(self) -> None:
-        self.assertEqual(sensor_uart.crc16_modbus(b"123456789"), 0x4B37)
-        frame = response(sensor_uart.SENSOR_TYPE_BUTTON_PB1, 1, b"\x00")
+        self.assertEqual(jydbus_uart.crc16_modbus(b"123456789"), 0x4B37)
+        frame = response(jydbus_uart.JYDBUS_TYPE_BUTTON_PB1, 1, b"\x00")
         self.assertEqual(frame[0], 0x55)
         self.assertEqual(frame[-1], 0xAA)
         self.assertEqual(len(frame), struct.unpack_from("<H", frame, 1)[0] + 9)
 
     def test_float_and_adc_decode(self) -> None:
         uart = receiver()
-        frame = response(sensor_uart.SENSOR_TYPE_AHT10, 1,
+        frame = response(jydbus_uart.JYDBUS_TYPE_AHT10, 1,
                          struct.pack("<ff", 23.5, 61.25))
         uart._process_frame(frame, 1_234_567)
-        data = copy.deepcopy(uart._cache[(sensor_uart.SENSOR_TYPE_AHT10, 1)])
+        data = copy.deepcopy(uart._cache[(jydbus_uart.JYDBUS_TYPE_AHT10, 1)])
         self.assertTrue(data.decoded_valid)
         self.assertAlmostEqual(data.value["temperature_c"], 23.5)
         self.assertAlmostEqual(data.value["humidity_percent"], 61.25)
-        frame = response(sensor_uart.SENSOR_TYPE_PHOTORESISTOR_ADC, 1,
+        frame = response(jydbus_uart.JYDBUS_TYPE_PHOTORESISTOR_ADC, 1,
                          b"\x00\x00\x34\x12")
         uart._process_frame(frame, 1_234_568)
-        self.assertEqual(uart._cache[(sensor_uart.SENSOR_TYPE_PHOTORESISTOR_ADC, 1)].value["adc"],
+        self.assertEqual(uart._cache[(jydbus_uart.JYDBUS_TYPE_PHOTORESISTOR_ADC, 1)].value["adc"],
                          0x1234)
 
     def test_zw101_result_and_scan(self) -> None:
         uart = receiver()
         payload = struct.pack("<BBBHHB", 2, 0, 0, 7, 85, 0xA5)
-        uart._process_frame(response(sensor_uart.SENSOR_TYPE_ZW101, 1, payload), 2000)
-        value = uart._cache[(sensor_uart.SENSOR_TYPE_ZW101, 1)].value
+        uart._process_frame(response(jydbus_uart.JYDBUS_TYPE_ZW101, 1, payload), 2000)
+        value = uart._cache[(jydbus_uart.JYDBUS_TYPE_ZW101, 1)].value
         self.assertEqual((value["fingerprint_id"], value["score"], value["result_marker"]),
                          (7, 85, 0xA5))
-        uart._process_frame(response(0x0A, 2, b"KKKK", sensor_uart.SENSOR_FRAME_TYPE_SCAN), 3000)
+        uart._process_frame(response(0x0A, 2, b"KKKK", jydbus_uart.JYDBUS_FRAME_TYPE_SCAN), 3000)
         self.assertEqual(uart._scan_cache, [(0x0A, 2)])
 
     def test_bad_crc_is_counted(self) -> None:
         uart = receiver()
-        frame = bytearray(response(sensor_uart.SENSOR_TYPE_BUTTON_PB1, 1, b"\x01"))
+        frame = bytearray(response(jydbus_uart.JYDBUS_TYPE_BUTTON_PB1, 1, b"\x01"))
         frame[-2] ^= 1
         uart._process_frame(bytes(frame), 1000)
         self.assertEqual(uart._stats.crc_errors, 1)
@@ -77,19 +77,19 @@ class SensorProtocolTests(unittest.TestCase):
 
     def test_paj7620u2_decode_and_event_upload_default(self) -> None:
         uart = receiver()
-        payload = bytes((sensor_uart.SENSOR_PAJ7620U2_GESTURE_LEFT,
-                         0x04, 0x00, sensor_uart.SENSOR_PAJ7620U2_STATUS_OK))
-        uart._process_frame(response(sensor_uart.SENSOR_TYPE_PAJ7620U2, 1,
+        payload = bytes((jydbus_uart.JYDBUS_PAJ7620U2_GESTURE_LEFT,
+                         0x04, 0x00, jydbus_uart.JYDBUS_PAJ7620U2_STATUS_OK))
+        uart._process_frame(response(jydbus_uart.JYDBUS_TYPE_PAJ7620U2, 1,
                                      payload), 1_234_569)
-        data = uart._cache[(sensor_uart.SENSOR_TYPE_PAJ7620U2, 1)]
+        data = uart._cache[(jydbus_uart.JYDBUS_TYPE_PAJ7620U2, 1)]
         self.assertTrue(data.decoded_valid)
         self.assertEqual(data.value["gesture"],
-                         sensor_uart.SENSOR_PAJ7620U2_GESTURE_LEFT)
+                         jydbus_uart.JYDBUS_PAJ7620U2_GESTURE_LEFT)
         self.assertEqual(data.value["gesture_flags"], 0x04)
-        self.assertEqual(sensor_uart.PAJ7620_AUTO_UPLOAD_INTERVAL_MS, 100)
+        self.assertEqual(jydbus_uart.PAJ7620_AUTO_UPLOAD_INTERVAL_MS, 100)
 
     def test_ws2812b_frame_is_split_into_ordered_chunks(self) -> None:
-        uart = object.__new__(sensor_uart.SensorUart)
+        uart = object.__new__(jydbus_uart.JydbusUart)
         uart._ws2812b_lock = threading.Lock()
         uart._ws2812b_transaction_id = 0
         requests: list[tuple[bytes, int, int | None]] = []
@@ -103,14 +103,14 @@ class SensorProtocolTests(unittest.TestCase):
                     "argument0": transaction_id or 0}
 
         uart._ws2812b_request = request
-        colors = [index * 0x010203 for index in range(sensor_uart.WS2812B_LED_COUNT)]
+        colors = [index * 0x010203 for index in range(jydbus_uart.WS2812B_LED_COUNT)]
         self.assertEqual(uart.set_ws2812b_frame(1, colors), 0)
 
         self.assertEqual(len(requests), 18)
         self.assertEqual(requests[0][0], bytes((0x02, 0x01)))
         for chunk_number in range(16):
             payload, command, transaction_id = requests[chunk_number + 1]
-            self.assertEqual(command, sensor_uart.WS2812B_COMMAND_FRAME_CHUNK)
+            self.assertEqual(command, jydbus_uart.WS2812B_COMMAND_FRAME_CHUNK)
             self.assertEqual(transaction_id, 1)
             self.assertEqual(payload[:4], bytes((0x03, 0x01, chunk_number * 8, 8)))
             expected = b"".join(bytes(((color >> 16) & 0xFF,
@@ -121,7 +121,7 @@ class SensorProtocolTests(unittest.TestCase):
         self.assertEqual(requests[-1][0], bytes((0x04, 0x01)))
 
     def test_ws2812b_frame_rejects_invalid_input(self) -> None:
-        uart = object.__new__(sensor_uart.SensorUart)
+        uart = object.__new__(jydbus_uart.JydbusUart)
         uart._ws2812b_lock = threading.Lock()
         with self.assertRaises(OSError):
             uart.set_ws2812b_frame(1, [0] * 127)

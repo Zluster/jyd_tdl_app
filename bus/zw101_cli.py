@@ -7,7 +7,7 @@ import argparse
 import errno
 import sys
 
-from sensor_uart import SensorUart
+from jydbus_uart import JydbusUart
 from zw101_api import zw101_status_string
 from zw101_control import (ZW101_CONTROL_CLEAR_DATABASE, ZW101_CONTROL_DELETE,
                            ZW101_CONTROL_ENROLL, ZW101_CONTROL_MATCH,
@@ -42,7 +42,7 @@ def main() -> int:
     operation = operations[args.action]
     fingerprint_id = getattr(args, "id", 0)
     try:
-        with SensorUart(args.uart, 115200) as uart:
+        with JydbusUart(args.uart, 115200) as uart:
             print(f"ZW101 start: operation={operation} node={args.node} id={fingerprint_id}")
             if operation == ZW101_CONTROL_ENROLL:
                 print("Press and fully release the same finger three times.")

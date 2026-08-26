@@ -8,18 +8,24 @@ import errno
 import select
 import sys
 import time
+from pathlib import Path
 
-from sensor_uart import *  # The example intentionally exposes protocol constants.
+# Allow `python3 examples/example_dual_uart.py` from the project directory.
+PROJECT_DIR = Path(__file__).resolve().parent.parent
+if str(PROJECT_DIR) not in sys.path:
+    sys.path.insert(0, str(PROJECT_DIR))
+
+from jydbus_uart import *  # The example intentionally exposes protocol constants.
 
 
-def print_data(data: SensorData) -> None:
+def print_data(data: JydbusData) -> None:
     frame = (bytes((0x55, data.raw_length, data.frame_type, data.sensor_type,
                     data.sensor_number)) + data.raw
              + data.received_crc.to_bytes(2, "little") + bytes((data.frame_tail,)))
     print("[UART1] RX frame:", frame.hex(" ").upper())
-    print(f"Sensor: {sensor_name(data.sensor_type)} type=0x{data.sensor_type:02X} "
+    print(f"Sensor: {jydbus_name(data.sensor_type)} type=0x{data.sensor_type:02X} "
           f"number={data.sensor_number}")
-    if data.decoded_valid and data.sensor_type == SENSOR_TYPE_PAJ7620U2:
+    if data.decoded_valid and data.sensor_type == JYDBUS_TYPE_PAJ7620U2:
         value = data.value
         print(f"Data: gesture={paj7620_gesture_name(value['gesture'])}"
               f"({value['gesture']}) flags_43=0x{value['gesture_flags']:02X} "
@@ -30,16 +36,16 @@ def print_data(data: SensorData) -> None:
     print(f"Time (ms): {data.updated_monotonic_ms}")
 
 
-def print_result(result: SensorUartCommandResult) -> None:
-    if result.command == SENSOR_UART_COMMAND_SCAN:
+def print_result(result: JydbusUartCommandResult) -> None:
+    if result.command == JYDBUS_UART_COMMAND_SCAN:
         print(f"[UART1 SCAN_OK] found={len(result.steps)}")
         for step in result.steps:
-            print(f"  sensor={sensor_name(step.sensor_type)} "
+            print(f"  sensor={jydbus_name(step.sensor_type)} "
                   f"type=0x{step.sensor_type:02X} number={step.sensor_number}")
-    elif result.command in (SENSOR_UART_COMMAND_QUERY_ALL, SENSOR_UART_COMMAND_QUERY_SENSOR):
+    elif result.command in (JYDBUS_UART_COMMAND_QUERY_ALL, JYDBUS_UART_COMMAND_QUERY_SENSOR):
         for step in result.steps:
             state = "QUERY_OK" if step.response_received else "QUERY_TIMEOUT"
-            print(f"[{state}] sensor={sensor_name(step.sensor_type)} "
+            print(f"[{state}] sensor={jydbus_name(step.sensor_type)} "
                   f"type=0x{step.sensor_type:02X} number={step.sensor_number} "
                   f"rtt_us={step.response_us}")
         if result.data_valid and result.data is not None:
@@ -78,7 +84,7 @@ def main() -> int:
             "  6 <type> <number> read, 7 <type> <number> <value> write, "
             "8 <type> <number> query, q quit")
     try:
-        with SensorUart(args.device, args.baud) as uart:
+        with JydbusUart(args.device, args.baud) as uart:
             print(f"Listening on {args.device} at {args.baud} 8N1.")
             print(menu)
             sequences: dict[tuple[int, int], int] = {}

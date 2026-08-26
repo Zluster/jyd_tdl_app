@@ -9,8 +9,8 @@ PROJECT_DIR = Path(__file__).resolve().parent.parent
 if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
-from api_call_example import (getValue, initialize, listenning, read,
-                              scanning, setUploadMode, setValue)
+from examples.api_call_example import (getValue, initialize, listenning, read,
+                                       scanning, setUploadMode, setValue)
 
 DEVICE = "/dev/ttyS2"
 SENSOR_TYPE = 0x03
