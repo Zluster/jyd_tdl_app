@@ -482,8 +482,8 @@ class MainScreen:
         self.main_container.set_style_shadow_width(0, lv.PART.MAIN | lv.STATE.DEFAULT)
         self.main_container.set_style_pad_all(0, 0)
         
-        # 深蓝色背景 bgr
-        self.main_container.set_style_bg_color(lv.color_hex(0x2C0B02), lv.PART.MAIN | lv.STATE.DEFAULT)
+        # 深蓝色背景
+        self.main_container.set_style_bg_color(lv.color_hex(0x020B2C), lv.PART.MAIN | lv.STATE.DEFAULT)
         self.main_container.set_style_bg_opa(lv.OPA.COVER, lv.PART.MAIN | lv.STATE.DEFAULT)
     
     def create_fold_button(self):
@@ -635,7 +635,7 @@ class MainScreen:
         self.sidebar.set_width(176)
         self.sidebar.set_pos(8, 44)
         self.sidebar.set_height(364)
-        self.sidebar.set_style_bg_color(lv.color_hex(0x2C0B02), 0)
+        self.sidebar.set_style_bg_color(lv.color_hex(0x020B2C), 0)
         self.sidebar.set_style_pad_all(8, 0)
         self.sidebar.set_style_border_width(0, lv.PART.MAIN | lv.STATE.DEFAULT)
         self.sidebar.set_style_shadow_width(0, lv.PART.MAIN | lv.STATE.DEFAULT)
@@ -656,7 +656,7 @@ class MainScreen:
             btn.set_height(44)
             btn.set_width(lv.pct(92))
             btn.set_style_pad_all(0, 0)
-            btn.set_style_bg_color(lv.color_hex(0x3F160A), lv.PART.MAIN | lv.STATE.DEFAULT)
+            btn.set_style_bg_color(lv.color_hex(0x0A163F), lv.PART.MAIN | lv.STATE.DEFAULT)
             btn.align(lv.ALIGN.TOP_LEFT, 0, i * 48)
             
             # 图标
@@ -688,7 +688,7 @@ class MainScreen:
             )
             
             if i == 0:
-                btn.set_style_bg_color(lv.color_hex(0xAF401E), lv.PART.MAIN | lv.STATE.DEFAULT)
+                btn.set_style_bg_color(lv.color_hex(0x1E40AF), lv.PART.MAIN | lv.STATE.DEFAULT)
                 self.last_button = btn
             
             if i > 0:
@@ -707,7 +707,7 @@ class MainScreen:
             sub_btn.set_height(44)
             sub_btn.set_width(lv.pct(92))
             sub_btn.set_style_pad_all(0, 0)
-            sub_btn.set_style_bg_color(lv.color_hex(0x3F160A), lv.PART.MAIN | lv.STATE.DEFAULT)
+            sub_btn.set_style_bg_color(lv.color_hex(0x0A163F), lv.PART.MAIN | lv.STATE.DEFAULT)
             sub_btn.align(lv.ALIGN.TOP_LEFT, 0, (3 + 1) * 48 + i * 48)
             sub_btn.add_flag(lv.obj.FLAG.HIDDEN)
             
@@ -760,12 +760,12 @@ class MainScreen:
         # 恢复上一个按钮样式
         if self.last_button and self.last_button != btn:
             self.last_button.set_style_bg_color(
-                lv.color_hex(0x3F160A),
+                lv.color_hex(0x0A163F),
                 lv.PART.MAIN | lv.STATE.DEFAULT
             )
         
         # 高亮当前按钮
-        btn.set_style_bg_color(lv.color_hex(0xAF401E), lv.PART.MAIN | lv.STATE.DEFAULT)
+        btn.set_style_bg_color(lv.color_hex(0x1E40AF), lv.PART.MAIN | lv.STATE.DEFAULT)
         self.last_button = btn
         
         # 更新应用显示
@@ -778,7 +778,7 @@ class MainScreen:
         self.app_display_area.set_size(512, 400)
         self.app_display_area.set_pos(192, 44)
         self.app_display_area.remove_flag(lv.obj.FLAG.SCROLLABLE)
-        self.app_display_area.set_style_bg_color(lv.color_hex(0x2C0B02), 0)
+        self.app_display_area.set_style_bg_color(lv.color_hex(0x020B2C), 0)
         self.app_display_area.set_style_opa(lv.OPA._0, lv.PART.SCROLLBAR)
         self.app_display_area.set_style_border_width(0, lv.PART.MAIN | lv.STATE.DEFAULT)
         self.app_display_area.set_style_pad_all(0, 0)
@@ -787,7 +787,7 @@ class MainScreen:
         self.app_grid_container = lv.obj(self.app_display_area)
         self.app_grid_container.set_size(lv.pct(100), lv.pct(100))
         self.app_grid_container.set_style_opa(lv.OPA._0, lv.PART.SCROLLBAR)
-        self.app_grid_container.set_style_bg_color(lv.color_hex(0x2C0B02), 0)
+        self.app_grid_container.set_style_bg_color(lv.color_hex(0x020B2C), 0)
         self.app_grid_container.set_style_border_width(0, lv.PART.MAIN | lv.STATE.DEFAULT)
         self.app_grid_container.set_style_pad_all(0, 0)
 
@@ -1032,7 +1032,7 @@ class MainScreen:
             if i == self.current_page:
                 dot.set_style_bg_color(lv.color_hex(0xFFFFFF), 0)
             else:
-                dot.set_style_bg_color(lv.color_hex(0x2C0B02), 0)
+                dot.set_style_bg_color(lv.color_hex(0x020B2C), 0)
                 dot.set_style_border_width(1, 0)
                 dot.set_style_border_color(lv.color_hex(0xFFFFFF), 0)
             

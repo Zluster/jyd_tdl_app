@@ -4,6 +4,8 @@
 - 硬件/显示通路（tdl_py 的 VO/VPSS/OSD、framebuffer 注册）在本文件
 - 与 MicroPython 的一切交互走 mpyc（typed bridge + 属性代理），
   不再有内联的 MicroPython 封装类和 tick 源码模板
+- 原生库（mpy / tdl_py / _maix_image）由 dara 包捆绑提供：最先 import dara
+  注册其加载器，项目目录下不再放 .so
 """
 
 import asyncio
@@ -12,6 +14,7 @@ import signal
 import socket
 import time
 
+import dara     # 注册捆绑库加载器：mpy/tdl_py/_maix_image 一律解析到 dara/_libs
 import mpy      # 仅用于显示通路（set_flush_buf / set_flush_callback）
 import tdl_py
 from mpyc import Mpyc

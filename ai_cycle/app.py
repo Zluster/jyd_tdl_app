@@ -11,7 +11,7 @@ mpy_home 菜单的最小版（内嵌源码，不会拉起主菜单 UI）；
 import os
 import sys
 
-# 复用上级 launcher 目录里的基础库：mpy.so / tdl_py.so / mpyc 包
+# 复用上级 launcher 目录里的 mpyc 包；原生库（mpy/tdl_py）改由 dara 捆绑提供
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import asyncio
@@ -20,6 +20,7 @@ import signal
 import time
 import traceback
 
+import dara     # 注册捆绑库加载器：mpy/tdl_py 一律解析到 dara/_libs
 import mpy      # 仅用于显示通路（set_flush_buf / set_flush_callback）
 import tdl_py
 from mpyc import Mpyc

@@ -1,0 +1,5 @@
+{
+    "//": "仅供开发机 IDE 解析导入：dara 在上一级目录，原生库 .so 在 dara/_libs（板上 dara 已 pip 安装，运行时不需要本配置）",
+    "extraPaths": ["..", "../dara/_libs"],
+    "typeCheckingMode": "off"
+}
