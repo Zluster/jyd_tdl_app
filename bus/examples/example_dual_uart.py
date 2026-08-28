@@ -91,7 +91,7 @@ def main() -> int:
             print("command> ", end="", flush=True)
             while True:
                 readable, _, _ = select.select([sys.stdin], [], [], 0.1)
-                for data in uart.read_all():
+                for data in uart.read_all_cached():
                     key = (data.sensor_type, data.sensor_number)
                     if sequences.get(key) != data.sequence:
                         sequences[key] = data.sequence

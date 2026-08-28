@@ -8,7 +8,7 @@ import errno
 import sys
 
 from sensor_ota import (SENSOR_OTA_SLOT_A, SENSOR_OTA_SLOT_B, OtaDeviceError,
-                        SensorOta, SensorOtaStatus, sensor_ota_selftest)
+                        SensorOta, SensorOtaStatus, ota_protocol_selftest)
 
 
 def number(text: str) -> int:
@@ -82,7 +82,7 @@ def parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = parser().parse_args()
     if args.command == "selftest":
-        passed = sensor_ota_selftest()
+        passed = ota_protocol_selftest()
         print(f"OTA protocol selftest: {'PASS' if passed else 'FAIL'}")
         return 0 if passed else 1
     if hasattr(args, "sensor_type") and not 0 <= args.sensor_type <= 0xFF:

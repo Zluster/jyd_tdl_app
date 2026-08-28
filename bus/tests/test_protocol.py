@@ -104,7 +104,7 @@ class SensorProtocolTests(unittest.TestCase):
 
         uart._ws2812b_request = request
         colors = [index * 0x010203 for index in range(jydbus_uart.WS2812B_LED_COUNT)]
-        self.assertEqual(uart.set_ws2812b_frame(1, colors), 0)
+        self.assertEqual(uart.display_ws2812b_frame(1, colors), 0)
 
         self.assertEqual(len(requests), 18)
         self.assertEqual(requests[0][0], bytes((0x02, 0x01)))
@@ -124,26 +124,28 @@ class SensorProtocolTests(unittest.TestCase):
         uart = object.__new__(jydbus_uart.JydbusUart)
         uart._ws2812b_lock = threading.Lock()
         with self.assertRaises(OSError):
-            uart.set_ws2812b_frame(1, [0] * 127)
+            uart.display_ws2812b_frame(1, [0] * 127)
         with self.assertRaises(OSError):
-            uart.set_ws2812b_pixel(1, 128, 0)
+            uart.set_ws2812b_pixel_color(1, 128, 0)
         with self.assertRaises(OSError):
-            uart.set_ws2812b_pixel(1, 0, 0x1000000)
+            uart.set_ws2812b_pixel_color(1, 0, 0x1000000)
 
 
 class OtaProtocolTests(unittest.TestCase):
     def test_selftest(self) -> None:
-        self.assertTrue(sensor_ota.sensor_ota_selftest())
+        self.assertTrue(sensor_ota.ota_protocol_selftest())
         frame = sensor_ota.build_frame(sensor_ota.OTA_FRAME_REQUEST, 0x0A, 1,
                                        bytes(256))
         self.assertEqual((frame[1], frame[2]), (0, 1))
         self.assertEqual(len(frame), 265)
 
-    def test_bundled_images_match_slots(self) -> None:
-        sensor_ota.validate_image((PROJECT_DIR / "Project_OTA_Slot_A.bin").read_bytes(),
-                                  sensor_ota.SENSOR_OTA_SLOT_A)
-        sensor_ota.validate_image((PROJECT_DIR / "Project_OTA_Slot_B.bin").read_bytes(),
-                                  sensor_ota.SENSOR_OTA_SLOT_B)
+    def test_image_slot_validation(self) -> None:
+        image_a = bytearray(struct.pack("<II", 0x20001000,
+                                        sensor_ota.OTA_SLOT_A_BASE | 1))
+        image_b = bytearray(struct.pack("<II", 0x20001000,
+                                        sensor_ota.OTA_SLOT_B_BASE | 1))
+        sensor_ota.validate_image(bytes(image_a), sensor_ota.SENSOR_OTA_SLOT_A)
+        sensor_ota.validate_image(bytes(image_b), sensor_ota.SENSOR_OTA_SLOT_B)
 
     def test_raw_crc_scope(self) -> None:
         header = bytearray(struct.pack("<IBBHIII", sensor_ota.RAW_MAGIC,

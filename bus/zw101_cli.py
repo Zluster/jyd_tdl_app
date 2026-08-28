@@ -8,10 +8,10 @@ import errno
 import sys
 
 from jydbus_uart import JydbusUart
-from zw101_api import zw101_status_string
 from zw101_control import (ZW101_CONTROL_CLEAR_DATABASE, ZW101_CONTROL_DELETE,
                            ZW101_CONTROL_ENROLL, ZW101_CONTROL_MATCH,
-                           ZW101_CONTROL_DEFAULT_TIMEOUT_MS, zw101_control_execute)
+                           ZW101_CONTROL_DEFAULT_TIMEOUT_MS, run_zw101_command,
+                           zw101_status_name)
 
 
 def number(text: str) -> int:
@@ -48,10 +48,10 @@ def main() -> int:
                 print("Press and fully release the same finger three times.")
             elif operation == ZW101_CONTROL_MATCH:
                 print("Place a finger on the sensor.")
-            result = zw101_control_execute(uart, args.node, operation, fingerprint_id,
-                                           ZW101_CONTROL_DEFAULT_TIMEOUT_MS)
+            result = run_zw101_command(uart, args.node, operation, fingerprint_id,
+                                       ZW101_CONTROL_DEFAULT_TIMEOUT_MS)
             print(f"ZW101 result: operation={result.operation} "
-                  f"status={zw101_status_string(result.status)}({result.status}) "
+                  f"status={zw101_status_name(result.status)}({result.status}) "
                   f"module_status=0x{result.module_status:02X} "
                   f"id={result.fingerprint_id} score={result.score} "
                   f"elapsed_ms={result.response_ms}")

@@ -48,7 +48,7 @@ class OtaDeviceError(OSError):
     def __init__(self, status: int) -> None:
         self.status = status
         super().__init__(errno.EIO, f"OTA device rejected request: "
-                         f"{sensor_ota_device_status_string(status)} ({status})")
+                         f"{ota_status_name(status)} ({status})")
 
 
 @dataclass
@@ -168,7 +168,7 @@ class SensorOta:
             device_status = reply[1]
             if self.debug:
                 print(f"[OTA ACK] cmd=0x{reply[0]:02X} status={device_status} "
-                      f"({sensor_ota_device_status_string(device_status)}) "
+                      f"({ota_status_name(device_status)}) "
                       f"next={status.next_offset}", file=sys.stderr)
             if device_status:
                 raise OtaDeviceError(device_status)
@@ -255,7 +255,7 @@ class SensorOta:
         next_offset, status = struct.unpack_from("<II", response, 8)
         if self.debug:
             print(f"[OTA RECOVERY ACK] cmd=0x{response[4]:02X} status={status} "
-                  f"({sensor_ota_device_status_string(status)}) next={next_offset}",
+                  f"({ota_status_name(status)}) next={next_offset}",
                   file=sys.stderr)
         if status:
             raise OtaDeviceError(status)
@@ -282,7 +282,7 @@ class SensorOta:
         self._raw_transact(RAW_CMD_FINISH, target_slot, timeout=5.0)
 
 
-def sensor_ota_selftest() -> bool:
+def ota_protocol_selftest() -> bool:
     test = b"123456789"
     if crc16_modbus(test) != 0x4B37 or crc32(test) != 0xCBF43926:
         return False
@@ -291,17 +291,8 @@ def sensor_ota_selftest() -> bool:
             and crc16_modbus(frame[1:7]) == struct.unpack_from("<H", frame, 7)[0])
 
 
-def sensor_ota_device_status_string(status: int) -> str:
+def ota_status_name(status: int) -> str:
     names = ("OK", "bad frame", "bad state", "bad slot", "size error",
              "offset error", "flash error", "CRC error", "vector error",
              "session error")
     return names[status] if 0 <= status < len(names) else "unknown"
-
-
-def sensor_ota_open(device: str, baud_rate: int = 115200,
-                    debug: bool = False) -> SensorOta:
-    return SensorOta(device, baud_rate, debug)
-
-
-def sensor_ota_close(ota: SensorOta) -> None:
-    ota.close()

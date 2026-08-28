@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import argparse
-import errno
 import sys
 import time
 from pathlib import Path
@@ -14,10 +13,9 @@ PROJECT_DIR = Path(__file__).resolve().parent.parent
 if str(PROJECT_DIR) not in sys.path:
     sys.path.insert(0, str(PROJECT_DIR))
 
-from jydbus_api import jydbusApi
-from jydbus_uart import (PAJ7620_AUTO_UPLOAD_INTERVAL_MS,
-                         JYDBUS_TYPE_PAJ7620U2, paj7620_gesture_name,
-                         paj7620_status_name)
+from devices import PAJ7620U2GestureSensor
+from jydbus_bus import JydBus
+from jydbus_uart import paj7620_gesture_name, paj7620_status_name
 
 
 def main() -> int:
@@ -27,9 +25,9 @@ def main() -> int:
     parser.add_argument("--number", type=int, default=1)
     args = parser.parse_args()
 
-    with jydbusApi(args.device, args.baud) as api:
-        api.set_auto_upload(JYDBUS_TYPE_PAJ7620U2, args.number, True,
-                            PAJ7620_AUTO_UPLOAD_INTERVAL_MS)
+    with JydBus(args.device, args.baud) as bus:
+        gesture_sensor = PAJ7620U2GestureSensor(bus, args.number)
+        gesture_sensor.enable_auto_upload()
         print(f"PAJ7620U2 listening on {args.device} at {args.baud} 8N1; "
               "press Ctrl+C to stop.")
         last_sequence = 0
@@ -37,7 +35,7 @@ def main() -> int:
         try:
             while True:
                 try:
-                    data = api.read(JYDBUS_TYPE_PAJ7620U2, args.number)
+                    data = gesture_sensor.read_cached_data()
                 except OSError as exc:
                     if exc.errno != errno.ENODATA:
                         raise
@@ -66,7 +64,7 @@ def main() -> int:
             pass
         finally:
             try:
-                api.set_auto_upload(JYDBUS_TYPE_PAJ7620U2, args.number, False, 0)
+                gesture_sensor.disable_auto_upload()
             except OSError as exc:
                 print(f"disable auto upload failed: {exc}", file=sys.stderr)
     return 0

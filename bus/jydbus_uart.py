@@ -273,7 +273,7 @@ class JydbusUart:
         self._write_timed(frame_type, sensor_type, sensor_number, payload)
         return 0
 
-    def query(self, sensor_type: int, sensor_number: int) -> int:
+    def request_sensor(self, sensor_type: int, sensor_number: int) -> int:
         self._validate_number(sensor_number)
         if sensor_type == JYDBUS_TYPE_WS2812B:
             payload = bytearray((WS2812B_COMMAND_GET_STATUS,))
@@ -288,14 +288,15 @@ class JydbusUart:
         self.write(JYDBUS_FRAME_TYPE_SCAN, 0, 0, b"<<<<")
         return 0
 
-    def set_value(self, sensor_type: int, sensor_number: int, value: int) -> int:
+    def write_sensor_value(self, sensor_type: int, sensor_number: int,
+                           value: int) -> int:
         self._validate_number(sensor_number)
         self.write(JYDBUS_FRAME_TYPE_QUERY, sensor_type, sensor_number,
                    struct.pack("<I", value & 0xFFFFFFFF))
         return 0
 
-    def set_ws2812b_pixel(self, sensor_number: int, led_index: int,
-                          color: int) -> int:
+    def set_ws2812b_pixel_color(self, sensor_number: int, led_index: int,
+                                color: int) -> int:
         self._validate_number(sensor_number)
         self._validate_ws2812b_color(color)
         if not 0 <= led_index < WS2812B_LED_COUNT:
@@ -308,7 +309,7 @@ class JydbusUart:
                                    expected_argument0=led_index)
         return 0
 
-    def set_ws2812b_frame(self, sensor_number: int, colors: Any) -> int:
+    def display_ws2812b_frame(self, sensor_number: int, colors: Any) -> int:
         self._validate_number(sensor_number)
         color_values = list(colors)
         if len(color_values) != WS2812B_LED_COUNT:
@@ -353,7 +354,8 @@ class JydbusUart:
                          expected_argument1: int | None = None) -> dict[str, Any]:
         for _ in range(WS2812B_REQUEST_RETRIES):
             try:
-                previous = self.read(JYDBUS_TYPE_WS2812B, sensor_number).sequence
+                previous = self.read_cached(JYDBUS_TYPE_WS2812B,
+                                            sensor_number).sequence
             except OSError:
                 previous = 0
             started = self._write_timed(JYDBUS_FRAME_TYPE_QUERY, JYDBUS_TYPE_WS2812B,
@@ -362,7 +364,8 @@ class JydbusUart:
                 sensor_number * QUERY_HOP_TIMEOUT
             while time.monotonic() < deadline:
                 try:
-                    data = self.read(JYDBUS_TYPE_WS2812B, sensor_number)
+                    data = self.read_cached(JYDBUS_TYPE_WS2812B,
+                                            sensor_number)
                     if data.sequence != previous and data.received_monotonic_us >= started:
                         previous = data.sequence
                         value = data.value
@@ -383,8 +386,8 @@ class JydbusUart:
                 time.sleep(0.001)
         raise TimeoutError(f"WS2812B command 0x{command:02X} response timeout")
 
-    def set_auto_upload(self, sensor_type: int, sensor_number: int,
-                        enabled: bool, interval_ms: int) -> int:
+    def configure_auto_upload(self, sensor_type: int, sensor_number: int,
+                              enabled: bool, interval_ms: int) -> int:
         self._validate_number(sensor_number)
         if not 0 <= interval_ms <= 0xFFFF:
             raise OSError(errno.EINVAL, "auto-upload interval must be 0..65535 ms")
@@ -392,7 +395,7 @@ class JydbusUart:
         self.write(JYDBUS_FRAME_TYPE_CONFIG, sensor_type, sensor_number, payload)
         return 0
 
-    def read(self, sensor_type: int, sensor_number: int) -> JydbusData:
+    def read_cached(self, sensor_type: int, sensor_number: int) -> JydbusData:
         self._validate_number(sensor_number)
         with self._cache_lock:
             data = self._cache.get((sensor_type, sensor_number))
@@ -400,7 +403,7 @@ class JydbusUart:
                 raise OSError(errno.ENODATA, "no cached sensor data")
             return copy.deepcopy(data)
 
-    def read_all(self) -> list[JydbusData]:
+    def read_all_cached(self) -> list[JydbusData]:
         with self._cache_lock:
             return copy.deepcopy(list(self._cache.values()))
 
@@ -436,8 +439,9 @@ class JydbusUart:
                                                  response_received=True)
                     for number in range(JYDBUS_UART_JYDBUS_NUMBER_MAX, 0, -1):
                         try:
-                            self.set_auto_upload(target, number, enabled,
-                                                 interval_ms if enabled else 0)
+                            self.configure_auto_upload(
+                                target, number, enabled,
+                                interval_ms if enabled else 0)
                         except OSError as exc:
                             if step.send_result == 0:
                                 step.send_result = -int(exc.errno or errno.EIO)
@@ -447,19 +451,20 @@ class JydbusUart:
                                     if step.send_result != 0), 0)
                 result.status = first_error
             elif command == JYDBUS_UART_COMMAND_SET_WS2812B_RED:
-                self.set_value(JYDBUS_TYPE_WS2812B, JYDBUS_NUMBER_FIRST, 0x00FF0000)
+                self.write_sensor_value(JYDBUS_TYPE_WS2812B,
+                                        JYDBUS_NUMBER_FIRST, 0x00FF0000)
                 result.steps.append(JydbusUartCommandStep(JYDBUS_TYPE_WS2812B,
                                                           JYDBUS_NUMBER_FIRST))
             elif command == JYDBUS_UART_COMMAND_READ_SENSOR:
-                result.data = self.read(sensor_type, sensor_number)
+                result.data = self.read_cached(sensor_type, sensor_number)
                 result.data_valid = True
             elif command == JYDBUS_UART_COMMAND_WRITE_SENSOR:
-                self.set_value(sensor_type, sensor_number, value)
+                self.write_sensor_value(sensor_type, sensor_number, value)
             elif command == JYDBUS_UART_COMMAND_QUERY_SENSOR:
                 step = self._query_and_wait(sensor_type, sensor_number)
                 result.steps.append(step)
                 if step.response_received:
-                    result.data = self.read(sensor_type, sensor_number)
+                    result.data = self.read_cached(sensor_type, sensor_number)
                     result.data_valid = True
             else:
                 raise OSError(errno.EINVAL, "invalid command")
@@ -471,7 +476,7 @@ class JydbusUart:
                         all_query: bool = False) -> JydbusUartCommandStep:
         step = JydbusUartCommandStep(sensor_type, sensor_number)
         try:
-            previous = self.read(sensor_type, sensor_number).sequence
+            previous = self.read_cached(sensor_type, sensor_number).sequence
         except OSError:
             previous = 0
         try:
@@ -493,7 +498,7 @@ class JydbusUart:
         deadline = started / 1_000_000 + QUERY_RESPONSE_TIMEOUT + sensor_number * QUERY_HOP_TIMEOUT
         while time.monotonic() < deadline:
             try:
-                data = self.read(sensor_type, sensor_number)
+                data = self.read_cached(sensor_type, sensor_number)
                 if data.sequence != previous and data.received_monotonic_us >= started:
                     step.response_received = True
                     step.response_us = data.received_monotonic_us - started
@@ -657,26 +662,3 @@ def paj7620_status_name(status: int) -> str:
 
 
 # Function-style compatibility helpers.
-def jydbus_uart_open(device: str, baud_rate: int = 115200) -> JydbusUart:
-    return JydbusUart(device, baud_rate)
-
-
-def jydbus_uart_close(uart: JydbusUart) -> None:
-    uart.close()
-
-
-def jydbus_read(uart: JydbusUart, sensor_type: int, sensor_number: int) -> JydbusData:
-    return uart.read(sensor_type, sensor_number)
-
-
-def jydbus_query(uart: JydbusUart, sensor_type: int, sensor_number: int) -> int:
-    return uart.query(sensor_type, sensor_number)
-
-
-def jydbus_write(uart: JydbusUart, sensor_type: int, sensor_number: int, value: int) -> int:
-    return uart.set_value(sensor_type, sensor_number, value)
-
-
-# Exact spellings matching the public jydbusApi integration.
-jydbusUart = JydbusUart
-jydbusData = JydbusData
