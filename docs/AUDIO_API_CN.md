@@ -82,6 +82,65 @@ print(kws.scores())
 
 ## 板端测试程序
 
+## C++ 板端验收流程
+
+Python 封装前应先按以下顺序验证 C++ 示例。模型推理程序需要明确给出
+BM Runtime 固件；同一时刻只能有一个程序占用 AI 输入。以下以 `/tmp` 中已
+交叉编译并传入板子的 demo 为例：
+
+```sh
+export NPU_FIRMWARE=/lib/firmware/libbm1688_kernel_module.so
+export DEMO_DIR=/tmp
+export MODEL_DIR=/root/models
+
+# 1. 确认 CVI_AI/CVI_AO 运行时能力。
+$DEMO_DIR/tdl_audio_stream_demo --mode status
+
+# 2. 录制 3 秒，文件必须正好为 96000 字节。
+$DEMO_DIR/tdl_audio_stream_demo --mode pcm-capture \
+  --output /tmp/audio-16k-mono.pcm --seconds 3 \
+  --sample-rate 16000 --channels 1 --bit-depth 16 \
+  --points-per-frame 160 --ai-device 0 --ai-channel 0
+wc -c /tmp/audio-16k-mono.pcm
+
+# 3. 播放刚录制的文件。此步必须由现场人员确认扬声器确有声音。
+$DEMO_DIR/tdl_audio_stream_demo --mode pcm-play \
+  --input /tmp/audio-16k-mono.pcm --seconds 3 \
+  --sample-rate 16000 --channels 1 --bit-depth 16 \
+  --points-per-frame 160 --ao-device 0 --ao-channel 0 --ao-volume 24
+
+# 4. 离线 ASR。完成时应打印 text:，并与录音内容大致一致。
+BMRUNTIME_USING_FIRMWARE=$NPU_FIRMWARE \
+  $DEMO_DIR/tdl_npu_asr_demo --mode pcm \
+  --pcm /tmp/audio-16k-mono.pcm \
+  --model-spec $MODEL_DIR/npu_zipformer_zh_14m_asr.mud \
+  --firmware $NPU_FIRMWARE
+
+# 5. 离线 KWS。录音内容应包含 kws_keywords.default.txt 内配置的关键词。
+BMRUNTIME_USING_FIRMWARE=$NPU_FIRMWARE \
+  $DEMO_DIR/tdl_npu_direct_kws_demo \
+  --pcm /tmp/audio-16k-mono.pcm \
+  --model-spec $MODEL_DIR/npu_zipformer_zh_kws.mud \
+  --keywords /tmp/kws_keywords.default.txt \
+  --firmware $NPU_FIRMWARE --print-scores
+
+# 6. 声纹：先用一段说话音频注册，再用另一段同一人的音频验证和识别。
+rm -f /tmp/speakers.db
+BMRUNTIME_USING_FIRMWARE=$NPU_FIRMWARE \
+  $DEMO_DIR/tdl_speaker_recognition_demo --mode register --label alice \
+  --database /tmp/speakers.db --pcm /tmp/audio-16k-mono.pcm \
+  --model-spec $MODEL_DIR/speaker_campplus_sv.mud --firmware $NPU_FIRMWARE
+BMRUNTIME_USING_FIRMWARE=$NPU_FIRMWARE \
+  $DEMO_DIR/tdl_speaker_recognition_demo --mode verify --label alice \
+  --database /tmp/speakers.db --pcm /tmp/audio-16k-mono-new.pcm \
+  --model-spec $MODEL_DIR/speaker_campplus_sv.mud --firmware $NPU_FIRMWARE
+```
+
+声纹的 `--pcm` 输入固定为 16 kHz、单声道、signed 16-bit little-endian PCM，
+仅支持 `register`、`identify`、`verify`，实时 `interactive`、`monitor` 必须从
+AI 设备采集。默认阈值为 `0.60`；不能仅凭同一文件的 `score=1` 判定识别效果，
+至少应测试同一说话人的另一段录音能够命中、不同说话人的录音能够拒绝。
+
 在 SDK 根目录执行，确保同一时刻只有一个程序占用 AI 音频输入：
 
 ```sh
