@@ -19,7 +19,6 @@ BUILD_DIR="${BUILD_DIR:-${PROJECT_ROOT}/build/cv184x}"
 INSTALL_DIR="${INSTALL_DIR:-${PROJECT_ROOT}/install/cv184x}"
 THIRD_PARTY_DIR="${TDL_APP_THIRD_PARTY_DIR:-/home/jyd/zwz/sophpi/tdl_app_sdk/third_party/cv184x/dual_os}"
 MEDIA_MINIMAL="${TDL_APP_MEDIA_MINIMAL:-OFF}"
-BUILD_KWS="${TDL_APP_BUILD_KWS:-ON}"
 
 if [ ! -d "${THIRD_PARTY_DIR}" ]; then
   echo "Missing third-party bundle: ${THIRD_PARTY_DIR}" >&2
@@ -29,7 +28,6 @@ fi
 
 echo "TDL_APP_THIRD_PARTY_DIR=${THIRD_PARTY_DIR}"
 echo "TDL_APP_MEDIA_MINIMAL=${MEDIA_MINIMAL}"
-echo "TDL_APP_BUILD_KWS=${BUILD_KWS}"
 
 cmake -S "${PROJECT_ROOT}" -B "${BUILD_DIR}" -G Ninja \
   -DCMAKE_BUILD_TYPE=Release \
@@ -37,7 +35,6 @@ cmake -S "${PROJECT_ROOT}" -B "${BUILD_DIR}" -G Ninja \
   -DTOOLCHAIN_ROOT="${TOOLCHAIN_ROOT}" \
   -DTDL_APP_THIRD_PARTY_DIR="${THIRD_PARTY_DIR}" \
   -DTDL_APP_MEDIA_MINIMAL="${MEDIA_MINIMAL}" \
-  -DTDL_APP_BUILD_KWS="${BUILD_KWS}" \
   -DCMAKE_INSTALL_PREFIX="${INSTALL_DIR}"
 
 cmake --build "${BUILD_DIR}" -j"$(nproc)"

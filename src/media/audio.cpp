@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <fstream>
 #include <memory>
 #include <mutex>
@@ -296,6 +297,150 @@ bool drainOutput(AudioOutput *output, int wait_ms) {
     }
     std::this_thread::sleep_for(std::chrono::milliseconds(10));
   }
+}
+
+bool readLe16(std::ifstream *input, std::uint16_t *value) {
+  unsigned char bytes[2] = {0, 0};
+  if (!input || !value || !input->read(reinterpret_cast<char *>(bytes), 2)) {
+    return false;
+  }
+  *value = static_cast<std::uint16_t>(bytes[0]) |
+           (static_cast<std::uint16_t>(bytes[1]) << 8);
+  return true;
+}
+
+bool readLe32(std::ifstream *input, std::uint32_t *value) {
+  unsigned char bytes[4] = {0, 0, 0, 0};
+  if (!input || !value || !input->read(reinterpret_cast<char *>(bytes), 4)) {
+    return false;
+  }
+  *value = static_cast<std::uint32_t>(bytes[0]) |
+           (static_cast<std::uint32_t>(bytes[1]) << 8) |
+           (static_cast<std::uint32_t>(bytes[2]) << 16) |
+           (static_cast<std::uint32_t>(bytes[3]) << 24);
+  return true;
+}
+
+// The board runtime deliberately does not ship FFmpeg. This covers the
+// standard PCM WAV files emitted by recordWav(), which is the baseline
+// record/play workflow exposed to Python.
+bool playPcmWav(const std::string &path, const AudioIoConfig &requested,
+                std::string *error) {
+  std::ifstream input(path, std::ios::binary);
+  if (!input) {
+    setError(error, "failed to open wav input: " + path);
+    return false;
+  }
+  char riff[4] = {0, 0, 0, 0};
+  char wave[4] = {0, 0, 0, 0};
+  std::uint32_t riff_size = 0;
+  if (!input.read(riff, sizeof(riff)) || !readLe32(&input, &riff_size) ||
+      !input.read(wave, sizeof(wave)) || std::memcmp(riff, "RIFF", 4) != 0 ||
+      std::memcmp(wave, "WAVE", 4) != 0) {
+    setError(error, "not a RIFF/WAVE file: " + path);
+    return false;
+  }
+
+  bool got_format = false;
+  std::uint16_t format = 0;
+  std::uint16_t channels = 0;
+  std::uint32_t sample_rate = 0;
+  std::uint16_t block_align = 0;
+  std::uint16_t bit_depth = 0;
+  std::uint32_t data_size = 0;
+  while (input.good()) {
+    char chunk_id[4] = {0, 0, 0, 0};
+    std::uint32_t chunk_size = 0;
+    if (!input.read(chunk_id, sizeof(chunk_id)) || !readLe32(&input, &chunk_size)) {
+      break;
+    }
+    if (std::memcmp(chunk_id, "fmt ", 4) == 0) {
+      std::uint32_t byte_rate = 0;
+      if (chunk_size < 16 || !readLe16(&input, &format) ||
+          !readLe16(&input, &channels) || !readLe32(&input, &sample_rate) ||
+          !readLe32(&input, &byte_rate) || !readLe16(&input, &block_align) ||
+          !readLe16(&input, &bit_depth)) {
+        setError(error, "invalid wav fmt chunk: " + path);
+        return false;
+      }
+      input.seekg(static_cast<std::streamoff>(chunk_size - 16), std::ios::cur);
+      if (!input) {
+        setError(error, "truncated wav fmt chunk: " + path);
+        return false;
+      }
+      got_format = true;
+    } else if (std::memcmp(chunk_id, "data", 4) == 0) {
+      data_size = chunk_size;
+      break;
+    } else {
+      input.seekg(static_cast<std::streamoff>(chunk_size), std::ios::cur);
+      if (!input) {
+        setError(error, "truncated wav chunk: " + path);
+        return false;
+      }
+    }
+    if (chunk_size & 1U) {
+      input.seekg(1, std::ios::cur);
+    }
+  }
+  if (!got_format || data_size == 0) {
+    setError(error, "wav requires fmt and non-empty data chunks: " + path);
+    return false;
+  }
+  if (format != 1) {
+    setError(error, "only PCM WAV is supported without FFmpeg");
+    return false;
+  }
+
+  AudioIoConfig config = requested;
+  config.sample_rate = static_cast<int>(sample_rate);
+  config.channels = static_cast<int>(channels);
+  config.bit_depth = static_cast<int>(bit_depth);
+  const std::size_t sample_bytes = bytesPerSample(config.bit_depth);
+  if (!validateIoConfig(config, error) || sample_bytes == 0 ||
+      block_align != config.channels * sample_bytes ||
+      data_size % block_align != 0) {
+    if (!error || error->empty()) {
+      setError(error, "unsupported PCM WAV layout");
+    }
+    return false;
+  }
+
+  std::string build_error;
+  AudioOutput output(toOutputConfig(config, &build_error));
+  if (!build_error.empty()) {
+    setError(error, build_error);
+    return false;
+  }
+  if (!output.open(error)) {
+    return false;
+  }
+  const std::size_t frame_bytes = static_cast<std::size_t>(config.points_per_frame) *
+                                  static_cast<std::size_t>(block_align);
+  std::uint32_t remaining = data_size;
+  std::uint32_t sequence = 0;
+  while (remaining > 0) {
+    const std::size_t count = std::min<std::size_t>(remaining, frame_bytes);
+    AudioPcmChunk chunk;
+    chunk.sample_rate = config.sample_rate;
+    chunk.channels = config.channels;
+    chunk.bit_depth = config.bit_depth;
+    chunk.sequence = sequence++;
+    chunk.data.assign(frame_bytes, 0);
+    if (!input.read(reinterpret_cast<char *>(chunk.data.data()),
+                    static_cast<std::streamsize>(count))) {
+      setError(error, "truncated wav data: " + path);
+      return false;
+    }
+    AudioFrame frame;
+    if (!chunkToAudioFrame(chunk, config, &frame, error) ||
+        !output.writeFrame(frame, config.timeout_ms, error)) {
+      return false;
+    }
+    remaining -= static_cast<std::uint32_t>(count);
+  }
+  drainOutput(&output, 800);
+  return true;
 }
 
 struct InputStreamState {
@@ -624,6 +769,9 @@ bool Audio::recordWav(const std::string &path, double seconds,
 
 bool Audio::playWav(const std::string &path, const AudioIoConfig &config,
                     std::string *error) const {
+#ifndef TDL_APP_HAS_FFMPEG
+  return playPcmWav(path, config, error);
+#else
   AudioIoConfig wav_config = config;
   wav_config.sample_rate = private_audio::kPlaybackSampleRate;
   wav_config.channels = private_audio::kPlaybackChannels;
@@ -659,6 +807,7 @@ bool Audio::playWav(const std::string &path, const AudioIoConfig &config,
   }
   drainOutput(&output, 800);
   return true;
+#endif
 }
 
 bool Audio::loopback(double seconds, const AudioSessionConfig &config,

@@ -7,6 +7,7 @@
 #include "tdl_app/detector.hpp"
 #include "tdl_app/face_attribute_classifier.hpp"
 #include "tdl_app/face_detector.hpp"
+#include "tdl_app/face_emotion_recognizer.hpp"
 #include "tdl_app/face_recognizer.hpp"
 #include "tdl_app/feature_extractor.hpp"
 #include "tdl_app/frame_source.hpp"
@@ -19,7 +20,6 @@
 #include "tdl_app/model_descriptor.hpp"
 #include "tdl_app/multi_stage_pipeline.hpp"
 #include "tdl_app/npu_asr_recognizer.hpp"
-#include "tdl_app/npu_keyword_spotter.hpp"
 #include "tdl_app/pipeline.hpp"
 #include "tdl_app/plate_recognizer.hpp"
 #include "tdl_app/pose_classifier.hpp"
@@ -28,6 +28,7 @@
 #include "tdl_app/rgb_led.hpp"
 #include "tdl_app/single_object_tracker.hpp"
 #include "tdl_app/speech_recognizer.hpp"
+#include "tdl_app/touch_input.hpp"
 #include "tdl_app/vision_task_types.hpp"
 #include "tdl_app/voice_activity_detector.hpp"
 

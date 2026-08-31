@@ -62,13 +62,9 @@ cp -a "${RESOLVED_INSTALL_DIR}/bin/." "${RESOLVED_PKG_DIR}/bin/" 2>/dev/null || 
 cp -a "${RESOLVED_INSTALL_DIR}/lib/." "${RESOLVED_PKG_DIR}/lib/" 2>/dev/null || true
 cp -a "${RESOLVED_INSTALL_DIR}/configs/." "${RESOLVED_PKG_DIR}/configs/" 2>/dev/null || true
 cp -a "${THIRD_PARTY_DIR}/lib/." "${RESOLVED_PKG_DIR}/lib/"
-# PROJECT_MODELS_DIR="${PROJECT_ROOT}/third_party/cv184x/models"
-# if [ -d "${PROJECT_MODELS_DIR}" ]; then
-#   cp -a "${PROJECT_MODELS_DIR}/." "${RESOLVED_PKG_DIR}/models/"
-# fi
-SHERPA_KWS_BMRT="${PROJECT_ROOT}/third_party/vendor/sherpa_onnx/lib/libsherpa-onnx-cv184x-bmrt.so"
-if [ -f "${SHERPA_KWS_BMRT}" ]; then
-  cp -a "${SHERPA_KWS_BMRT}" "${RESOLVED_PKG_DIR}/lib/"
+PROJECT_MODELS_DIR="${PROJECT_ROOT}/third_party/cv184x/models"
+if [ -d "${PROJECT_MODELS_DIR}" ]; then
+  cp -a "${PROJECT_MODELS_DIR}/." "${RESOLVED_PKG_DIR}/models/"
 fi
 # 复制 OpenCV 库（如果存在独立的 opencv 目录）
 if [ -d "${THIRD_PARTY_DIR}/opencv/lib" ]; then
@@ -86,17 +82,6 @@ fi
 # fi
 cp -a "${THIRD_PARTY_DIR}/firmware/." "${RESOLVED_PKG_DIR}/firmware/" 2>/dev/null || true
 cp -a "${PROJECT_ROOT}/assets/." "${RESOLVED_PKG_DIR}/assets/" 2>/dev/null || true
-if [ -f "${PROJECT_ROOT}/tools/kws_keyword_registry.py" ]; then
-  mkdir -p "${RESOLVED_PKG_DIR}/tools"
-  cp -a "${PROJECT_ROOT}/tools/kws_keyword_registry.py" "${RESOLVED_PKG_DIR}/tools/"
-  if [ -d "${PROJECT_ROOT}/third_party/vendor/pypinyin" ]; then
-    cp -a "${PROJECT_ROOT}/third_party/vendor/pypinyin" "${RESOLVED_PKG_DIR}/tools/"
-  fi
-fi
-if [ -f "${PROJECT_ROOT}/configs/kws_registry.default.json" ]; then
-  cp -a "${PROJECT_ROOT}/configs/kws_registry.default.json" \
-    "${RESOLVED_PKG_DIR}/kws_registry.json"
-fi
 if [ -f "${PROJECT_ROOT}/configs/kws_keywords.default.txt" ]; then
   cp -a "${PROJECT_ROOT}/configs/kws_keywords.default.txt" \
     "${RESOLVED_PKG_DIR}/kws_keywords.txt"
@@ -225,15 +210,15 @@ exec "${DIR}/bin/tdl_npu_asr_demo" "$@"
 EOF
 chmod +x "${RESOLVED_PKG_DIR}/run_npu_asr_demo.sh"
 
-cat > "${RESOLVED_PKG_DIR}/run_npu_keyword_spotter_demo.sh" <<'EOF'
+cat > "${RESOLVED_PKG_DIR}/run_npu_direct_kws_demo.sh" <<'EOF'
 #!/bin/sh
 set -eu
 DIR=$(cd "$(dirname "$0")" && pwd)
 . "${DIR}/env.sh"
 cd "${DIR}"
-exec "${DIR}/bin/tdl_npu_keyword_spotter_demo" "$@"
+exec "${DIR}/bin/tdl_npu_direct_kws_demo" "$@"
 EOF
-chmod +x "${RESOLVED_PKG_DIR}/run_npu_keyword_spotter_demo.sh"
+chmod +x "${RESOLVED_PKG_DIR}/run_npu_direct_kws_demo.sh"
 
 cat > "${RESOLVED_PKG_DIR}/run_camera_capture_demo.sh" <<'EOF'
 #!/bin/sh

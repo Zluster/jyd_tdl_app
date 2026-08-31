@@ -323,19 +323,35 @@ class NnFeature::CustomRuntime {
     std::vector<float> embedding;
     bool launched = false;
     const auto launch_begin = std::chrono::steady_clock::now();
-    if (host_launch_from_device_) {
+    if (input_dtype_ == BM_FLOAT32) {
       const bm_shape_t input_shape = net_info_->stages[0].input_shapes[0];
-      const size_t input_bytes =
-          bmrt_shape_count(&input_shape) * bmrt_data_type_size(input_dtype_);
-      host_frame_input_bytes_.resize(input_bytes);
-      if (input_bytes == 0 ||
+      const size_t input_elements = bmrt_shape_count(&input_shape);
+      const size_t expected_elements = static_cast<size_t>(input_width_) *
+                                       input_height_ * kInputChannels;
+      if (input_elements != expected_elements) {
+        setError(error, "float feature model input shape is not 3-channel NCHW");
+        return false;
+      }
+      host_frame_input_bytes_.resize(input_elements);
+      if (input_elements == 0 ||
           bm_memcpy_d2s(handle_, host_frame_input_bytes_.data(),
                          hardware_preprocessor_->inputMemory()) != BM_SUCCESS) {
         setError(error, "bm_memcpy_d2s failed for VPSS feature input");
         return false;
       }
-      featureTrace("VPSS feature input copied to host");
-      launched = launchQuantized(host_frame_input_bytes_, &embedding, error);
+      host_frame_input_tensor_.resize(input_elements);
+      const size_t plane_size = static_cast<size_t>(input_width_) * input_height_;
+      for (int channel = 0; channel < kInputChannels; ++channel) {
+        const size_t offset = static_cast<size_t>(channel) * plane_size;
+        for (size_t index = 0; index < plane_size; ++index) {
+          host_frame_input_tensor_[offset + index] =
+              (static_cast<float>(host_frame_input_bytes_[offset + index]) -
+               mean_[static_cast<size_t>(channel)]) *
+              scale_[static_cast<size_t>(channel)];
+        }
+      }
+      featureTrace("VPSS feature input normalized on host");
+      launched = launch(host_frame_input_tensor_, &embedding, error);
     } else {
       launched = launchDevice(hardware_preprocessor_->inputMemory(), &embedding,
                               error);
@@ -370,30 +386,40 @@ class NnFeature::CustomRuntime {
   bool ensureHardwarePreprocessor(std::string *error) {
     if (hardware_preprocessor_) return true;
     if (!nchw_layout_ ||
-        (input_dtype_ != BM_INT8 && input_dtype_ != BM_UINT8)) {
+        (input_dtype_ != BM_INT8 && input_dtype_ != BM_UINT8 &&
+         input_dtype_ != BM_FLOAT32)) {
       setError(error,
-               "feature model does not support VPSS input; require NCHW int8/uint8");
+               "feature model does not support VPSS input; require NCHW int8/uint8/float32");
       return false;
     }
     bmrt_runtime::VpssPreprocessor::Config vpss_config;
     vpss_config.width = input_width_;
     vpss_config.height = input_height_;
     vpss_config.rgb = wantsRgbInput(descriptor_);
-    vpss_config.input_dtype = input_dtype_;
+    const bool float_input = input_dtype_ == BM_FLOAT32;
+    // VPSS only emits 8-bit tensors. Float-input bmodels use its raw planar
+    // RGB output; normalization is applied before the host BMRT launch.
+    vpss_config.input_dtype = float_input ? BM_UINT8 : input_dtype_;
     vpss_config.input_scale =
-        net_info_->input_scales ? net_info_->input_scales[0] : 1.0f;
-    vpss_config.input_zero_point = net_info_->input_zero_point
-                                       ? net_info_->input_zero_point[0]
-                                       : 0;
+        float_input ? 1.0f
+                    : (net_info_->input_scales ? net_info_->input_scales[0]
+                                                : 1.0f);
+    vpss_config.input_zero_point =
+        float_input ? 0
+                    : (net_info_->input_zero_point
+                           ? net_info_->input_zero_point[0]
+                           : 0);
     for (int i = 0; i < kInputChannels; ++i) {
-      vpss_config.mean[static_cast<size_t>(i)] = mean_[static_cast<size_t>(i)];
-      vpss_config.scale[static_cast<size_t>(i)] = scale_[static_cast<size_t>(i)];
+      vpss_config.mean[static_cast<size_t>(i)] =
+          float_input ? 0.0f : mean_[static_cast<size_t>(i)];
+      vpss_config.scale[static_cast<size_t>(i)] =
+          float_input ? 1.0f : scale_[static_cast<size_t>(i)];
     }
     std::unique_ptr<bmrt_runtime::VpssPreprocessor> vpss(
         new bmrt_runtime::VpssPreprocessor());
     if (!vpss->open(handle_, vpss_config, error)) return false;
     hardware_preprocessor_ = std::move(vpss);
-    if (!allocateOutputBuffers(error)) {
+    if (!float_input && !allocateOutputBuffers(error)) {
       hardware_preprocessor_.reset();
       return false;
     }
@@ -423,6 +449,7 @@ class NnFeature::CustomRuntime {
     cached_image_tensor_.clear();
     host_input_bytes_.clear();
     host_frame_input_bytes_.clear();
+    host_frame_input_tensor_.clear();
     host_output_bytes_.clear();
     host_output_ptrs_.clear();
     host_output_shapes_.clear();
@@ -825,6 +852,7 @@ class NnFeature::CustomRuntime {
   std::vector<float> cached_image_tensor_;
   std::vector<uint8_t> host_input_bytes_;
   std::vector<uint8_t> host_frame_input_bytes_;
+  std::vector<float> host_frame_input_tensor_;
   std::vector<std::vector<uint8_t>> host_output_bytes_;
   std::vector<void *> host_output_ptrs_;
   std::vector<bm_shape_t> host_output_shapes_;

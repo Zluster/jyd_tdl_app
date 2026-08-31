@@ -33,13 +33,16 @@
 #include "tdl_app/media_types.hpp"
 #include "tdl_app/osd_region.hpp"
 #include "tdl_app/sys_context.hpp"
+#include "tdl_app/touch_input.hpp"
 #include "tdl_app/vo_output.hpp"
 #include "tdl_app/rgb_led.hpp"
 
 #ifdef TDL_PY_WITH_NPU
 #include "algorithm/private/vpss_preprocessor.hpp"
 #include "tdl_app/classifier.hpp"
+#include "tdl_app/byte_tracker.hpp"
 #include "tdl_app/detector.hpp"
+#include "tdl_app/face_emotion_recognizer.hpp"
 #include "tdl_app/face_recognizer.hpp"
 #include "tdl_app/hand_gesture_recognizer.hpp"
 #include "tdl_app/instance_segmenter.hpp"
@@ -48,16 +51,51 @@
 #include "tdl_app/plate_recognizer.hpp"
 #include "tdl_app/pose_classifier.hpp"
 #include "tdl_app/self_learning_classifier.hpp"
+#include "tdl_app/single_object_tracker.hpp"
 #include "tdl_app/vision_task_types.hpp"
 #endif
 
 namespace nb = nanobind;
+
+void registerAudioBindings(nb::module_ &m);
 
 namespace {
 
 [[noreturn]] void raise(const std::string &message) {
   throw std::runtime_error(message);
 }
+
+#ifdef TDL_PY_WITH_NPU
+tdl_app::Box boxFromPython(nb::handle value) {
+  tdl_app::Box box;
+  box.x1 = nb::cast<float>(value.attr("x1"));
+  box.y1 = nb::cast<float>(value.attr("y1"));
+  box.x2 = nb::cast<float>(value.attr("x2"));
+  box.y2 = nb::cast<float>(value.attr("y2"));
+  box.score = nb::cast<float>(value.attr("score"));
+  box.class_id = nb::cast<int>(value.attr("class_id"));
+  if (!box.valid()) {
+    raise("box must satisfy x2 > x1 and y2 > y1");
+  }
+  return box;
+}
+
+jyd_tracker::Detection trackerDetectionFromPython(nb::handle value) {
+  const tdl_app::Box box = boxFromPython(value);
+  return {box.x1, box.y1, box.x2, box.y2, box.score, box.class_id};
+}
+
+tdl_app::Box trackerBox(const jyd_tracker::Track &track) {
+  tdl_app::Box box;
+  box.x1 = track.box.x1;
+  box.y1 = track.box.y1;
+  box.x2 = track.box.x2;
+  box.y2 = track.box.y2;
+  box.score = track.box.score;
+  box.class_id = track.box.class_id;
+  return box;
+}
+#endif
 
 nb::object memoryviewFrom(void *data, std::size_t size, bool writable) {
   PyObject *view = PyMemoryView_FromMemory(
@@ -1108,7 +1146,6 @@ class PyMediaLink {
  private:
   std::unique_ptr<tdl_app::MediaLink> link_;
 };
-
 }  // namespace
 
 NB_MODULE(tdl_py, m) {
@@ -1154,7 +1191,6 @@ NB_MODULE(tdl_py, m) {
   m.attr("SCREEN_HEIGHT") = tdl_app::DualOsLayout::kScreenHeight;
   m.attr("RGB_WIDTH") = tdl_app::DualOsLayout::kRgbWidth;
   m.attr("RGB_HEIGHT") = tdl_app::DualOsLayout::kRgbHeight;
-
   // --- frame ---------------------------------------------------------------
   nb::class_<PyFrame>(m, "Frame",
       "One captured VPSS frame. The pixel buffer is memory-mapped (no copy). "
@@ -1397,7 +1433,6 @@ NB_MODULE(tdl_py, m) {
       .def("bind", &PyMediaLink::bind)
       .def("unbind", &PyMediaLink::unbind)
       .def_prop_ro("bound", &PyMediaLink::isBound);
-  
   // --- RGB LED ---------------------------------------------------------------
   nb::class_<tdl_app::RgbLed>(m, "RgbLed",
       "RGB LED controller through the dual-OS small core.")
@@ -1435,8 +1470,73 @@ NB_MODULE(tdl_py, m) {
         std::string error;
         return self.clear(&error);
       });
-      
-  
+
+  registerAudioBindings(m);
+
+  // --- touch input -----------------------------------------------------------
+  nb::class_<tdl_app::TouchEvent>(m, "TouchEvent",
+      "One touchscreen event in screen coordinates.")
+      .def_prop_ro("phase", [](const tdl_app::TouchEvent &self) {
+        switch (self.phase) {
+          case tdl_app::TouchPhase::Down: return "down";
+          case tdl_app::TouchPhase::Move: return "move";
+          case tdl_app::TouchPhase::Up: return "up";
+          case tdl_app::TouchPhase::Cancel: return "cancel";
+        }
+        return "cancel";
+      })
+      .def_ro("x", &tdl_app::TouchEvent::x)
+      .def_ro("y", &tdl_app::TouchEvent::y)
+      .def_ro("pressure", &tdl_app::TouchEvent::pressure)
+      .def_ro("tracking_id", &tdl_app::TouchEvent::tracking_id)
+      .def_ro("timestamp_us", &tdl_app::TouchEvent::timestamp_us);
+
+  nb::class_<tdl_app::TouchInput>(m, "Touch",
+      "Linux evdev touchscreen reader. Opens on construction and closes "
+      "automatically on destruction; read() returns None on timeout.")
+      .def("__init__", [](tdl_app::TouchInput *self,
+                            const std::string &device, int rotation) {
+        tdl_app::TouchInput::Config config;
+        config.device = device;
+        switch (rotation) {
+          case 0:
+            config.rotation = tdl_app::TouchRotation::Deg0;
+            break;
+          case 90:
+            config.rotation = tdl_app::TouchRotation::Deg90;
+            break;
+          case 180:
+            config.rotation = tdl_app::TouchRotation::Deg180;
+            break;
+          case 270:
+            config.rotation = tdl_app::TouchRotation::Deg270;
+            break;
+          default:
+            raise("touch rotation must be 0, 90, 180, or 270");
+        }
+        new (self) tdl_app::TouchInput(config);
+        std::string error;
+        if (!self->open(&error)) {
+          raise("touch open failed: " + error);
+        }
+      }, nb::arg("device") = "/dev/input/event0",
+         nb::arg("rotation") = 0)
+      .def("read", [](tdl_app::TouchInput &self, int timeout_ms) -> nb::object {
+        tdl_app::TouchEvent event;
+        std::string error;
+        bool received = false;
+        {
+          nb::gil_scoped_release guard;
+          received = self.read(&event, timeout_ms, &error);
+        }
+        if (!received) {
+          if (error.empty()) return nb::none();
+          raise("touch read failed: " + error);
+        }
+        return nb::cast(event);
+      }, nb::arg("timeout_ms") = 0,
+         "Read one event; return None when timeout_ms elapses.");
+
   // --- state queries (for idempotent setup scripts) --------------------------
   m.def("vo_is_enabled",
         [](int device) {
@@ -1522,6 +1622,109 @@ NB_MODULE(tdl_py, m) {
                " score=" + std::to_string(self.score) +
                " class=" + std::to_string(self.class_id) + ">";
       });
+
+  nb::class_<jyd_tracker::Track>(m, "Track",
+      "A ByteTrack result in the coordinate system supplied to update().")
+      .def_ro("id", &jyd_tracker::Track::id)
+      .def_prop_ro("box", &trackerBox)
+      .def_ro("age", &jyd_tracker::Track::age)
+      .def_ro("missed", &jyd_tracker::Track::missed)
+      .def_ro("previous_center_x", &jyd_tracker::Track::previous_center_x)
+      .def_prop_ro("center_x", [](const jyd_tracker::Track &self) {
+        return (self.box.x1 + self.box.x2) * 0.5f;
+      })
+      .def_prop_ro("center_y", [](const jyd_tracker::Track &self) {
+        return (self.box.y1 + self.box.y2) * 0.5f;
+      });
+
+  nb::class_<jyd_tracker::ByteTracker>(m, "MultiObjectTracker",
+      "ByteTrack-style multi-object tracker. update() accepts any Python "
+      "box objects with x1/y1/x2/y2/score/class_id attributes.")
+      .def("__init__", [](jyd_tracker::ByteTracker *self, float high_score,
+                            float low_score, float iou_threshold,
+                            int max_missed) {
+        jyd_tracker::ByteTracker::Config config;
+        config.high_score = high_score;
+        config.low_score = low_score;
+        config.iou_threshold = iou_threshold;
+        config.max_missed = max_missed;
+        if (config.low_score < 0.0f || config.high_score < config.low_score ||
+            config.high_score > 1.0f || config.iou_threshold <= 0.0f ||
+            config.iou_threshold > 1.0f || config.max_missed < 0) {
+          raise("invalid ByteTrack thresholds or max_missed");
+        }
+        new (self) jyd_tracker::ByteTracker(config);
+      }, nb::arg("high_score") = 0.45f, nb::arg("low_score") = 0.15f,
+         nb::arg("iou_threshold") = 0.30f, nb::arg("max_missed") = 30)
+      .def("update", [](jyd_tracker::ByteTracker &self, nb::iterable boxes) {
+        std::vector<jyd_tracker::Detection> detections;
+        for (nb::handle box : boxes) {
+          detections.push_back(trackerDetectionFromPython(box));
+        }
+        return self.update(detections);
+      }, nb::arg("boxes"), "Update tracker with detection boxes.")
+      .def("reset", &jyd_tracker::ByteTracker::reset);
+
+  nb::class_<tdl_app::SingleObjectTrackingResult>(m,
+      "SingleObjectTrackingResult",
+      "One FearTrack result in source-frame coordinates.")
+      .def_ro("box", &tdl_app::SingleObjectTrackingResult::box)
+      .def_ro("confidence", &tdl_app::SingleObjectTrackingResult::confidence)
+      .def_ro("tracked", &tdl_app::SingleObjectTrackingResult::tracked)
+      .def_ro("response_x", &tdl_app::SingleObjectTrackingResult::response_x)
+      .def_ro("response_y", &tdl_app::SingleObjectTrackingResult::response_y)
+      .def_ro("preprocess_ms", &tdl_app::SingleObjectTrackingResult::preprocess_ms)
+      .def_ro("inference_ms", &tdl_app::SingleObjectTrackingResult::inference_ms)
+      .def_ro("output_copy_ms", &tdl_app::SingleObjectTrackingResult::output_copy_ms)
+      .def_ro("postprocess_ms", &tdl_app::SingleObjectTrackingResult::postprocess_ms)
+      .def_ro("total_ms", &tdl_app::SingleObjectTrackingResult::total_ms);
+
+  nb::class_<tdl_app::SingleObjectTracker>(m, "SingleObjectTracker",
+      "FearTrack visual single-object tracker. Initialize from a user ROI, "
+      "then track each live frame without a detector.")
+      .def(nb::init<>())
+      .def("load", [](tdl_app::SingleObjectTracker &self,
+                      const std::string &model_spec,
+                      const std::string &firmware) {
+        std::string error;
+        bool ok = false;
+        {
+          nb::gil_scoped_release guard;
+          ok = self.load(model_spec, firmware, &error);
+        }
+        if (!ok) raise("single object tracker load failed: " + error);
+      }, nb::arg("model_spec"), nb::arg("firmware") = "")
+      .def("initialize", [](tdl_app::SingleObjectTracker &self,
+                            PyFrame &frame, nb::handle target) {
+        frame.requireValid();
+        const tdl_app::Frame sdk_frame = sdkFrameFrom(frame);
+        const tdl_app::Box box = boxFromPython(target);
+        std::string error;
+        bool ok = false;
+        {
+          nb::gil_scoped_release guard;
+          ok = self.initializeFrame(sdk_frame, box, &error);
+        }
+        if (!ok) raise("single object tracker initialize failed: " + error);
+      }, nb::arg("frame"), nb::arg("target"),
+         "Set the template target from one live frame.")
+      .def("track", [](tdl_app::SingleObjectTracker &self, PyFrame &frame) {
+        frame.requireValid();
+        const tdl_app::Frame sdk_frame = sdkFrameFrom(frame);
+        tdl_app::SingleObjectTrackingResult result;
+        std::string error;
+        bool ok = false;
+        {
+          nb::gil_scoped_release guard;
+          ok = self.runFrame(sdk_frame, &result, &error);
+        }
+        if (!ok) raise("single object tracker track failed: " + error);
+        return result;
+      }, nb::arg("frame"), "Track one live frame.")
+      .def("reset", &tdl_app::SingleObjectTracker::reset)
+      .def_prop_ro("initialized", &tdl_app::SingleObjectTracker::initialized)
+      .def_prop_ro("ready", &tdl_app::SingleObjectTracker::ready)
+      .def_prop_ro("current_box", &tdl_app::SingleObjectTracker::currentBox);
 
   nb::class_<tdl_app::ClassificationItem>(m, "ClassificationItem",
       "One top-k classification entry: class_id + score.")
@@ -2012,6 +2215,20 @@ NB_MODULE(tdl_py, m) {
            },
            nb::arg("label"), nb::arg("frame"),
            "Extract and add one labeled live camera frame sample.")
+      .def("add_frame_crop",
+           [](tdl_app::SelfLearningClassifier &self, const std::string &label,
+              PyFrame &frame, nb::handle roi) {
+             const tdl_app::Frame sdk_frame = sdkFrameFrom(frame);
+             const tdl_app::Box sdk_roi = boxFromPython(roi);
+             std::string error;
+             bool ok = false;
+             {
+               nb::gil_scoped_release guard;
+               ok = self.addFrameCrop(label, sdk_frame, sdk_roi, &error);
+             }
+             if (!ok) raise("self-learning add_frame_crop failed: " + error);
+           }, nb::arg("label"), nb::arg("frame"), nb::arg("roi"),
+           "Extract and add one labeled hardware-cropped frame sample.")
       .def("classify",
            [](tdl_app::SelfLearningClassifier &self, PyFrame &frame, int top_k) {
              const tdl_app::Frame sdk_frame = sdkFrameFrom(frame);
@@ -2029,6 +2246,24 @@ NB_MODULE(tdl_py, m) {
            },
            nb::arg("frame"), nb::arg("top_k") = 1,
            "Classify one live camera frame.")
+      .def("classify_crop",
+           [](tdl_app::SelfLearningClassifier &self, PyFrame &frame,
+              nb::handle roi, int top_k) {
+             const tdl_app::Frame sdk_frame = sdkFrameFrom(frame);
+             const tdl_app::Box sdk_roi = boxFromPython(roi);
+             tdl_app::SelfLearningClassificationResult result;
+             tdl_app::SelfLearningClassificationProfile profile;
+             std::string error;
+             bool ok = false;
+             {
+               nb::gil_scoped_release guard;
+               ok = self.classifyFrameCrop(sdk_frame, sdk_roi, top_k, &result,
+                                           &profile, &error);
+             }
+             if (!ok) raise("self-learning classify_crop failed: " + error);
+             return result;
+           }, nb::arg("frame"), nb::arg("roi"), nb::arg("top_k") = 1,
+           "Classify one hardware-cropped ROI from a live camera frame.")
       .def("classify_image",
            [](tdl_app::SelfLearningClassifier &self, const std::string &path,
               int top_k) {
@@ -2176,6 +2411,87 @@ NB_MODULE(tdl_py, m) {
       .def("reset", &tdl_app::PlateRecognizer::reset, "Unload the model")
       .def_prop_ro("initialized", &tdl_app::PlateRecognizer::initialized)
       .def_prop_ro("model_type", &tdl_app::PlateRecognizer::modelType);
+
+  nb::class_<tdl_app::FaceEmotionResult>(m, "FaceEmotionResult",
+      "One detected face with the emotion returned by the attribute model.")
+      .def_ro("box", &tdl_app::FaceEmotionResult::box)
+      .def_ro("emotion", &tdl_app::FaceEmotionResult::emotion)
+      .def_ro("emotion_id", &tdl_app::FaceEmotionResult::emotion_id)
+      .def_ro("emotion_score", &tdl_app::FaceEmotionResult::emotion_score)
+      .def_ro("detection_score", &tdl_app::FaceEmotionResult::detection_score)
+      .def_ro("gender", &tdl_app::FaceEmotionResult::gender)
+      .def_ro("age", &tdl_app::FaceEmotionResult::age)
+      .def_ro("glasses", &tdl_app::FaceEmotionResult::glasses)
+      .def_ro("gender_label", &tdl_app::FaceEmotionResult::gender_label)
+      .def_ro("age_years", &tdl_app::FaceEmotionResult::age_years)
+      .def_ro("has_glasses", &tdl_app::FaceEmotionResult::has_glasses);
+
+  nb::class_<tdl_app::FaceEmotionRecognizer>(m, "FaceEmotionRecognizer",
+      "Online face emotion recognition: SCRFD detection plus the 7-class "
+      "face attribute/emotion model.")
+      .def(nb::init<>())
+      .def("__init__",
+           [](tdl_app::FaceEmotionRecognizer *self,
+              const std::string &detector_model,
+              const std::string &attribute_model, float threshold,
+              int max_faces, const std::string &firmware) {
+             new (self) tdl_app::FaceEmotionRecognizer();
+             tdl_app::FaceEmotionRecognizer::Config config;
+             config.detector_model_spec = detector_model;
+             config.attribute_model_spec = attribute_model;
+             config.face_threshold = threshold;
+             config.max_faces = max_faces;
+             config.firmware = firmware;
+             std::string error;
+             bool ok = false;
+             {
+               nb::gil_scoped_release guard;
+               ok = self->load(config, &error);
+             }
+             if (!ok) raise("face emotion recognizer load failed: " + error);
+           },
+           nb::arg("detector_model"), nb::arg("attribute_model"),
+           nb::arg("threshold") = 0.35f, nb::arg("max_faces") = 3,
+           nb::arg("firmware") = "",
+           "Create and load the face detection and emotion models.")
+      .def("load",
+           [](tdl_app::FaceEmotionRecognizer &self,
+              const std::string &detector_model,
+              const std::string &attribute_model, float threshold,
+              int max_faces, const std::string &firmware) {
+             tdl_app::FaceEmotionRecognizer::Config config;
+             config.detector_model_spec = detector_model;
+             config.attribute_model_spec = attribute_model;
+             config.face_threshold = threshold;
+             config.max_faces = max_faces;
+             config.firmware = firmware;
+             std::string error;
+             bool ok = false;
+             {
+               nb::gil_scoped_release guard;
+               ok = self.load(config, &error);
+             }
+             if (!ok) raise("face emotion recognizer load failed: " + error);
+           },
+           nb::arg("detector_model"), nb::arg("attribute_model"),
+           nb::arg("threshold") = 0.35f, nb::arg("max_faces") = 3,
+           nb::arg("firmware") = "")
+      .def("recognize",
+           [](tdl_app::FaceEmotionRecognizer &self, PyFrame &frame) {
+             const tdl_app::Frame sdk_frame = sdkFrameFrom(frame);
+             std::vector<tdl_app::FaceEmotionResult> results;
+             std::string error;
+             bool ok = false;
+             {
+               nb::gil_scoped_release guard;
+               ok = self.recognizeFrame(sdk_frame, &results, &error);
+             }
+             if (!ok) raise("face emotion recognition failed: " + error);
+             return results;
+           },
+           nb::arg("frame"),
+           "Detect faces and return their 7-class emotion results.")
+      .def_prop_ro("initialized", &tdl_app::FaceEmotionRecognizer::initialized);
 
   nb::class_<tdl_app::FaceRecognitionResult>(m, "FaceRecognitionResult",
       "One face recognition result. Box coordinates are in frame space.")

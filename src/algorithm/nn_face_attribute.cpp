@@ -1,6 +1,7 @@
 #include "tdl_app/nn_face_attribute.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -243,8 +244,15 @@ class NnFaceAttribute::CustomRuntime {
         !outputs[static_cast<size_t>(emotion_index_)].data.empty()) {
       const auto &data = outputs[static_cast<size_t>(emotion_index_)].data;
       const auto it = std::max_element(data.begin(), data.end());
+      const float maximum = *it;
+      float sum = 0.0f;
+      for (float value : data) {
+        sum += std::exp(value - maximum);
+      }
       addAttribute(result, "emotion",
                    static_cast<float>(std::distance(data.begin(), it)));
+      addAttribute(result, "emotion_score",
+                   sum > 0.0f ? 1.0f / sum : 0.0f);
     }
   }
 

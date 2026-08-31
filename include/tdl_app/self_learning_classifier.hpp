@@ -54,6 +54,8 @@ class SelfLearningClassifier {
                  std::string *error = nullptr);
   bool addFrame(const std::string &label, const Frame &frame,
                 std::string *error = nullptr);
+  bool addFrameCrop(const std::string &label, const Frame &frame,
+                    const Box &roi, std::string *error = nullptr);
   bool classify(const std::string &image_path, int top_k,
                 SelfLearningClassificationResult *result,
                 std::string *error = nullptr);
@@ -61,6 +63,10 @@ class SelfLearningClassifier {
                      SelfLearningClassificationResult *result,
                      SelfLearningClassificationProfile *profile = nullptr,
                      std::string *error = nullptr);
+  bool classifyFrameCrop(const Frame &frame, const Box &roi, int top_k,
+                         SelfLearningClassificationResult *result,
+                         SelfLearningClassificationProfile *profile = nullptr,
+                         std::string *error = nullptr);
 
   bool saveBank(const std::string &path, std::string *error = nullptr) const;
   bool loadBank(const std::string &path, std::string *error = nullptr);
