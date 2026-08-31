@@ -2,7 +2,10 @@
 # 注意：wheel 标签是 py3-none-any，但内含 ARM32 原生 .so，仅供 CV184x 板端安装
 
 [build-system]
-requires = ["setuptools>=68"]
+# SDK host provides 59.6 and target Alpine 3.16 carries 65.5; this package
+# only uses standard setuptools package-data support, so a higher floor adds
+# no functionality and blocks offline builds.
+requires = ["setuptools>=59"]
 build-backend = "setuptools.build_meta"
 
 [project]

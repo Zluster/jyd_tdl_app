@@ -6,6 +6,7 @@
 - camera  VPSS 通道取帧（zero-copy Frame / 紧凑 RGB Image）
 - image   图像处理（_maix_image 直通：find_qrcodes/find_blobs/...）
 - nn      .mud 模型统一加载推理（六族自动识别，nn.load 即用）
+- audio   AI/AO 录放、声纹识别、流式 ASR 与关键词检测
 - lv      嵌入 LVGL 代理（UI 心跳由用户主循环 lv.show() 驱动）
 
 原生依赖（mpy.so / tdl_py.so / _maix_image*.so）捆绑在 jyd/_libs/，
@@ -46,6 +47,7 @@ _SUBMODULES = (
     "camera",
     "image",
     "nn",
+    "audio",
     "lv",
     "bus",
     "core",

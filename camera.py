@@ -216,6 +216,33 @@ def preview(source="front"):
     _runtime.runtime().set_preview(source)
 
 
+def to_screen(x, y, frame_width=640, frame_height=640):
+    """ 帧 -> 屏幕坐标映射（仿 launcher/apps/ai 的 CoordMap）。
+
+    推理帧与屏幕显示的都是同一 sensor 画面的等比嵌入：ai 640x640 上下
+    黑边（内容 640x480，oy=80），屏幕 720x480 左右黑边（内容 640x480，
+    ox=40）。映射 = 去帧黑边按内容归一，再加屏幕黑边；ai 帧数值下退化
+    """
+    src_w, src_h = 1600.0, 1200.0
+    screen_w, screen_h = 720.0, 480.0
+
+    frame_fit = min(frame_width / src_w, frame_height / src_h)
+    frame_content_w, frame_content_h = src_w * frame_fit, src_h * frame_fit
+    frame_offset_x = (frame_width - frame_content_w) * 0.5
+    frame_offset_y = (frame_height - frame_content_h) * 0.5
+
+    screen_fit = min(screen_w / src_w, screen_h / src_h)
+    screen_content_w = src_w * screen_fit
+    screen_content_h = src_h * screen_fit
+    screen_offset_x = (screen_w - screen_content_w) * 0.5
+    screen_offset_y = (screen_h - screen_content_h) * 0.5
+
+    return (int((x - frame_offset_x) / frame_content_w * screen_content_w
+                + screen_offset_x),
+            int((y - frame_offset_y) / frame_content_h * screen_content_h
+                + screen_offset_y))
+
+
 # ---- 前摄 grp0 / 显示 grp1 ----
 
 def rgb(timeout_ms=1000) -> Camera:

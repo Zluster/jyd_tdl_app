@@ -14,6 +14,8 @@ lv.* 全部属性转发到 MicroPython 里的 lvgl 模块（首次访问自动�
                      尺寸/格式变了才重设 dsc；Image 引用由模块保活
     bind(obj, code, fn)   LVGL 事件 -> CPython 无参回调
                           （事件对象不能跨桥，MicroPython 侧吞掉）
+    bind_touch(obj)       在对象上采集按下、移动和松开的触摸事件
+    read_touch()          读取一条 (phase, x, y) 触摸事件
 
 另外代理对象的 set_src() 做了增强：可直接传 jyd.image 的 Image
 （零拷贝建 dsc；Image 像素内存必须比控件活得久），其余参数照旧转发。
@@ -49,7 +51,40 @@ def _jyd_bind(obj, code, host_name):
     obj.add_event_cb(lambda e: f(), code, None)
 """
 
+
+_TOUCH_BIND_SRC = r"""
+import drive
+
+_jyd_touch_events = []
+
+def _jyd_bind_touch(obj):
+    def emit(phase):
+        def callback(event):
+            try:
+                # The bundled evdev driver updates these values before LVGL
+                # dispatches the event. Reading them avoids passing lv_event
+                # / lv_indev objects through the MicroPython bridge.
+                point_x = drive.mouse.hor_res - drive.mouse.x
+                point_y = drive.mouse.ver_res - drive.mouse.y
+                point_x = max(0, min(drive.mouse.hor_res - 1, point_x))
+                point_y = max(0, min(drive.mouse.ver_res - 1, point_y))
+                _jyd_touch_events.append("%s,%d,%d" % (
+                    phase, int(point_x), int(point_y)))
+            except Exception:
+                pass
+        return callback
+    obj.add_event_cb(emit("pressed"), lv.EVENT.PRESSED, None)
+    obj.add_event_cb(emit("moving"), lv.EVENT.PRESSING, None)
+    obj.add_event_cb(emit("released"), lv.EVENT.RELEASED, None)
+
+def _jyd_read_touch():
+    if not _jyd_touch_events:
+        return ""
+    return _jyd_touch_events.pop(0)
+"""
+
 _bind_state = {"ready": False, "seq": 0}
+_touch_state = {"ready": False}
 
 
 #: show(img) 托管的唯一 lv.image 控件：widget 控件代理 / img 最近一次
@@ -111,6 +146,30 @@ def bind(obj, event_code, fn):
     name = "_jyd_cb_%d" % _bind_state["seq"]   # 唯一名，避免同名回调互相覆盖
     mpy.register(fn, name=name)
     rt.m.proxy_call("_jyd_bind", obj, event_code, name)
+
+
+def bind_touch(obj):
+    """Collect pointer events from one LVGL object.
+
+    The MicroPython side owns the LVGL event object because it cannot cross
+    the CPython bridge. Call :func:`read_touch` after ``show()`` to obtain
+    ``("pressed"|"moving"|"released", x, y)`` integer events.
+    """
+    rt = _runtime.runtime().ensure_display()
+    if not _touch_state["ready"]:
+        rt.m.exec(_TOUCH_BIND_SRC)
+        _touch_state["ready"] = True
+    rt.m.proxy_call("_jyd_bind_touch", obj)
+
+
+def read_touch():
+    """Return the next queued ``(phase, x, y)`` touch event, or ``None``."""
+    rt = _runtime.runtime().ensure_display()
+    value = rt.m.proxy_call("_jyd_read_touch")
+    if not value:
+        return None
+    phase, x, y = value.split(",", 2)
+    return phase, int(x), int(y)
 
 
 def _proxy_set_src(self, src):

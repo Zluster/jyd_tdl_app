@@ -298,7 +298,9 @@ class _Runtime:
             self._media_links.append(link)
 
         # 2) OSD 双缓冲 + flush 通道（先于 MicroPython 环境）。
-        tdl_py.rgn_destroy(_OSD_HANDLE, 1, 0)
+        destroy_rgn = getattr(tdl_py, "rgn_destroy", None)
+        if destroy_rgn is not None:
+            destroy_rgn(_OSD_HANDLE, 1, 0)
         osd = tdl_py.Osd(handle=_OSD_HANDLE, canvas_count=2)
         osd.create()
         self._osd = osd
