@@ -16,8 +16,10 @@ namespace {
 struct Options {
   std::string mode = "interactive";
   std::string model_spec = "./configs/model_specs/speaker_campplus_sv.mud";
+  std::string firmware;
   std::string database = "./speakers.db";
   std::string label;
+  std::string pcm_path;
   std::string dump_pcm;
   int seconds = 3;
   int min_speech_ms = 1500;
@@ -46,11 +48,14 @@ void printUsage() {
       << "  tdl_speaker_recognition_demo --mode identify [options]\n"
       << "  tdl_speaker_recognition_demo --mode verify --label NAME [options]\n"
       << "  tdl_speaker_recognition_demo --mode monitor [options]\n\n"
-      << "All modes capture signed 16-bit, mono, 16 kHz PCM from the AI device.\n\n"
+      << "Register, identify, and verify capture signed 16-bit, mono, 16 kHz PCM\n"
+      << "from the AI device unless --pcm is provided.\n\n"
       << "Core options:\n"
       << "  --model-spec FILE       CAMPPlus BF16 model spec\n"
+      << "  --firmware FILE         BM runtime firmware library\n"
       << "  --database FILE         Persistent enrollment database\n"
       << "  --label NAME            Required for register and verify\n"
+      << "  --pcm FILE              Offline 16 kHz mono signed 16-bit PCM input\n"
       << "  --seconds N             Capture duration for register/identify/verify (default 3)\n"
       << "  --threshold F           Cosine match threshold (default 0.60)\n"
       << "  --dump-pcm FILE         Save captured PCM for diagnosis\n\n"
@@ -112,10 +117,14 @@ bool parseArgs(int argc, char **argv, Options *options) {
       if (!nextString(argc, argv, &i, "--mode", &options->mode)) return false;
     } else if (arg == "--model-spec") {
       if (!nextString(argc, argv, &i, "--model-spec", &options->model_spec)) return false;
+    } else if (arg == "--firmware") {
+      if (!nextString(argc, argv, &i, "--firmware", &options->firmware)) return false;
     } else if (arg == "--database") {
       if (!nextString(argc, argv, &i, "--database", &options->database)) return false;
     } else if (arg == "--label") {
       if (!nextString(argc, argv, &i, "--label", &options->label)) return false;
+    } else if (arg == "--pcm") {
+      if (!nextString(argc, argv, &i, "--pcm", &options->pcm_path)) return false;
     } else if (arg == "--dump-pcm") {
       if (!nextString(argc, argv, &i, "--dump-pcm", &options->dump_pcm)) return false;
     } else if (arg == "--seconds") {
@@ -169,6 +178,11 @@ bool parseArgs(int argc, char **argv, Options *options) {
   if ((options->mode == "register" || options->mode == "verify") &&
       options->label.empty()) {
     std::cerr << "--label is required for " << options->mode << " mode\n";
+    return false;
+  }
+  if (!options->pcm_path.empty() &&
+      (options->mode == "interactive" || options->mode == "monitor")) {
+    std::cerr << "--pcm is supported only by register, identify, and verify modes\n";
     return false;
   }
   if (options->seconds < 1 || options->threshold < -1.0f ||
@@ -246,6 +260,28 @@ bool dumpPcm(const std::string &path, const std::vector<std::int16_t> &samples,
                samples.size() * sizeof(std::int16_t));
   if (!output) {
     if (error) *error = "cannot write PCM dump: " + path;
+    return false;
+  }
+  return true;
+}
+
+bool readPcm(const std::string &path, std::vector<std::int16_t> *samples,
+             std::string *error) {
+  std::ifstream input(path.c_str(), std::ios::binary);
+  if (!input) {
+    if (error) *error = "cannot open PCM input: " + path;
+    return false;
+  }
+  input.seekg(0, std::ios::end);
+  const std::streamoff bytes = input.tellg();
+  input.seekg(0, std::ios::beg);
+  if (bytes <= 0 || bytes % static_cast<std::streamoff>(sizeof(std::int16_t)) != 0) {
+    if (error) *error = "PCM input must contain whole signed 16-bit samples: " + path;
+    return false;
+  }
+  samples->resize(static_cast<std::size_t>(bytes) / sizeof(std::int16_t));
+  if (!input.read(reinterpret_cast<char *>(samples->data()), bytes)) {
+    if (error) *error = "cannot read PCM input: " + path;
     return false;
   }
   return true;
@@ -418,7 +454,9 @@ int main(int argc, char **argv) {
 
   tdl_app::SpeakerRecognizer recognizer;
   std::string error;
-  if (!recognizer.load(options.model_spec, &error)) {
+  if (!recognizer.load(
+          tdl_app::ModelSessionConfig::fromSpec(options.model_spec, options.firmware),
+          &error)) {
     std::cerr << "model load failed: " << error << "\n";
     return 1;
   }
@@ -430,30 +468,36 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  tdl_app::AudioInput audio(createAudioConfig(options));
-  if (!audio.open(&error)) {
-    std::cerr << "audio open failed: " << error << "\n";
-    return 1;
-  }
-  if (options.enable_vqe &&
-      (!audio.configureTalkVqe(tdl_app::AudioTalkVqeConfig::agcAnr(), 0, 0, &error) ||
-       !audio.enableVqe(&error))) {
-    std::cerr << "audio VQE enable failed: " << error << "\n";
-    return 1;
-  }
-
-  if (options.mode == "interactive") {
-    return runInteractive(&audio, &recognizer, &database, options);
-  }
-  if (options.mode == "monitor") {
-    return runMonitor(&audio, &recognizer, database, options);
-  }
-
   std::vector<std::int16_t> samples;
-  if (!captureSeconds(&audio, options, &samples, &error) ||
-      !dumpPcm(options.dump_pcm, samples, &error)) {
-    std::cerr << "audio capture failed: " << error << "\n";
-    return 1;
+  if (!options.pcm_path.empty()) {
+    if (!readPcm(options.pcm_path, &samples, &error) ||
+        !dumpPcm(options.dump_pcm, samples, &error)) {
+      std::cerr << "PCM input failed: " << error << "\n";
+      return 1;
+    }
+  } else {
+    tdl_app::AudioInput audio(createAudioConfig(options));
+    if (!audio.open(&error)) {
+      std::cerr << "audio open failed: " << error << "\n";
+      return 1;
+    }
+    if (options.enable_vqe &&
+        (!audio.configureTalkVqe(tdl_app::AudioTalkVqeConfig::agcAnr(), 0, 0, &error) ||
+         !audio.enableVqe(&error))) {
+      std::cerr << "audio VQE enable failed: " << error << "\n";
+      return 1;
+    }
+    if (options.mode == "interactive") {
+      return runInteractive(&audio, &recognizer, &database, options);
+    }
+    if (options.mode == "monitor") {
+      return runMonitor(&audio, &recognizer, database, options);
+    }
+    if (!captureSeconds(&audio, options, &samples, &error) ||
+        !dumpPcm(options.dump_pcm, samples, &error)) {
+      std::cerr << "audio capture failed: " << error << "\n";
+      return 1;
+    }
   }
   tdl_app::SpeakerEmbedding embedding;
   if (!recognizer.extract(samples, &embedding, &error)) {
