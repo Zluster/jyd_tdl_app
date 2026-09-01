@@ -35,6 +35,10 @@ void MediaLink::unbind() {
   if (!bound_) {
     return;
   }
+  forceUnbind();
+}
+
+void MediaLink::forceUnbind() {
   const MMF_CHN_S src = private_media::detail::toMmfChannel(config_.source);
   const MMF_CHN_S dst =
       private_media::detail::toMmfChannel(config_.destination);

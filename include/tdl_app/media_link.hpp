@@ -22,6 +22,10 @@ class MediaLink {
 
   bool bind(std::string *error = nullptr);
   void unbind();
+  // Unbinds the (source, destination) pair unconditionally. CVI_SYS_UnBind is
+  // keyed by the channel pair only, so this also removes binds created by
+  // other processes (e.g. residue left behind by a killed host).
+  void forceUnbind();
   bool isBound() const;
 
  private:

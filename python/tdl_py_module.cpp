@@ -1141,6 +1141,7 @@ class PyMediaLink {
   }
 
   void unbind() { link_->unbind(); }
+  void forceUnbind() { link_->forceUnbind(); }
   bool isBound() const { return link_->isBound(); }
 
  private:
@@ -1432,6 +1433,10 @@ NB_MODULE(tdl_py, m) {
                   nb::arg("layer") = 0, nb::arg("channel") = 0)
       .def("bind", &PyMediaLink::bind)
       .def("unbind", &PyMediaLink::unbind)
+      .def("force_unbind", &PyMediaLink::forceUnbind,
+           "Unbind this channel pair even if the bind was created by another "
+           "process (unconditional CVI_SYS_UnBind; residue cleanup, in the "
+           "same spirit as rgn_destroy)")
       .def_prop_ro("bound", &PyMediaLink::isBound);
   // --- RGB LED ---------------------------------------------------------------
   nb::class_<tdl_app::RgbLed>(m, "RgbLed",
