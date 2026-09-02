@@ -61,11 +61,11 @@ __all__ = list(_SUBMODULES)
 
 _LIB_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_libs")
 #: 捆绑的原生扩展模块名（文件在 jyd/_libs/，模块名是编译期定死的顶层名）
-_BUNDLED_LIBS = ("mpy", "tdl_py", "_maix_image")
+_BUNDLED_LIBS = ("mpy", "tdl_py", "tdl_audio", "_maix_image")
 
 
 class _BundledLibFinder:
-    """把 mpy / tdl_py / _maix_image 的 import 定向到 jyd/_libs 内的副本。
+    """把 mpy / tdl_py / tdl_audio / _maix_image 的 import 定向到 jyd/_libs 内的副本。
 
     插在 sys.meta_path 最前（先于 PathFinder）：无论 jyd 被放在哪、
     sys.path 上有没有同名 .so（如 /root/launcher 下的旧副本），进程内
