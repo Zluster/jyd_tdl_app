@@ -71,6 +71,19 @@ class QMI8658(IMU, TS):
         """Return the temperature in degrees Celsius."""
         ...
 
+    def calibrate_cod(self) -> bool:
+        """Run the gyroscope X/Y gain Calibration-On-Demand routine."""
+        ...
+
+    def calibrate_all(
+        self,
+        sample_count: int = ...,
+        interval_ms: int = ...,
+        acc_target: tuple[float, float, float] | list[float] | None = ...,
+    ) -> dict[str, object]:
+        """Run COD and stationary gyro/accelerometer offset calibration."""
+        ...
+
     def read_all(self, calib_gyro: bool = ..., radian: bool = ...) -> QMI8658Data:
         """Return acceleration, gyro, and temperature data."""
         ...

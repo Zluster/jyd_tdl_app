@@ -23,6 +23,18 @@ class MMC56X3Data(TSData, MagData):
         self.temperature = temperature
 
 
+class MMC56X3Calibration:
+    """Three-axis hard-iron offset and axis scale calibration."""
+
+    def __init__(self, offset, scale, minimum, maximum, sample_count):
+        """Initialize a magnetometer calibration result."""
+        self.offset = offset
+        self.scale = scale
+        self.minimum = minimum
+        self.maximum = maximum
+        self.sample_count = sample_count
+
+
 @mag_drivers.register("mmc56x3")
 @ts_drivers.register("mmc56x3")
 class MMC56X3(Mag, TS):
@@ -43,7 +55,7 @@ class MMC56X3(Mag, TS):
 
     def __init__(
         self,
-        i2c,
+        i2c = I2C(0),
         addr = 0x30,
         *,
         auto_open = True,
@@ -61,6 +73,7 @@ class MMC56X3(Mag, TS):
         self._active = False
         self._ctrl2 = 0
         self._data_rate = 0
+        self._mag_calibration = None
         if auto_open:
             self.open()
 
@@ -168,8 +181,10 @@ class MMC56X3(Mag, TS):
         return self._data_rate
 
     @wrap_error_as(MMC56X3Error, "MMC56X3 read failed", catch=OSError)
-    def read_mag(self):
-        """Return magnetic field axes in microteslas."""
+    def read_mag(self, calibrated = False):
+        """Return raw or calibrated magnetic field axes in microteslas."""
+        if not isinstance(calibrated, bool):
+            raise ValueError("calibrated must be a boolean")
         if not self.is_continuous_mode():
             self._write(self._CTRL0, 0x01)
             self._wait_ready(0x40, "magnetic measurement")
@@ -186,11 +201,82 @@ class MMC56X3(Mag, TS):
             * 0.00625
             for index in (0, 2, 4)
         )
-        return (decoded[0], decoded[1], decoded[2])
+        mag = (decoded[0], decoded[1], decoded[2])
+        if not calibrated:
+            return mag
+        if self._mag_calibration is None:
+            raise MMC56X3Error("magnetometer has not been calibrated")
+        return tuple(
+            (value - self._mag_calibration.offset[index])
+            * self._mag_calibration.scale[index]
+            for index, value in enumerate(mag)
+        )
 
-    def read_all(self):
-        """Return magnetic field and temperature data."""
-        return MMC56X3Data(mag=self.read_mag(), temperature=self.read_temperature())
+    @wrap_error_as(MMC56X3Error, "MMC56X3 calibration failed", catch=OSError)
+    def calibrate_mag(self, time_ms, interval_ms = 20):
+        """Collect rotated samples, activate calibration, and return its result.
+
+        Rotate the sensor through all orientations while this function runs.
+        The result compensates hard-iron offset and per-axis scale differences.
+        """
+        if isinstance(time_ms, bool) or not isinstance(time_ms, int) or time_ms <= 0:
+            raise ValueError("time_ms must be a positive integer")
+        if (
+            isinstance(interval_ms, bool)
+            or not isinstance(interval_ms, int)
+            or interval_ms < 0
+        ):
+            raise ValueError("interval_ms must be a non-negative integer")
+
+        self.magnet_set_reset()
+        minimum = [float("inf"), float("inf"), float("inf")]
+        maximum = [float("-inf"), float("-inf"), float("-inf")]
+        sample_count = 0
+        deadline = monotonic() + time_ms / 1_000
+        while True:
+            sample = self.read_mag(calibrated=False)
+            for index, value in enumerate(sample):
+                minimum[index] = min(minimum[index], value)
+                maximum[index] = max(maximum[index], value)
+            sample_count += 1
+            if monotonic() >= deadline:
+                break
+            if interval_ms:
+                sleep(interval_ms / 1_000)
+
+        radius = [
+            (maximum[index] - minimum[index]) / 2
+            for index in range(3)
+        ]
+        if any(value <= 0 for value in radius):
+            raise MMC56X3Error(
+                "insufficient axis movement during magnetometer calibration"
+            )
+        average_radius = sum(radius) / 3
+        calibration = MMC56X3Calibration(
+            offset=tuple(
+                (maximum[index] + minimum[index]) / 2
+                for index in range(3)
+            ),
+            scale=tuple(average_radius / value for value in radius),
+            minimum=tuple(minimum),
+            maximum=tuple(maximum),
+            sample_count=sample_count,
+        )
+        self._mag_calibration = calibration
+        return calibration
+
+    @property
+    def mag_calibration(self):
+        """Return the active magnetometer calibration, if any."""
+        return self._mag_calibration
+
+    def read_all(self, calibrated = False):
+        """Return raw or calibrated magnetic field and temperature data."""
+        return MMC56X3Data(
+            mag=self.read_mag(calibrated=calibrated),
+            temperature=self.read_temperature(),
+        )
 
     @property
     def _bus(self):

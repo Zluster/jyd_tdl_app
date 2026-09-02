@@ -17,6 +17,25 @@ class MMC56X3Data(TSData, MagData):
         ...
 
 
+class MMC56X3Calibration:
+    """Three-axis hard-iron offset and axis scale calibration."""
+    offset: tuple[float, float, float]
+    scale: tuple[float, float, float]
+    minimum: tuple[float, float, float]
+    maximum: tuple[float, float, float]
+    sample_count: int
+    def __init__(
+        self,
+        offset: tuple[float, float, float],
+        scale: tuple[float, float, float],
+        minimum: tuple[float, float, float],
+        maximum: tuple[float, float, float],
+        sample_count: int,
+    ) -> None:
+        """Initialize a magnetometer calibration result."""
+        ...
+
+
 
 @mag_drivers.register("mmc56x3")
 @ts_drivers.register("mmc56x3")
@@ -88,12 +107,21 @@ class MMC56X3(Mag, TS):
         """Return the cached effective output data rate in hertz."""
         ...
 
-    def read_mag(self) -> tuple[float, float, float]:
-        """Return magnetic field axes in microteslas."""
+    def read_mag(self, calibrated: bool = ...) -> tuple[float, float, float]:
+        """Return raw or calibrated magnetic field axes in microteslas."""
         ...
 
-    def read_all(self) -> MMC56X3Data:
-        """Return magnetic field and temperature data."""
+    def calibrate_mag(self, time_ms: int, interval_ms: int = ...) -> MMC56X3Calibration:
+        """Collect rotated samples, activate calibration, and return its result."""
+        ...
+
+    @property
+    def mag_calibration(self) -> MMC56X3Calibration | None:
+        """Return the active magnetometer calibration, if any."""
+        ...
+
+    def read_all(self, calibrated: bool = ...) -> MMC56X3Data:
+        """Return raw or calibrated magnetic field and temperature data."""
         ...
     @property
     def _bus(self) -> I2C: ...
