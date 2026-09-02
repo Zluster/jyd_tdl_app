@@ -370,7 +370,40 @@ if(TDL_APP_BUILD_PYTHON)
     tdl_app_npu_direct_kws_core)
   target_link_options(tdl_py PRIVATE -Wl,--gc-sections -Wl,--as-needed)
 
-  install(TARGETS tdl_py LIBRARY DESTINATION lib/python)
+  # The audio-NPU bindings stay separate from tdl_py so voice applications do
+  # not share the visual module's legacy runtime state.
+  add_library(tdl_audio MODULE
+    python/tdl_audio_module.cpp
+    third_party/nanobind/src/nb_combined.cpp
+  )
+  set_target_properties(tdl_audio PROPERTIES
+    PREFIX ""
+    OUTPUT_NAME "tdl_audio"
+    SUFFIX ".so"
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED ON
+    CXX_VISIBILITY_PRESET hidden
+  )
+  target_compile_definitions(tdl_audio PRIVATE NB_COMPACT_ASSERTIONS TDL_PY_WITH_NPU)
+  target_compile_options(tdl_audio PRIVATE
+    -fno-strict-aliasing
+    -ffunction-sections
+    -fdata-sections
+  )
+  target_include_directories(tdl_audio PRIVATE
+    "${TDL_APP_PYTHON_INCLUDE_DIR}"
+    "${CMAKE_CURRENT_LIST_DIR}/third_party/nanobind/include"
+    "${CMAKE_CURRENT_LIST_DIR}/third_party/nanobind/ext/robin_map/include"
+    "${TDL_CV184X_INCLUDE_DIRS}"
+    "${CMAKE_CURRENT_LIST_DIR}/src"
+  )
+  target_link_libraries(tdl_audio PRIVATE
+    tdl_app_speaker_core
+    tdl_app_npu_asr_core
+    tdl_app_npu_direct_kws_core)
+  target_link_options(tdl_audio PRIVATE -Wl,--gc-sections -Wl,--as-needed)
+
+  install(TARGETS tdl_py tdl_audio LIBRARY DESTINATION lib/python)
 endif()
 
 if(TDL_APP_BUILD_DEMOS)

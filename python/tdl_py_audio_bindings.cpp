@@ -6,6 +6,7 @@
 #include <nanobind/stl/vector.h>
 
 #include <algorithm>
+#include <cstdlib>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -38,9 +39,71 @@ bool pcm16FromBytes(const nb::bytes &pcm, std::vector<std::int16_t> *samples,
   return true;
 }
 
+std::string defaultFirmwarePath() {
+  const char *firmware = std::getenv("BMRUNTIME_USING_FIRMWARE");
+  return (firmware && firmware[0]) ? std::string(firmware)
+                                   : "/lib/firmware/libbm1688_kernel_module.so";
+}
+
+tdl_app::ModelSessionConfig modelConfig(const std::string &model_spec) {
+  return tdl_app::ModelSessionConfig::fromSpec(model_spec,
+                                                defaultFirmwarePath());
+}
+
+// This is private plumbing for the high-level algorithm classes below.  Each
+// Python application owns one algorithm and therefore one microphone stream;
+// PCM is never part of the app-facing real-time API.
+class RealtimeMicrophone {
+ public:
+  bool start(int input_volume, int points_per_frame, int frame_count,
+             int frame_depth, int timeout_ms, std::string *error) {
+    tdl_app::AudioInputStreamConfig config;
+    config.io.sample_rate = 16000;
+    config.io.channels = 1;
+    config.io.bit_depth = 16;
+    config.io.ai_volume = input_volume;
+    config.io.points_per_frame = points_per_frame;
+    config.io.frame_count = frame_count;
+    config.io.frame_depth = frame_depth;
+    config.io.timeout_ms = timeout_ms;
+    return audio_.openInputStream(config, error);
+  }
+
+  bool read(std::vector<std::int16_t> *samples,
+            tdl_app::AudioPcmChunk *metadata, std::string *error) {
+    if (!samples) {
+      if (error) *error = "PCM sample output pointer is null";
+      return false;
+    }
+    tdl_app::AudioPcmChunk chunk;
+    if (!audio_.readInputChunk(&chunk, error)) return false;
+    if (chunk.sample_rate != 16000 || chunk.channels != 1 ||
+        chunk.bit_depth != 16 || chunk.data.empty() ||
+        chunk.data.size() % sizeof(std::int16_t) != 0) {
+      if (error) *error = "microphone did not return 16 kHz mono PCM16";
+      return false;
+    }
+    samples->resize(chunk.data.size() / sizeof(std::int16_t));
+    std::memcpy(samples->data(), chunk.data.data(), chunk.data.size());
+    if (metadata) *metadata = std::move(chunk);
+    return true;
+  }
+
+  bool stop(std::string *error) { return audio_.closeInputStream(error); }
+
+  bool opened() const {
+    tdl_app::AudioInputStreamStatus status;
+    return audio_.inputStreamStatus(&status, nullptr) && status.opened;
+  }
+
+ private:
+  tdl_app::Audio audio_;
+};
+
 // High-level AI/AO facade for Python. Audio operations return false and
 // preserve the hardware error in last_error so an application can decide how
 // to recover without an exception unwinding its UI loop.
+#ifndef TDL_AUDIO_ONLY
 class PyAudio {
  public:
   bool recordWav(const std::string &path, double seconds, int sample_rate,
@@ -219,6 +282,7 @@ class PyAudio {
   tdl_app::Audio audio_;
   std::string last_error_;
 };
+#endif
 
 #ifdef TDL_PY_WITH_NPU
 class PySpeakerRecognizer {
@@ -228,7 +292,7 @@ class PySpeakerRecognizer {
     bool ok = false;
     {
       nb::gil_scoped_release guard;
-      ok = recognizer_.load(model_spec, &error);
+      ok = recognizer_.load(modelConfig(model_spec), &error);
     }
     last_error_ = error;
     return ok;
@@ -273,6 +337,102 @@ class PySpeakerRecognizer {
     return result;
   }
 
+  nb::object verify(const std::string &label, const nb::bytes &pcm,
+                    float threshold) {
+    std::vector<std::int16_t> samples;
+    if (!pcm16FromBytes(pcm, &samples, &last_error_)) return nb::none();
+    tdl_app::SpeakerEmbedding embedding;
+    bool ok = false;
+    {
+      nb::gil_scoped_release guard;
+      ok = recognizer_.extract(samples, &embedding, &last_error_);
+    }
+    if (!ok) return nb::none();
+    return result(recognizer_.verify(label, embedding, database_, threshold));
+  }
+
+  bool beginEnroll(const std::string &label, double seconds, int input_volume,
+                   int points_per_frame, int timeout_ms) {
+    return beginCapture(CaptureMode::Enroll, label, seconds, 0.60f,
+                        input_volume, points_per_frame, timeout_ms);
+  }
+
+  bool beginVerify(const std::string &label, double seconds, float threshold,
+                   int input_volume, int points_per_frame, int timeout_ms) {
+    return beginCapture(CaptureMode::Verify, label, seconds, threshold,
+                        input_volume, points_per_frame, timeout_ms);
+  }
+
+  bool beginIdentify(double seconds, float threshold, int input_volume,
+                     int points_per_frame, int timeout_ms) {
+    return beginCapture(CaptureMode::Identify, "", seconds, threshold,
+                        input_volume, points_per_frame, timeout_ms);
+  }
+
+  // Read one live audio frame.  Applications call poll() in their regular UI
+  // loop; it returns progress until the requested voice sample is complete.
+  nb::object poll() {
+    if (mode_ == CaptureMode::None) {
+      last_error_ = "no speaker capture is active";
+      return nb::none();
+    }
+    std::vector<std::int16_t> chunk;
+    tdl_app::AudioPcmChunk metadata;
+    std::string error;
+    bool ok = false;
+    {
+      nb::gil_scoped_release guard;
+      ok = microphone_.read(&chunk, &metadata, &error);
+    }
+    if (!ok) {
+      microphone_.stop(nullptr);
+      mode_ = CaptureMode::None;
+      last_error_ = error;
+      return nb::none();
+    }
+    const std::size_t remaining = target_samples_ - samples_.size();
+    const std::size_t count = std::min(remaining, chunk.size());
+    samples_.insert(samples_.end(), chunk.begin(), chunk.begin() + count);
+    if (samples_.size() < target_samples_) {
+      return progress(false, metadata);
+    }
+
+    microphone_.stop(nullptr);
+    tdl_app::SpeakerEmbedding embedding;
+    {
+      nb::gil_scoped_release guard;
+      ok = recognizer_.extract(samples_, &embedding, &error);
+    }
+    if (!ok) {
+      resetCapture();
+      last_error_ = error;
+      return nb::none();
+    }
+
+    nb::dict out = progress(true, metadata);
+    if (mode_ == CaptureMode::Enroll) {
+      ok = database_.upsert(label_, embedding, &error);
+      out["label"] = label_;
+      out["score"] = 1.0f;
+      out["matched"] = ok;
+    } else if (mode_ == CaptureMode::Verify) {
+      appendMatch(&out, recognizer_.verify(label_, embedding, database_, threshold_));
+    } else {
+      appendMatch(&out, recognizer_.identify(embedding, database_, threshold_));
+    }
+    resetCapture();
+    last_error_ = error;
+    return ok ? nb::object(out) : nb::none();
+  }
+
+  void cancel() {
+    microphone_.stop(nullptr);
+    resetCapture();
+    last_error_.clear();
+  }
+
+  bool capturing() const { return mode_ != CaptureMode::None; }
+
   bool saveDatabase(const std::string &path) {
     const bool ok = database_.save(path, &last_error_);
     return ok;
@@ -293,8 +453,87 @@ class PySpeakerRecognizer {
   const std::string &lastError() const { return last_error_; }
 
  private:
+  enum class CaptureMode { None, Enroll, Verify, Identify };
+
+  static nb::dict result(const tdl_app::SpeakerMatch &match) {
+    nb::dict out;
+    appendMatch(&out, match);
+    return out;
+  }
+
+  static void appendMatch(nb::dict *out, const tdl_app::SpeakerMatch &match) {
+    (*out)["label"] = match.label;
+    (*out)["score"] = match.score;
+    (*out)["matched"] = match.matched;
+  }
+
+  bool beginCapture(CaptureMode mode, const std::string &label, double seconds,
+                    float threshold, int input_volume, int points_per_frame,
+                    int timeout_ms) {
+    if (!recognizer_.initialized()) {
+      last_error_ = "speaker model is not loaded";
+      return false;
+    }
+    if (mode_ != CaptureMode::None) {
+      last_error_ = "speaker capture is already active";
+      return false;
+    }
+    if (seconds <= 0.0) {
+      last_error_ = "capture seconds must be > 0";
+      return false;
+    }
+    const std::size_t target = static_cast<std::size_t>(seconds * 16000.0 + 0.5);
+    if (target == 0) {
+      last_error_ = "capture duration is too short";
+      return false;
+    }
+    std::string error;
+    bool ok = false;
+    {
+      nb::gil_scoped_release guard;
+      ok = microphone_.start(input_volume, points_per_frame, 8, 8,
+                             timeout_ms, &error);
+    }
+    if (!ok) {
+      last_error_ = error;
+      return false;
+    }
+    mode_ = mode;
+    label_ = label;
+    threshold_ = threshold;
+    target_samples_ = target;
+    samples_.clear();
+    samples_.reserve(target);
+    last_error_.clear();
+    return true;
+  }
+
+  nb::dict progress(bool done, const tdl_app::AudioPcmChunk &chunk) const {
+    nb::dict out;
+    out["done"] = done;
+    out["progress"] = static_cast<double>(samples_.size()) /
+                      static_cast<double>(target_samples_);
+    out["timestamp"] = chunk.timestamp;
+    out["sequence"] = chunk.sequence;
+    return out;
+  }
+
+  void resetCapture() {
+    mode_ = CaptureMode::None;
+    label_.clear();
+    threshold_ = 0.60f;
+    target_samples_ = 0;
+    samples_.clear();
+  }
+
   tdl_app::SpeakerRecognizer recognizer_;
   tdl_app::SpeakerDatabase database_;
+  RealtimeMicrophone microphone_;
+  CaptureMode mode_ = CaptureMode::None;
+  std::string label_;
+  float threshold_ = 0.60f;
+  std::size_t target_samples_ = 0;
+  std::vector<std::int16_t> samples_;
   std::string last_error_;
 };
 
@@ -305,7 +544,7 @@ class PyStreamingAsr {
     bool ok = false;
     {
       nb::gil_scoped_release guard;
-      ok = recognizer_.load(model_spec, &error);
+      ok = recognizer_.load(modelConfig(model_spec), &error);
     }
     last_error_ = error;
     return ok;
@@ -337,6 +576,70 @@ class PyStreamingAsr {
     return nb::str(text.c_str());
   }
 
+  bool start(int input_volume, int points_per_frame, int timeout_ms) {
+    if (!recognizer_.initialized()) {
+      last_error_ = "ASR model is not loaded";
+      return false;
+    }
+    recognizer_.reset();
+    std::string error;
+    bool ok = false;
+    {
+      nb::gil_scoped_release guard;
+      ok = microphone_.start(input_volume, points_per_frame, 8, 8,
+                             timeout_ms, &error);
+    }
+    last_error_ = error;
+    return ok;
+  }
+
+  // One real-time microphone frame in, one incremental recognition result
+  // out.  "text" is only what appeared in this call; "full_text" is the
+  // utterance accumulated since start()/reset().
+  nb::object read() {
+    std::vector<std::int16_t> samples;
+    tdl_app::AudioPcmChunk chunk;
+    std::string error;
+    bool ok = false;
+    {
+      nb::gil_scoped_release guard;
+      ok = microphone_.read(&samples, &chunk, &error);
+    }
+    if (!ok) {
+      last_error_ = error;
+      return nb::none();
+    }
+    std::string text;
+    {
+      nb::gil_scoped_release guard;
+      ok = recognizer_.acceptPcm(samples, &text, &error);
+    }
+    if (!ok) {
+      last_error_ = error;
+      return nb::none();
+    }
+    nb::dict out;
+    out["text"] = text;
+    out["full_text"] = recognizer_.text();
+    out["timestamp"] = chunk.timestamp;
+    out["sequence"] = chunk.sequence;
+    last_error_.clear();
+    return out;
+  }
+
+  bool stop() {
+    std::string error;
+    bool ok = false;
+    {
+      nb::gil_scoped_release guard;
+      ok = microphone_.stop(&error);
+    }
+    last_error_ = error;
+    return ok;
+  }
+
+  bool listening() const { return microphone_.opened(); }
+
   void reset() {
     recognizer_.reset();
     last_error_.clear();
@@ -348,6 +651,7 @@ class PyStreamingAsr {
 
  private:
   tdl_app::NpuStreamingAsr recognizer_;
+  RealtimeMicrophone microphone_;
   std::string last_error_;
 };
 
@@ -359,7 +663,7 @@ class PyKeywordSpotter {
     bool ok = false;
     {
       nb::gil_scoped_release guard;
-      ok = spotter_.load(model_spec, keywords_path, "", threshold,
+      ok = spotter_.load(model_spec, keywords_path, defaultFirmwarePath(), threshold,
                          beam_width, &error);
     }
     last_error_ = error;
@@ -392,6 +696,64 @@ class PyKeywordSpotter {
     return result(hits);
   }
 
+  bool start(int input_volume, int points_per_frame, int timeout_ms) {
+    if (!spotter_.initialized()) {
+      last_error_ = "KWS model is not loaded";
+      return false;
+    }
+    spotter_.reset();
+    std::string error;
+    bool ok = false;
+    {
+      nb::gil_scoped_release guard;
+      ok = microphone_.start(input_volume, points_per_frame, 8, 8,
+                             timeout_ms, &error);
+    }
+    last_error_ = error;
+    return ok;
+  }
+
+  // Read and evaluate exactly one microphone frame.  An empty list is the
+  // normal no-keyword result; None means a microphone or inference error.
+  nb::object read() {
+    std::vector<std::int16_t> samples;
+    tdl_app::AudioPcmChunk chunk;
+    std::string error;
+    bool ok = false;
+    {
+      nb::gil_scoped_release guard;
+      ok = microphone_.read(&samples, &chunk, &error);
+    }
+    if (!ok) {
+      last_error_ = error;
+      return nb::none();
+    }
+    std::vector<tdl_app::DirectKeywordResult> hits;
+    {
+      nb::gil_scoped_release guard;
+      ok = spotter_.accept(samples, &hits, &error);
+    }
+    if (!ok) {
+      last_error_ = error;
+      return nb::none();
+    }
+    last_error_.clear();
+    return result(hits);
+  }
+
+  bool stop() {
+    std::string error;
+    bool ok = false;
+    {
+      nb::gil_scoped_release guard;
+      ok = microphone_.stop(&error);
+    }
+    last_error_ = error;
+    return ok;
+  }
+
+  bool listening() const { return microphone_.opened(); }
+
   nb::list scores() const { return result(spotter_.scores()); }
 
   void reset() {
@@ -423,6 +785,7 @@ class PyKeywordSpotter {
   }
 
   tdl_app::DirectKeywordSpotter spotter_;
+  RealtimeMicrophone microphone_;
   std::string last_error_;
 };
 
@@ -436,6 +799,7 @@ class PyKeywordSpotter {
 }  // namespace
 
 void registerAudioBindings(nb::module_ &m) {
+#ifndef TDL_AUDIO_ONLY
   // --- Audio ---------------------------------------------------------------
   nb::class_<PyAudio>(m, "Audio",
       "Basic AI/AO audio control. Methods return False on a hardware error; "
@@ -476,6 +840,7 @@ void registerAudioBindings(nb::module_ &m) {
            "Return current output volume, or None on failure.")
       .def("status", &PyAudio::status)
       .def_prop_ro("last_error", &PyAudio::lastError);
+#endif
 
 #ifdef TDL_PY_WITH_NPU
   // --- Speaker recognition -------------------------------------------------
@@ -490,6 +855,27 @@ void registerAudioBindings(nb::module_ &m) {
       .def("recognize", &PySpeakerRecognizer::recognize,
            nb::arg("pcm"), nb::arg("threshold") = 0.60f,
            "Return {label, score, matched}, or None when extraction fails.")
+      .def("verify", &PySpeakerRecognizer::verify,
+           nb::arg("label"), nb::arg("pcm"), nb::arg("threshold") = 0.60f,
+           "Verify a PCM sample against one enrolled label.")
+      .def("begin_enroll", &PySpeakerRecognizer::beginEnroll,
+           nb::arg("label"), nb::arg("seconds") = 3.0,
+           nb::arg("input_volume") = 24,
+           nb::arg("points_per_frame") = 160, nb::arg("timeout_ms") = 1000,
+           "Start non-blocking microphone enrollment; use poll() until done.")
+      .def("begin_verify", &PySpeakerRecognizer::beginVerify,
+           nb::arg("label"), nb::arg("seconds") = 3.0,
+           nb::arg("threshold") = 0.60f, nb::arg("input_volume") = 24,
+           nb::arg("points_per_frame") = 160, nb::arg("timeout_ms") = 1000,
+           "Start non-blocking microphone verification; use poll() until done.")
+      .def("begin_identify", &PySpeakerRecognizer::beginIdentify,
+           nb::arg("seconds") = 3.0, nb::arg("threshold") = 0.60f,
+           nb::arg("input_volume") = 24,
+           nb::arg("points_per_frame") = 160, nb::arg("timeout_ms") = 1000,
+           "Start non-blocking microphone identification; use poll() until done.")
+      .def("poll", &PySpeakerRecognizer::poll,
+           "Consume one live microphone frame and return enrollment progress/result.")
+      .def("cancel", &PySpeakerRecognizer::cancel)
       .def("save_database", &PySpeakerRecognizer::saveDatabase,
            nb::arg("path"))
       .def("load_database", &PySpeakerRecognizer::loadDatabase,
@@ -497,6 +883,7 @@ void registerAudioBindings(nb::module_ &m) {
       .def("clear", &PySpeakerRecognizer::clear)
       .def("labels", &PySpeakerRecognizer::labels)
       .def_prop_ro("initialized", &PySpeakerRecognizer::initialized)
+      .def_prop_ro("capturing", &PySpeakerRecognizer::capturing)
       .def_prop_ro("last_error", &PySpeakerRecognizer::lastError);
 
   // --- Streaming ASR -------------------------------------------------------
@@ -510,8 +897,17 @@ void registerAudioBindings(nb::module_ &m) {
            "Accept PCM and return only text decoded by this call, or None on failure.")
       .def("finish", &PyStreamingAsr::finish,
            "Flush the final ASR chunk and return only final text, or None on failure.")
+      .def("start", &PyStreamingAsr::start,
+           nb::arg("input_volume") = 24, nb::arg("points_per_frame") = 160,
+           nb::arg("timeout_ms") = 1000,
+           "Open the microphone and reset this real-time recognition session.")
+      .def("read", &PyStreamingAsr::read,
+           "Recognize one real-time microphone frame; return text and metadata.")
+      .def("stop", &PyStreamingAsr::stop,
+           "Close the microphone; call finish() separately to flush ASR.")
       .def("reset", &PyStreamingAsr::reset)
       .def_prop_ro("initialized", &PyStreamingAsr::initialized)
+      .def_prop_ro("listening", &PyStreamingAsr::listening)
       .def_prop_ro("text", &PyStreamingAsr::text)
       .def_prop_ro("last_error", &PyStreamingAsr::lastError);
 
@@ -522,15 +918,24 @@ void registerAudioBindings(nb::module_ &m) {
       .def(nb::init<>())
       .def("load", &PyKeywordSpotter::load,
            nb::arg("model_spec"), nb::arg("keywords_path"),
-           nb::arg("threshold") = -1.0f, nb::arg("beam_width") = 6,
+           nb::arg("threshold") = -1.0f, nb::arg("beam_width") = 2,
            "Load CV184X KWS bmodels and a keyword token file.")
       .def("accept", &PyKeywordSpotter::accept, nb::arg("pcm"),
            "Accept PCM; return newly triggered keyword dictionaries, or None on failure.")
       .def("finish", &PyKeywordSpotter::finish)
+      .def("start", &PyKeywordSpotter::start,
+           nb::arg("input_volume") = 24, nb::arg("points_per_frame") = 160,
+           nb::arg("timeout_ms") = 1000,
+           "Open the microphone and reset this real-time keyword session.")
+      .def("read", &PyKeywordSpotter::read,
+           "Evaluate one real-time microphone frame and return keyword hits.")
+      .def("stop", &PyKeywordSpotter::stop,
+           "Close the microphone; call finish() separately to flush KWS.")
       .def("scores", &PyKeywordSpotter::scores,
            "Return current score dictionaries for every configured keyword.")
       .def("reset", &PyKeywordSpotter::reset)
       .def_prop_ro("initialized", &PyKeywordSpotter::initialized)
+      .def_prop_ro("listening", &PyKeywordSpotter::listening)
       .def_prop_ro("last_error", &PyKeywordSpotter::lastError);
 #endif
 
