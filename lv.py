@@ -1,13 +1,15 @@
 """jyd.lv：嵌入 LVGL 的模块级代理。
 
 lv.* 全部属性转发到 MicroPython 里的 lvgl 模块（首次访问自动初始化
-显示通路：VPSS->VO 链路、OSD 双缓冲、嵌入解释器、触摸驱动），另有
+显示通路：VPSS->VO 链路、OSD 双缓冲、嵌入解释器、触摸驱动）。UI 由
+jyd-ui 线程自转（tick + 渲染 + 触摸分发，100 fps 上限），主线程无需
+驱动心跳；lv 调用可在任意线程发起——代理内部把每次调用排队转交
+jyd-ui 线程执行并等结果（MicroPython 不可重入且绑定该线程）。另有
 两个宿主侧扩展函数：
 
-    show(...)        推进一次 UI（真实流逝时间 tick + 渲染 + 触摸分发），
-                     用户主循环每轮调用一次，三种用法：
-                       show(fps)        仅限速（防纯 UI 循环 CPU 空转）
-                       show(img)        显示 Image 并推进（见下）
+    show(...)        可选的节奏控制 + 图像显示，三种用法：
+                       show(fps)        纯 UI 循环按 fps sleep 防空转
+                       show(img)        显示/刷新 Image（控件托管见下）
                        show(img, fps)   两者兼有
                      传 img 时模块内部只创建一个 lv.image 控件并复用：
                      同一块像素缓冲只 invalidate() 标脏重绘，缓冲地址/
@@ -33,11 +35,12 @@ lv.* 全部属性转发到 MicroPython 里的 lvgl 模块（首次访问自动�
     w.set_src(logo)                        # 直接传 Image
 
     while True:
-        lv.show(fps=30)      # 有相机 read 等阻塞源时可不限速：lv.show()
+        lv.show(camera.read_image())       # 预览：read 阻塞起搏，无需限速
 
 注意：默认 screen 背景透明（露出摄像头画面），要不透明底自己
-set_style_bg_opa。所有 lv 调用（含回调里的）都必须在主线程——
-worker 线程只做取帧/推理，不碰 UI（与 launcher 应用的约定一致）。
+set_style_bg_opa。bind 等回调在 jyd-ui 线程的 tick 栈里执行：回调里
+可以继续调 lv（同线程直通不排队），与你自己线程共享的状态要自己
+留意并发。
 """
 
 from . import _runtime
@@ -108,15 +111,17 @@ def _show_image(img):
 
 
 def show(image=None, fps=None):
-    """推进一次 UI。三种用法：
+    """可选的节奏控制 + 图像显示。三种用法：
 
-        lv.show(30)              # 或 show(fps=30)：仅按帧率限速
-        lv.show(img)             # 显示/刷新 Image 并推进 UI
+        lv.show(30)              # 或 show(fps=30)：按帧率 sleep 限速
+        lv.show(img)             # 显示/刷新 Image
         lv.show(img, 30)         # 两者兼有
 
-    传 Image 时由本模块托管唯一的 lv.image 控件：每次调用都把控件标脏
-    （零拷贝共享像素，重绘即显示最新内容）；换了不同的像素缓冲（地址/
-    尺寸/格式变化）自动重设控件源，仍复用同一控件。相机预览就是
+    UI 渲染由 jyd-ui 线程自转，show 不驱动心跳（不调它 UI 也在跑），
+    保留它是给循环控节奏。传 Image 时由本模块托管唯一的 lv.image
+    控件：每次调用都把控件标脏（零拷贝共享像素，重绘即显示最新内
+    容）；换了不同的像素缓冲（地址/尺寸/格式变化）自动重设控件源，
+    仍复用同一控件。相机预览就是
     `while True: lv.show(camera.read_image())`。"""
     if image is not None:
         import _maix_image
@@ -136,15 +141,15 @@ def bind(obj, event_code, fn):
 
     obj/event_code 用本模块代理（如 lv.EVENT.CLICKED），fn 是普通
     CPython callable，不接收事件对象（事件对象无法跨桥）。回调在
-    show() 的调用栈里执行。"""
-    import mpy
+    jyd-ui 线程的 tick 栈里执行（回调里可继续调 lv；与其他线程共享
+    的状态自行注意并发）。"""
     rt = _runtime.runtime().ensure_display()
     if not _bind_state["ready"]:
         rt.m.exec(_BIND_SRC)
         _bind_state["ready"] = True
     _bind_state["seq"] += 1
     name = "_jyd_cb_%d" % _bind_state["seq"]   # 唯一名，避免同名回调互相覆盖
-    mpy.register(fn, name=name)
+    rt.m.register(fn, name=name)   # 经转交队列注册：宿主函数表无锁
     rt.m.proxy_call("_jyd_bind", obj, event_code, name)
 
 

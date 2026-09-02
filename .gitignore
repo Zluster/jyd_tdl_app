@@ -4,3 +4,4 @@ dara.egg-info
 __pycache__
 *.py[cod]
 tests/reports/
+context.md

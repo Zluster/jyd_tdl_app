@@ -31,7 +31,7 @@ while True:
     img = camera.read_image()            # rgb 通道取图
     mks = img.find_qrcodes()             # 传统视觉：扫二维码
     label.set_text(mks[0]["payload"] if mks else "scanning...")
-    lv.show()                            # 推进 UI（相机 read 已按帧率起搏）
+    lv.show()                            # 可选限速；UI 由内部线程自转
 ```
 
 ## camera —— 取帧
@@ -70,8 +70,28 @@ from dara import image
 
 <https://wiki.sipeed.com/soft/maixpy3/zh/api/maix/image.html>
 
-dara 扩展：`img.to_lv(parent)` 把 Image 零拷贝显示为 LVGL 控件；等价写法
-`w = lv.image(scr); w.set_src(img)`。Image 像素被控件借用，需保活。
+dara 扩展：
+
+- `image.show(img)` / `img.show()`：把 RGBA Image 叠上屏幕（双缓冲 OSD
+  直绘，盖在 UI 之上）。首次调用把 img 收编进 OSD 显存（此后绘制零拷贝），
+  每次调用提交一帧；双缓冲两块画布内容独立，**每帧先 `clear()` 整幅重画**。
+  只提交叠加层、不推进 UI；画布是 B,G,R,A 字节序，要屏幕红色传
+  `color=(0, 0, 255, 255)`：
+
+```python
+from dara import image
+import time
+
+img = image.new(size=(720, 480), mode="RGBA")
+while True:
+    img.clear()
+    img.draw_rectangle(100, 100, 300, 260, color=(0, 0, 255, 255), thickness=3)
+    image.show(img)              # 或 img.show()
+    time.sleep(0.03)
+```
+
+- `img.to_lv(parent)` 把 Image 零拷贝显示为 LVGL 控件；等价写法
+  `w = lv.image(scr); w.set_src(img)`。Image 像素被控件借用，需保活。
 
 ## lv —— 嵌入 LVGL
 
@@ -86,12 +106,13 @@ from dara import lv
 
 dara 特有接口：
 
-- `lv.show(fps=None)`：主循环每轮调用一次，推进 UI（tick + 渲染 + 触摸）；
-  纯 UI 循环给 `fps` 限速防空转
+- `lv.show(fps=None)`：可选的帧率限速 / 显示 Image。UI 渲染（tick + 触摸）
+  由 dara 内部线程自转，不调 show 界面也在跑；纯 UI 循环给 `fps` 防空转
 - `lv.bind(obj, lv.EVENT.CLICKED, fn)`：LVGL 事件绑定到 CPython 无参回调
+  （回调在 dara 的 UI 线程执行）
 - 控件 `set_src(Image)`：直接显示 image 模块的 Image（见上节）
 
-所有 lv 调用必须在主线程。
+lv 可在任意线程调用（内部转交 UI 线程执行）。
 
 ## nn —— NPU 推理
 

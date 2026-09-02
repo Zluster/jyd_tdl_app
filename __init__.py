@@ -7,7 +7,7 @@
 - image   图像处理（_maix_image 直通：find_qrcodes/find_blobs/...）
 - nn      .mud 模型统一加载推理（六族自动识别，nn.load 即用）
 - audio   AI/AO 录放、声纹识别、流式 ASR 与关键词检测
-- lv      嵌入 LVGL 代理（UI 心跳由用户主循环 lv.show() 驱动）
+- lv      嵌入 LVGL 代理（UI 由 jyd-ui 线程自转，lv 任意线程可用）
 
 原生依赖（mpy.so / tdl_py.so / _maix_image*.so）捆绑在 jyd/_libs/，
 import jyd 时注册加载器：进程内这三个模块名一律解析到包内自带副本
@@ -16,10 +16,7 @@ import jyd 时注册加载器：进程内这三个模块名一律解析到包内
 drive 显示/触摸）
 
 import 本身不碰硬件：首次用到哪块才初始化哪块（首次触碰 lv 时建
-显示通路，首次取相机时 open 通道），进程退出自动清理。唯一例外：
-环境变量 JYD_LV_USE=0（配合 web 启动器）时 import 即拉起 jyd 托管
-的 UI 线程——脚本零改动获得预览显示与退出按钮，UI 心跳由该线程
-负责，脚本不要再驱动/触碰 lv。
+显示通路，首次取相机时 open 通道），进程退出自动清理。
 
 与 launcher / ai_cycle 互斥运行（VO/OSD/相机通道独占），跑 jyd
 脚本前先停掉它们。
@@ -92,12 +89,6 @@ def _install_lib_finder():
 
 
 _install_lib_finder()
-
-
-#: JYD_LV_USE=0：import 即拉起托管 UI 线程
-if os.environ.get("JYD_LV_USE") == "0":
-    from . import _runtime as _boot_runtime
-    _boot_runtime.runtime().ensure_display()
 
 
 def __getattr__(name):

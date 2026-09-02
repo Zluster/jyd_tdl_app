@@ -68,7 +68,9 @@ class Camera:
         read_image()/read() 前有效：
 
         - RGB888 / RGB888_PLANAR：剥行填充、交错成紧凑 RGB Image
-          （拷贝约 1 MB，缓冲跨帧复用，帧拷贝后立即归还 VPSS）
+          （拷贝约 1 MB，缓冲跨帧复用，帧拷贝后立即归还 VPSS）。
+          内存按 _maix_image 的 "RGB" 模式约定排成 B,G,R 字节序，
+          to_lv / save / 颜色算法共用这一约定
         - NV12 / NV21：Y 平面灰度 Image。stride == width 时零拷贝
           （借帧内存，帧由 Camera 持有到下一次读），有行填充时剥成
           紧凑缓冲（拷贝约 0.35 MB）
@@ -116,8 +118,11 @@ class Camera:
                             for y in range(h):
                                 src = base + y * stride
                                 tight[y * w:y * w + w] = mv[src:src + w]
-                        buf[pi::3] = tight     # plane -> interleaved 分量
-                else:                          # FORMAT_RGB888：已是 interleaved
+                        # plane 顺序是 R,G,B，而 _maix_image 的 "RGB" 模式
+                        # 内存按 OpenCV 约定存 B,G,R：倒序交错（R -> 字节 2），
+                        # 否则 to_lv/save/颜色算法全都红蓝互换
+                        buf[2 - pi::3] = tight
+                else:                          # FORMAT_RGB888：packed R,G,B
                     row = w * 3
                     stride = frame.strides[0]
                     if stride == row:
@@ -126,6 +131,8 @@ class Camera:
                         for y in range(h):
                             src = y * stride
                             buf[y * row:y * row + row] = mv[src:src + row]
+                    # 同上换成 B,G,R 字节序（原地对调 R/B 分量）
+                    buf[0::3], buf[2::3] = buf[2::3], buf[0::3]
                 mode = "RGB"
             else:
                 raise RuntimeError(
