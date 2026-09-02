@@ -63,10 +63,17 @@ class SensorOtaStatus:
     image_version: int = 0
     slot_size: int = 0
     max_boot_attempts: int = 0
+    active_version: int = 0
+    confirmed_version: int = 0
 
 
 def crc32(data: bytes) -> int:
     return binascii.crc32(data) & 0xFFFFFFFF
+
+
+def validate_version(version: int) -> None:
+    if not 1 <= version <= 0xFFFFFFFF:
+        raise OSError(errno.EINVAL, "firmware version must be 1..0xFFFFFFFF")
 
 
 def build_frame(frame_type: int, sensor_type: int, sensor_number: int,
@@ -165,6 +172,9 @@ class SensorOta:
                 image_version=struct.unpack_from("<I", reply, 18)[0],
                 slot_size=struct.unpack_from("<I", reply, 22)[0],
                 max_boot_attempts=reply[26])
+            if payload_length >= 35:
+                status.active_version, status.confirmed_version = \
+                    struct.unpack_from("<II", reply, 27)
             device_status = reply[1]
             if self.debug:
                 print(f"[OTA ACK] cmd=0x{reply[0]:02X} status={device_status} "
@@ -188,6 +198,7 @@ class SensorOta:
             raise OSError(errno.EINVAL, "target slot must be A or B")
         image = Path(image_path).read_bytes()
         validate_image(image, target_slot)
+        validate_version(version)
         image_crc = crc32(image)
         if self.debug:
             print(f"[OTA IMAGE] file={image_path} slot={'A' if target_slot == 0 else 'B'} "
@@ -263,14 +274,17 @@ class SensorOta:
 
     def recovery_upgrade_file(self, target_slot: int,
                               image_path: str | os.PathLike[str],
-                              progress: ProgressCallback | None = None) -> None:
+                              progress: ProgressCallback | None = None,
+                              version: int = 1) -> None:
         if target_slot not in (SENSOR_OTA_SLOT_A, SENSOR_OTA_SLOT_B):
             raise OSError(errno.EINVAL, "target slot must be A or B")
         image = Path(image_path).read_bytes()
         validate_image(image, target_slot)
+        validate_version(version)
         self._raw_transact(RAW_CMD_PING, SENSOR_OTA_SLOT_AUTO, timeout=2.0)
         self._raw_transact(RAW_CMD_START, target_slot, argument=len(image),
-                           offset=crc32(image), timeout=10.0)
+                           offset=crc32(image), payload=struct.pack("<I", version),
+                           timeout=10.0)
         offset = 0
         while offset < len(image):
             chunk = image[offset:offset + OTA_CHUNK_SIZE]
@@ -294,5 +308,5 @@ def ota_protocol_selftest() -> bool:
 def ota_status_name(status: int) -> str:
     names = ("OK", "bad frame", "bad state", "bad slot", "size error",
              "offset error", "flash error", "CRC error", "vector error",
-             "session error")
+             "session error", "version rejected")
     return names[status] if 0 <= status < len(names) else "unknown"

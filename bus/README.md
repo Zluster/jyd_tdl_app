@@ -1,7 +1,7 @@
 # Linux UART Python 工具
 
-本目录提供 GD32 级联传感器通信、PAJ7620U2 手势识别、ZW101 指纹控制和
-OTA 在线升级/恢复。仅依赖 Python 3.10+ 标准库。
+本目录提供 GD32 级联传感器通信、PA8 风扇控制、PAJ7620U2 手势识别、
+ZW101 指纹控制和 OTA 在线升级/恢复。仅依赖 Python 3.10+ 标准库。
 
 ## 快速自检
 
@@ -43,11 +43,26 @@ colors[15] = 0xFF0000
 
 with JydBus("/dev/ttyS2") as bus:
     panel = WS2812BPanel(bus, 1)
-    panel.set_pixel_color(0, 0x0000FF)
     panel.display_frame(colors)
 ```
 
-整屏数据会自动分块，并在全部通信块校验成功后统一刷新。
+整屏数据会自动分成两个 64 灯数据块，并在全部数据到达后统一刷新。需要同时更新多颗灯时，
+应先修改 `colors` 数组，再调用一次 `display_frame()`。不要在循环中调用
+`set_pixel_color()`：单灯命令每次都要重发整条 WS2812B 链，连续调用会产生
+明显的前后灯珠刷新延迟。
+
+PA8 风扇示例：
+
+```python
+from devices import FanActuator
+from jydbus_bus import JydBus
+
+with JydBus("/dev/ttyS2") as bus:
+    fan = FanActuator(bus, 1)
+    fan.set_speed(35)  # PA8 outputs 25 kHz PWM at 35% duty
+    print(fan.read_state())
+    fan.turn_off()
+```
 
 完整类名、方法和协议说明见 [使用说明.md](使用说明.md)。
 
@@ -64,11 +79,12 @@ python3 ota_cli.py upgrade --type 0x15 --number 1 \
   --slot-b Project_OTA_Slot_B.bin --version 2
 
 python3 ota_cli.py recovery --slot A --image Project_OTA_Slot_A.bin \
-  --device /dev/ttyS2 --baud 115200
+  --device /dev/ttyS2 --baud 115200 --version 2
 ```
 
 Slot A/B 镜像链接地址不同，不能混用。`recovery` 仅用于 Linux UART 与
-Bootloader 直连。
+Bootloader 直连。版本号范围为 `1..0xFFFFFFFF`，必须单调递增；允许同版本
+重刷，低于设备已确认版本的固件会被拒绝。可用 `status` 查看当前版本和已确认版本。
 
 ## 硬件工具
 

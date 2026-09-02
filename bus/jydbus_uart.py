@@ -15,9 +15,10 @@ from typing import Any
 from serial_port import SerialPort
 
 JYDBUS_UART_MAX_PAYLOAD = 32
+JYDBUS_UART_MAX_TX_PAYLOAD = 196
 JYDBUS_UART_JYDBUS_NUMBER_MIN = 1
 JYDBUS_UART_JYDBUS_NUMBER_MAX = 8
-JYDBUS_UART_SUPPORTED_TYPE_COUNT = 15
+JYDBUS_UART_SUPPORTED_TYPE_COUNT = 16
 JYDBUS_UART_CACHE_CAPACITY = JYDBUS_UART_SUPPORTED_TYPE_COUNT * JYDBUS_UART_JYDBUS_NUMBER_MAX
 
 JYDBUS_FRAME_TYPE_QUERY = 0x01
@@ -40,6 +41,7 @@ JYDBUS_TYPE_SOIL_MOISTURE_ADC = 0x12
 JYDBUS_TYPE_ZSPD4003 = 0x13
 JYDBUS_TYPE_KNOB_SWITCH_ADC = 0x14
 JYDBUS_TYPE_PAJ7620U2 = 0x15
+JYDBUS_TYPE_FAN = 0x17
 
 JYDBUS_ZSPD4003_STATUS_OK = 0
 JYDBUS_ZSPD4003_STATUS_WARMING_UP = 1
@@ -76,7 +78,7 @@ JYDBUS_UART_COMMAND_WRITE_SENSOR = 7
 JYDBUS_UART_COMMAND_QUERY_SENSOR = 8
 
 WS2812B_LED_COUNT = 128
-WS2812B_FRAME_CHUNK_LEDS = 8
+WS2812B_FRAME_CHUNK_LEDS = 64
 WS2812B_COMMAND_SET_PIXEL = 0x01
 WS2812B_COMMAND_FRAME_BEGIN = 0x02
 WS2812B_COMMAND_FRAME_CHUNK = 0x03
@@ -95,13 +97,17 @@ AUTO_UPLOAD_INTERVAL_MS = 1000
 PAJ7620_AUTO_UPLOAD_INTERVAL_MS = 100
 CONFIG_FRAME_GAP = AUTO_UPLOAD_INTERVAL_MS / JYDBUS_UART_JYDBUS_NUMBER_MAX / 1000.0
 WS2812B_REQUEST_RETRIES = 3
+WS2812B_FRAME_RETRIES = 3
+# GD32 receives one frame at a time using UART IDLE + DMA. Keep a short idle
+# interval between streamed chunks so adjacent frames cannot be merged.
+WS2812B_FRAME_GAP = 0.001
 
 COMMAND_TARGETS = (
     JYDBUS_TYPE_PHOTORESISTOR_ADC, JYDBUS_TYPE_AHT10, JYDBUS_TYPE_BMP390,
     JYDBUS_TYPE_MAX30102, JYDBUS_TYPE_VL53L0X, JYDBUS_TYPE_MFRC522,
     JYDBUS_TYPE_BUTTON_PB1, JYDBUS_TYPE_JOYSTICK, JYDBUS_TYPE_WATER_LEVEL_ADC,
     JYDBUS_TYPE_SOIL_MOISTURE_ADC, JYDBUS_TYPE_ZSPD4003,
-    JYDBUS_TYPE_KNOB_SWITCH_ADC, JYDBUS_TYPE_PAJ7620U2,
+    JYDBUS_TYPE_KNOB_SWITCH_ADC, JYDBUS_TYPE_PAJ7620U2, JYDBUS_TYPE_FAN,
 )
 
 
@@ -140,6 +146,8 @@ class JydbusUartStats:
     format_errors: int = 0
     query_echoes: int = 0
     legacy_tails: int = 0
+    last_format_reason: str = ""
+    last_format_frame: bytes = b""
 
 
 @dataclass
@@ -215,6 +223,11 @@ def _decode(sensor_type: int, data: bytes) -> tuple[bool, dict[str, Any]]:
         if sensor_type == JYDBUS_TYPE_PAJ7620U2 and len(data) >= 4:
             return True, {"gesture": data[0], "gesture_flags": data[1],
                           "wave_flags": data[2], "status": data[3]}
+        if sensor_type == JYDBUS_TYPE_FAN and len(data) >= 4:
+            duty_percent = min(struct.unpack_from("<I", data)[0], 100)
+            return True, {"enabled": duty_percent != 0,
+                          "state": 1 if duty_percent else 0,
+                          "duty_percent": duty_percent}
     except struct.error:
         pass
     return False, {}
@@ -253,19 +266,19 @@ class JydbusUart:
     @staticmethod
     def build_frame(frame_type: int, sensor_type: int, sensor_number: int,
                     payload: bytes = b"") -> bytes:
-        if len(payload) > JYDBUS_UART_MAX_PAYLOAD:
-            raise OSError(errno.EINVAL, "payload exceeds 32 bytes")
+        if len(payload) > JYDBUS_UART_MAX_TX_PAYLOAD:
+            raise OSError(errno.EINVAL, "payload exceeds transmit limit")
         body = struct.pack("<HBBB", len(payload), frame_type & 0xFF,
                            sensor_type & 0xFF, sensor_number & 0xFF) + payload
         crc = crc16_modbus(body)
         return bytes((FRAME_HEADER,)) + body + struct.pack("<H", crc) + bytes((FRAME_TAIL,))
 
     def _write_timed(self, frame_type: int, sensor_type: int, sensor_number: int,
-                     payload: bytes = b"") -> int:
+                     payload: bytes = b"", drain: bool = False) -> int:
         frame = self.build_frame(frame_type, sensor_type, sensor_number, payload)
         with self._tx_lock:
             started_us = time.monotonic_ns() // 1000
-            self.port.write_all(frame)
+            self.port.write_all(frame, drain=drain)
         return started_us
 
     def write(self, frame_type: int, sensor_type: int, sensor_number: int,
@@ -318,30 +331,47 @@ class JydbusUart:
             self._validate_ws2812b_color(color)
 
         with self._ws2812b_lock:
-            transaction_id = (getattr(self, "_ws2812b_transaction_id", 0) + 1) & 0xFF
-            self._ws2812b_transaction_id = transaction_id
-            begin = bytes((WS2812B_COMMAND_FRAME_BEGIN, transaction_id))
-            self._ws2812b_request(sensor_number, begin,
-                                  WS2812B_COMMAND_FRAME_BEGIN, transaction_id,
-                                  expected_argument0=transaction_id)
-
-            for start in range(0, WS2812B_LED_COUNT, WS2812B_FRAME_CHUNK_LEDS):
-                chunk = color_values[start:start + WS2812B_FRAME_CHUNK_LEDS]
-                payload = bytes((WS2812B_COMMAND_FRAME_CHUNK, transaction_id,
-                                 start, len(chunk)))
-                payload += b"".join(bytes(((color >> 16) & 0xFF,
-                                           (color >> 8) & 0xFF,
-                                           color & 0xFF)) for color in chunk)
-                self._ws2812b_request(sensor_number, payload,
-                                      WS2812B_COMMAND_FRAME_CHUNK, transaction_id,
-                                      expected_argument0=transaction_id,
-                                      expected_argument1=start)
-
-            commit = bytes((WS2812B_COMMAND_FRAME_COMMIT, transaction_id))
-            self._ws2812b_request(sensor_number, commit,
-                                  WS2812B_COMMAND_FRAME_COMMIT, transaction_id,
-                                  expected_argument0=transaction_id)
+            last_error: BaseException | None = None
+            for _ in range(WS2812B_FRAME_RETRIES):
+                transaction_id = (getattr(self, "_ws2812b_transaction_id", 0) + 1) & 0xFF
+                self._ws2812b_transaction_id = transaction_id
+                try:
+                    self._display_ws2812b_frame_once(sensor_number,
+                                                     color_values,
+                                                     transaction_id)
+                    return 0
+                except (OSError, TimeoutError) as exc:
+                    last_error = exc
+            if last_error is not None:
+                raise last_error
         return 0
+
+    def _display_ws2812b_frame_once(self, sensor_number: int,
+                                    colors: list[int],
+                                    transaction_id: int) -> None:
+        begin = bytes((WS2812B_COMMAND_FRAME_BEGIN, transaction_id))
+        self._ws2812b_request(sensor_number, begin,
+                              WS2812B_COMMAND_FRAME_BEGIN, transaction_id,
+                              expected_argument0=transaction_id)
+
+        # Stream two 64-LED chunks without per-chunk UART round trips. Every
+        # chunk carries CRC16; COMMIT confirms all 128 colors were received.
+        for start in range(0, WS2812B_LED_COUNT, WS2812B_FRAME_CHUNK_LEDS):
+            chunk = colors[start:start + WS2812B_FRAME_CHUNK_LEDS]
+            payload = bytes((WS2812B_COMMAND_FRAME_CHUNK, transaction_id,
+                             start, len(chunk)))
+            payload += b"".join(bytes(((color >> 16) & 0xFF,
+                                       (color >> 8) & 0xFF,
+                                       color & 0xFF)) for color in chunk)
+            self._write_timed(JYDBUS_FRAME_TYPE_QUERY,
+                              JYDBUS_TYPE_WS2812B,
+                              sensor_number, payload, drain=True)
+            time.sleep(WS2812B_FRAME_GAP)
+
+        commit = bytes((WS2812B_COMMAND_FRAME_COMMIT, transaction_id))
+        self._ws2812b_request(sensor_number, commit,
+                              WS2812B_COMMAND_FRAME_COMMIT, transaction_id,
+                              expected_argument0=transaction_id)
 
     @staticmethod
     def _validate_ws2812b_color(color: int) -> None:
@@ -520,16 +550,44 @@ class JydbusUart:
                 readable, _, exceptional = select.select([self.port.fd], [], [self.port.fd], 0.020)
                 if exceptional:
                     break
+                self._discard_stale_frame(time.monotonic())
                 if readable:
                     for value in self.port.read_available(256):
                         self._push_byte(value)
-                if self._frame and time.monotonic() - self._last_rx >= RX_FRAME_TIMEOUT:
-                    with self._cache_lock:
-                        self._stats.format_errors += 1
-                    self._reset_parser()
             except (OSError, ValueError):
                 if self._running:
                     break
+
+    def _discard_stale_frame(self, now: float) -> None:
+        if self._frame and now - self._last_rx >= RX_FRAME_TIMEOUT:
+            if self._recover_missing_tail(time.monotonic_ns() // 1000):
+                self._reset_parser()
+                return
+            self._record_format_error("incomplete frame timeout",
+                                      bytes(self._frame))
+            self._reset_parser()
+
+    def _recover_missing_tail(self, received_us: int) -> bool:
+        if not self._expected or len(self._frame) != self._expected - 1:
+            return False
+        payload_length = struct.unpack_from("<H", self._frame, 1)[0]
+        crc_index = payload_length + 6
+        if len(self._frame) != crc_index + 2:
+            return False
+        received_crc = struct.unpack_from("<H", self._frame, crc_index)[0]
+        if received_crc != crc16_modbus(self._frame[1:crc_index]):
+            return False
+
+        with self._cache_lock:
+            self._stats.legacy_tails += 1
+        self._process_frame(bytes(self._frame) + bytes((FRAME_TAIL,)), received_us)
+        return True
+
+    def _record_format_error(self, reason: str, frame: bytes) -> None:
+        with self._cache_lock:
+            self._stats.format_errors += 1
+            self._stats.last_format_reason = reason
+            self._stats.last_format_frame = frame
 
     def _reset_parser(self) -> None:
         self._frame.clear()
@@ -542,8 +600,8 @@ class JydbusUart:
                 self._frame.append(value)
             return
         if len(self._frame) >= JYDBUS_UART_MAX_PAYLOAD + FRAME_OVERHEAD:
-            with self._cache_lock:
-                self._stats.format_errors += 1
+            self._record_format_error("frame exceeds receive capacity",
+                                      bytes(self._frame))
             self._reset_parser()
             if value == FRAME_HEADER:
                 self._frame.append(value)
@@ -552,8 +610,8 @@ class JydbusUart:
         if len(self._frame) == 3:
             payload_length = struct.unpack_from("<H", self._frame, 1)[0]
             if payload_length > JYDBUS_UART_MAX_PAYLOAD:
-                with self._cache_lock:
-                    self._stats.format_errors += 1
+                self._record_format_error("payload length exceeds limit",
+                                          bytes(self._frame))
                 self._reset_parser()
                 return
             self._expected = payload_length + FRAME_OVERHEAD
@@ -563,14 +621,12 @@ class JydbusUart:
 
     def _process_frame(self, frame: bytes, received_us: int) -> None:
         if (len(frame) < FRAME_OVERHEAD or frame[0] != FRAME_HEADER):
-            with self._cache_lock:
-                self._stats.format_errors += 1
+            self._record_format_error("invalid header or short frame", frame)
             return
         payload_length = struct.unpack_from("<H", frame, 1)[0]
         if (payload_length > JYDBUS_UART_MAX_PAYLOAD or
                 len(frame) != payload_length + FRAME_OVERHEAD):
-            with self._cache_lock:
-                self._stats.format_errors += 1
+            self._record_format_error("frame length mismatch", frame)
             return
         crc_index = payload_length + 6
         received_crc = struct.unpack_from("<H", frame, crc_index)[0]
@@ -584,14 +640,12 @@ class JydbusUart:
                 self._stats.query_echoes += 1
             return
         if frame_type not in (JYDBUS_FRAME_TYPE_DATA, JYDBUS_FRAME_TYPE_SCAN):
-            with self._cache_lock:
-                self._stats.format_errors += 1
+            self._record_format_error("unsupported frame type", frame)
             return
         tail = frame[-1]
         legacy_tail = payload_length == 8 and tail == 0
         if tail != FRAME_TAIL and not legacy_tail:
-            with self._cache_lock:
-                self._stats.format_errors += 1
+            self._record_format_error("invalid frame tail", frame)
             return
         sensor_type, sensor_number = frame[4], frame[5]
         payload = frame[6:crc_index]
@@ -601,6 +655,8 @@ class JydbusUart:
             if frame_type == JYDBUS_FRAME_TYPE_SCAN:
                 if len(payload) < 4 or payload[:4] != b"KKKK":
                     self._stats.format_errors += 1
+                    self._stats.last_format_reason = "invalid scan payload"
+                    self._stats.last_format_frame = frame
                     return
                 self._stats.valid_frames += 1
                 target = (sensor_type, sensor_number)
@@ -632,6 +688,7 @@ def jydbus_name(sensor_type: int) -> str:
         JYDBUS_TYPE_ZSPD4003: "ZSPD4003",
         JYDBUS_TYPE_KNOB_SWITCH_ADC: "KNOB_SWITCH_ADC",
         JYDBUS_TYPE_PAJ7620U2: "PAJ7620U2",
+        JYDBUS_TYPE_FAN: "FAN",
     }.get(sensor_type, "UNKNOWN")
 
 

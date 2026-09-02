@@ -33,6 +33,9 @@ def print_status(status: SensorOtaStatus) -> None:
     print(f"download_slot={slot_name(status.download_slot)} "
           f"next_offset={status.next_offset} slot_size={status.slot_size} "
           f"max_boot_attempts={status.max_boot_attempts}")
+    print(f"active_version={status.active_version} "
+          f"confirmed_version={status.confirmed_version} "
+          f"download_version={status.image_version}")
 
 
 def progress(sent: int, total: int) -> None:
@@ -76,6 +79,7 @@ def parser() -> argparse.ArgumentParser:
     serial_options(recovery)
     recovery.add_argument("--slot", type=slot, required=True)
     recovery.add_argument("--image", required=True)
+    recovery.add_argument("--version", type=number, default=1)
     return root
 
 
@@ -106,7 +110,8 @@ def main() -> int:
                                  args.version, args.stop_after, progress)
             else:
                 print("[OTA] recovery mode requires a direct UART connection.")
-                ota.recovery_upgrade_file(args.slot, args.image, progress)
+                ota.recovery_upgrade_file(args.slot, args.image, progress,
+                                          version=args.version)
         print("[OTA] transfer verified; device is rebooting into the pending slot.")
         return 0
     except OtaDeviceError as exc:

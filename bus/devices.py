@@ -8,6 +8,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 from jydbus_uart import (PAJ7620_AUTO_UPLOAD_INTERVAL_MS, JYDBUS_TYPE_AHT10,
                          JYDBUS_TYPE_BMP390, JYDBUS_TYPE_BUTTON_PB1,
+                         JYDBUS_TYPE_FAN,
                          JYDBUS_TYPE_JOYSTICK, JYDBUS_TYPE_KNOB_SWITCH_ADC,
                          JYDBUS_TYPE_MAX30102, JYDBUS_TYPE_MFRC522,
                          JYDBUS_TYPE_PAJ7620U2, JYDBUS_TYPE_PHOTORESISTOR_ADC,
@@ -243,6 +244,31 @@ class PAJ7620U2GestureSensor(SensorDevice):
         return self.request_value()
 
 
+class FanActuator(SensorDevice):
+    SENSOR_TYPE = JYDBUS_TYPE_FAN
+
+    def set_speed(self, duty_percent: int) -> int:
+        if (not isinstance(duty_percent, int) or
+                isinstance(duty_percent, bool) or
+                not 0 <= duty_percent <= 100):
+            raise OSError(errno.EINVAL, "fan duty cycle must be 0..100 percent")
+        return self.write_value(duty_percent)
+
+    def set_enabled(self, enabled: bool) -> int:
+        if not isinstance(enabled, bool):
+            raise OSError(errno.EINVAL, "fan enabled state must be bool")
+        return self.set_speed(100 if enabled else 0)
+
+    def turn_on(self) -> int:
+        return self.set_enabled(True)
+
+    def turn_off(self) -> int:
+        return self.set_enabled(False)
+
+    def read_state(self) -> dict[str, object]:
+        return self.request_value()
+
+
 DEVICE_CLASS_BY_TYPE: dict[int, type[SensorDevice]] = {
     device_class.SENSOR_TYPE: device_class
     for device_class in (
@@ -250,7 +276,7 @@ DEVICE_CLASS_BY_TYPE: dict[int, type[SensorDevice]] = {
         MFRC522Reader, WS2812BPanel, ZW101FingerprintSensor,
         ButtonPB1Sensor, JoystickSensor, PhotoresistorSensor,
         WaterLevelSensor, SoilMoistureSensor, ZSPD4003Sensor,
-        KnobSwitchSensor, PAJ7620U2GestureSensor,
+        KnobSwitchSensor, PAJ7620U2GestureSensor, FanActuator,
     )
 }
 
