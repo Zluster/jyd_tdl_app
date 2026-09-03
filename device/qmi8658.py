@@ -189,7 +189,9 @@ class QMI8658(IMU, TS):
                 active_odrs.append(self.acc_odr.value)
             if self.mode is not IMUMode.ACC_ONLY:
                 active_odrs.append(self.gyro_odr.value)
-            sleep(max(0.08, 1.0 / min(active_odrs)))
+            # The first data frame can remain zero for longer than one ODR
+            # period after reset on the CV184x board.
+            sleep(max(0.2, 1.0 / min(active_odrs)))
         except Exception:
             self._active = False
             raise

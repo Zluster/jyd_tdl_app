@@ -9,7 +9,6 @@ from dara.peripheral.pinmap import (
     SoftKeyInfo,
     GPIOInfo,
     I2CInfo,
-    SPIInfo,
     UARTInfo,
     WDTInfo,
 )
@@ -1620,13 +1619,6 @@ BOARD_CONFIG = BoardConfig(
                 scl_func="IIC2_SCL",
                 sda_func="IIC2_SDA",
             ),
-            "I2C1": I2CInfo(
-                dev="/dev/i2c-1",  # not yet enabled in dts
-                scl="A10",
-                sda="D10",
-                scl_func="IIC1_SCL",
-                sda_func="IIC1_SDA",
-            ),
             "I2C2": I2CInfo(
                 dev="/dev/i2c-4",
                 scl="B9",
@@ -1635,34 +1627,10 @@ BOARD_CONFIG = BoardConfig(
                 sda_func="IIC4_SDA",
             ),
         },
-        # for pwm please check
-        # https://doc.sophgo.com/cvitek-develop-docs/master/docs_latest_release/CV184x/zh/01.software/BSP/Peripheral_Driver/build/html/10_PWM_Operation_Guide.html
-        # https://developer.sophgo.com/thread/813.html
-        # for appropriate configurations
-        spi={
-            "SPI0": SPIInfo(
-                dev="/dev/spidev3.0",
-                sclk="C10",
-                mosi="C11",
-                miso="B11",
-                cs=None,
-                sclk_func="SPI3_SCK",
-                mosi_func="SPI3_SDO",
-                miso_func="SPI3_SDI",
-                cs_func=None,
-            ),
-            "SPI0.0": SPIInfo(
-                dev="/dev/spidev3.0",
-                sclk="C10",
-                mosi="C11",
-                miso="B11",
-                cs="B10",
-                sclk_func="SPI3_SCK",
-                mosi_func="SPI3_SDO",
-                miso_func="SPI3_SDI",
-                cs_func="SPI3_CS_X",
-            ),
-        },
+        # SPI3 has no spidev node in the current board DTS.  Add its mapping
+        # only together with the DTS node so applications cannot select an
+        # unavailable bus.
+        spi={},
         uart={
             "UART1": UARTInfo(
                 dev="/dev/ttyS0",

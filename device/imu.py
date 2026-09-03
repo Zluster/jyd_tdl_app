@@ -3,11 +3,10 @@
 
 from abc import ABC, abstractmethod
 from enum import Enum, IntEnum
+import json
 from math import isfinite, radians
 import os
 from time import monotonic, sleep
-
-import yaml
 
 from dara.core.registry import Registry
 from dara.core._error_helpers import wrap_error_as
@@ -121,7 +120,7 @@ class IMUData:
         self.gyro = gyro
 
 
-_CALIBRATION_PATH = "/data/etc/dara/imu_calibration.yaml"
+_CALIBRATION_PATH = "/data/etc/dara/imu_calibration.json"
 
 
 class IMU(ABC):
@@ -227,7 +226,7 @@ class IMU(ABC):
     @wrap_error_as(
         IMUError,
         "IMU calibration data could not be read",
-        catch=(OSError, yaml.YAMLError),
+        catch=(OSError, json.JSONDecodeError),
     )
     def calib_gyro_exists(self, save_id = "default"):
         """Return whether a valid named gyro calibration is saved."""
@@ -237,7 +236,7 @@ class IMU(ABC):
     @wrap_error_as(
         IMUError,
         "IMU calibration data could not be read",
-        catch=(OSError, yaml.YAMLError),
+        catch=(OSError, json.JSONDecodeError),
     )
     def load_calib_gyro(self, save_id = "default"):
         """Load and activate a named gyro calibration, or zero bias if absent."""
@@ -251,7 +250,7 @@ class IMU(ABC):
     @wrap_error_as(
         IMUError,
         "IMU calibration data could not be saved",
-        catch=(OSError, yaml.YAMLError),
+        catch=(OSError, TypeError, ValueError),
     )
     def save_calib_gyro(
         self,
@@ -276,8 +275,9 @@ class IMU(ABC):
         path = _CALIBRATION_PATH
         os.makedirs(os.path.dirname(path), exist_ok=True)
         temporary_path = f"{path}.tmp"
-        with open(temporary_path, "w") as file:
-            yaml.safe_dump(profiles, file, sort_keys=True)
+        with open(temporary_path, "w", encoding="utf-8") as file:
+            json.dump(profiles, file, sort_keys=True, allow_nan=False)
+            file.write("\n")
         os.replace(temporary_path, path)
 
     @staticmethod
@@ -288,13 +288,12 @@ class IMU(ABC):
 
     @staticmethod
     def _load_profiles():
-        """Load the YAML calibration profile mapping."""
+        """Load the JSON calibration profile mapping."""
         try:
-            with open(_CALIBRATION_PATH) as file:
-                text = file.read()
+            with open(_CALIBRATION_PATH, encoding="utf-8") as file:
+                profiles = json.load(file)
         except FileNotFoundError:
             return {}
-        profiles = yaml.safe_load(text)
         if profiles is None:
             return {}
         if not isinstance(profiles, dict) or not all(

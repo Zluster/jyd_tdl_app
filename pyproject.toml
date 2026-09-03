@@ -2,10 +2,9 @@
 # 注意：wheel 标签是 py3-none-any，但内含 ARM32 原生 .so，仅供 CV184x 板端安装
 
 [build-system]
-# SDK host provides 59.6 and target Alpine 3.16 carries 65.5; this package
-# only uses standard setuptools package-data support, so a higher floor adds
-# no functionality and blocks offline builds.
-requires = ["setuptools>=59"]
+# ``[project]`` is PEP 621 metadata, first supported by setuptools 61.
+# A lower requirement silently produces an UNKNOWN wheel on the SDK host.
+requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -19,11 +18,10 @@ authors = [
     { name = "RMaixtr", email = "aixtr@outlook.com" },
 ]
 
-license = { text = "MIT" }
+license = "MIT"
 
 [project.optional-dependencies]
 bluetooth = ["dbus-fast>=5.0.22"]
-sensors = ["PyYAML>=6.0.3"]
 
 [tool.setuptools]
 # 本目录即包目录：把 "." 映射为包 dara（源码目录名与包名无关，无需改目录）

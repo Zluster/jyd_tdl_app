@@ -55,12 +55,19 @@ class MMC56X3(Mag, TS):
 
     def __init__(
         self,
-        i2c = I2C(0),
+        i2c = None,
         addr = 0x30,
         *,
         auto_open = True,
     ):
-        """Create an MMC56X3 on a caller-owned bus and optionally initialize it."""
+        """Create an MMC56X3 and optionally initialize it on an I2C bus.
+
+        When ``i2c`` is omitted, I2C0 is opened here rather than while this
+        module is imported.  This preserves the convenient default without
+        making ``import dara.device.mmc56x3`` touch board hardware.
+        """
+        if i2c is None:
+            i2c = I2C(0)
         if not isinstance(i2c, I2C):
             raise ValueError("i2c must be an I2C instance")
         if not isinstance(addr, int) or isinstance(addr, bool) or not 0 <= addr <= 0x7F:
