@@ -11,9 +11,11 @@ jyd-ui 线程执行并等结果（MicroPython 不可重入且绑定该线程）�
                        show(fps)        纯 UI 循环按 fps sleep 防空转
                        show(img)        显示/刷新 Image（控件托管见下）
                        show(img, fps)   两者兼有
-                     传 img 时模块内部只创建一个 lv.image 控件并复用：
+                     传 img 时模块内部只维护一个 lv.image 控件并复用：
                      同一块像素缓冲只 invalidate() 标脏重绘，缓冲地址/
-                     尺寸/格式变了才重设 dsc；Image 引用由模块保活
+                     尺寸/格式变了才重设 dsc；控件挂在当前活动屏上，
+                     换屏或所在屏被删（appfw 退出应用会删屏）时在新的
+                     活动屏上重建；Image 引用由模块保活
     bind(obj, code, fn)   LVGL 事件 -> CPython 无参回调
                           （事件对象不能跨桥，MicroPython 侧吞掉）
     bind_touch(obj)       在对象上采集按下、移动和松开的触摸事件
@@ -90,24 +92,53 @@ _bind_state = {"ready": False, "seq": 0}
 _touch_state = {"ready": False}
 
 
-#: show(img) 托管的唯一 lv.image 控件：widget 控件代理 / img 最近一次
-#: 的 Image（保活：dsc 零拷贝引用其像素）/ sig 缓冲签名（变了才重设 dsc）
-_show_state = {"widget": None, "img": None, "sig": None}
+#: show(img) 的 MP 侧控件托管。控件、缓冲签名都放 MP 侧，每帧一次
+#: m.call 就完成"活着且在当前屏上？-> 重建 / 重设源 / 标脏"三选一。
+#: 控件挂在活动屏上，屏被删（appfw 退出应用整屏 delete）后代理会抛
+#: LvReferenceError，换屏后 get_screen() 不再是活动屏：两种情况都在当前
+#: 活动屏上重建，而不是抱着死控件。依赖 jyd.image 注入的 _jyd_img_set
+_SHOW_SRC = r"""
+import lvgl as _jyd_lv
+
+_jyd_show_widget = None
+_jyd_show_sig = None
+
+def _jyd_show_img(w, h, cf_name, addr, size):
+    global _jyd_show_widget, _jyd_show_sig
+    scr = _jyd_lv.screen_active()
+    widget = _jyd_show_widget
+    try:
+        alive = widget is not None and widget.get_screen() is scr
+    except Exception:            # 控件已随旧屏删除
+        alive = False
+    if not alive:
+        widget = _jyd_lv.image(scr)
+        _jyd_show_widget = widget
+        _jyd_show_sig = None
+    sig = (addr, w, h, cf_name)
+    if sig != _jyd_show_sig:     # 首次 / 缓冲变了：重设 dsc
+        _jyd_img_set(widget, w, h, cf_name, addr, size)
+        _jyd_show_sig = sig
+    else:                        # 内容更新：仅标脏触发重绘
+        widget.invalidate()
+"""
+
+#: show(img) 的进程内状态：img 最近一次的 Image（保活：控件 dsc 零拷贝
+#: 引用其像素）/ ready MP 侧辅助是否已注入
+_show_state = {"img": None, "ready": False}
 
 
 def _show_image(img):
-    """show(img) 的控件托管：进程内只建一个 lv.image，复用 + 标脏。"""
+    """show(img) 的控件托管：一个 lv.image 跟随当前活动屏，复用 + 标脏。"""
     from . import image as _image
-    sig = (img.to_addr(), img.width, img.height, img.mode)
+    args = _image._lv_args(img)      # (w, h, cf 名, addr, size)，含 mode 校验
+    rt = _image._ensure_mp()         # 先注入 _jyd_img_set 等辅助
     st = _show_state
-    if st["widget"] is None:
-        st["widget"] = _image.to_lv(img)   # 首次：创建唯一控件并设源
-    elif sig != st["sig"]:
-        st["widget"].set_src(img)          # 缓冲变了：同一控件重设 dsc
-    else:
-        st["widget"].invalidate()          # 内容更新：仅标脏触发重绘
+    if not st["ready"]:
+        rt.m.exec(_SHOW_SRC)
+        st["ready"] = True
+    rt.m.call("_jyd_show_img", *args)
     st["img"] = img
-    st["sig"] = sig
 
 
 def show(image=None, fps=None):
@@ -118,11 +149,12 @@ def show(image=None, fps=None):
         lv.show(img, 30)         # 两者兼有
 
     UI 渲染由 jyd-ui 线程自转，show 不驱动心跳（不调它 UI 也在跑），
-    保留它是给循环控节奏。传 Image 时由本模块托管唯一的 lv.image
+    保留它是给循环控节奏。传 Image 时由本模块托管一个 lv.image
     控件：每次调用都把控件标脏（零拷贝共享像素，重绘即显示最新内
     容）；换了不同的像素缓冲（地址/尺寸/格式变化）自动重设控件源，
-    仍复用同一控件。相机预览就是
-    `while True: lv.show(camera.read_image())`。"""
+    仍复用同一控件。控件挂在当前活动屏上：换屏了、或所在屏被删了
+    （appfw 退出应用会整屏删除），下一次 show 在新的活动屏上重建。
+    相机预览就是 `while True: lv.show(camera.read_image())`。"""
     if image is not None:
         import _maix_image
         if isinstance(image, _maix_image.Image):

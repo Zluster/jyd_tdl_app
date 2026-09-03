@@ -265,7 +265,7 @@ def live(timeout_ms=1000) -> Camera:
     return _get(tdl_py.VpssCamera.live, timeout_ms)
 
 def sub_rgb(timeout_ms=1000) -> Camera:
-    """grp0/ch3，640x640 NV21。"""
+    """grp0/ch3，320x240 NV21。"""
     return _get(tdl_py.VpssCamera.sub_rgb, timeout_ms)
 
 def screen(timeout_ms=1000) -> Camera:
@@ -288,5 +288,5 @@ def rear_live(timeout_ms=1000) -> Camera:
     return _get(tdl_py.VpssCamera.rear_live, timeout_ms)
 
 def rear_sub_rgb(timeout_ms=1000) -> Camera:
-    """grp3/ch3，640x640 NV21。"""
+    """grp3/ch3，320x240 NV21。"""
     return _get(tdl_py.VpssCamera.rear_sub_rgb, timeout_ms)
