@@ -14,7 +14,7 @@ from math import isfinite
 from time import monotonic
 
 from dara.core._error_helpers import wrap_error_as
-from dara.device.ds import DSData, DSError, DS, ds_drivers
+from dara.device.ds import DSData, DSError
 from dara.peripheral.i2c import I2C
 
 
@@ -77,8 +77,7 @@ class _SequenceTimeouts:
         self.final_us = final_us
 
 
-@ds_drivers.register("vl53l0x")
-class VL53L0X(DS):
+class VL53L0X:
     """A VL53L0X time-of-flight distance sensor connected over I2C."""
 
     _SYSRANGE_START = 0x00
@@ -133,23 +132,23 @@ class VL53L0X(DS):
 
     def __init__(
         self,
-        i2c,
+        i2c_bus,
         addr = 0x29,
         io_2v8 = False,
         *,
         timeout_ms = 0,
         auto_open = True,
     ):
-        """Create a VL53L0X on a caller-owned bus and optionally initialize it."""
-        if not isinstance(i2c, I2C):
-            raise ValueError("i2c must be an I2C instance")
+        """Create a VL53L0X on Linux I2C bus ``i2c_bus``."""
+        if isinstance(i2c_bus, bool) or not isinstance(i2c_bus, int):
+            raise ValueError("i2c_bus must be an integer Linux I2C bus number")
         if isinstance(addr, bool) or not isinstance(addr, int) or not 0 <= addr <= 0x7F:
             raise ValueError("addr must be a 7-bit integer")
         if not isinstance(io_2v8, bool):
             raise ValueError("io_2v8 must be a boolean")
         if not isinstance(auto_open, bool):
             raise ValueError("auto_open must be a boolean")
-        self._i2c = i2c
+        self._i2c = I2C(i2c_bus, auto_open=False)
         self._addr = addr
         self._io_2v8 = io_2v8
         self._active = False
@@ -180,8 +179,7 @@ class VL53L0X(DS):
     def open(self):
         """Verify, initialize, tune, and calibrate the sensor."""
         self.close()
-        if not self._i2c.is_opened:
-            raise VL53L0XError("VL53L0X I2C bus is not open")
+        self._i2c.open()
         self._active = True
         try:
             if self._read_reg(self._MODEL_ID) != 0xEE:
@@ -230,19 +228,18 @@ class VL53L0X(DS):
         except Exception:
             self._active = False
             self._continuous = False
+            self._i2c.close()
             raise
 
     @wrap_error_as(VL53L0XError, "VL53L0X close failed", catch=OSError)
     def close(self):
-        """Stop continuous ranging without closing the caller-owned I2C bus."""
-        if not self._active:
-            return
         try:
-            if self._continuous:
+            if self._active and self._continuous:
                 self.stop_continuous()
         finally:
             self._continuous = False
             self._active = False
+            self._i2c.close()
 
     @property
     def is_opened(self):

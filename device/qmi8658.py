@@ -7,7 +7,7 @@ from time import monotonic, sleep
 
 from dara.core._error_helpers import wrap_error_as
 from dara.device.imu import (
-    IMU,
+    GyroCalibration,
     IMUAccOdr,
     IMUAccScale,
     IMUData,
@@ -15,9 +15,8 @@ from dara.device.imu import (
     IMUGyroOdr,
     IMUGyroScale,
     IMUMode,
-    imu_drivers,
 )
-from dara.device.ts import TS, TSData, TSError, ts_drivers
+from dara.device.ts import TSData, TSError
 from dara.peripheral.i2c import I2C
 
 
@@ -35,9 +34,7 @@ class QMI8658Data(TSData, IMUData):
         self.temperature = temperature
 
 
-@imu_drivers.register("qmi8658")
-@ts_drivers.register("qmi8658")
-class QMI8658(IMU, TS):
+class QMI8658(GyroCalibration):
     """A QMI8658 accelerometer and gyroscope connected over I2C."""
 
     _WHO_AM_I = 0x00
@@ -116,7 +113,7 @@ class QMI8658(IMU, TS):
 
     def __init__(
         self,
-        i2c,
+        i2c_bus,
         addr = 0x6B,
         mode = IMUMode.DUAL,
         acc_scale = IMUAccScale.ACC_SCALE_2G,
@@ -126,9 +123,9 @@ class QMI8658(IMU, TS):
         *,
         auto_open = True,
     ):
-        """Create a QMI8658 on a caller-owned bus and optionally initialize it."""
-        if not isinstance(i2c, I2C):
-            raise ValueError("i2c must be an I2C instance")
+        """Create a QMI8658 on Linux I2C bus ``i2c_bus``."""
+        if isinstance(i2c_bus, bool) or not isinstance(i2c_bus, int):
+            raise ValueError("i2c_bus must be an integer Linux I2C bus number")
         if not isinstance(addr, int) or isinstance(addr, bool) or not 0 <= addr <= 0x7F:
             raise ValueError("addr must be a 7-bit integer")
         for name, value, enum_type in (
@@ -148,7 +145,7 @@ class QMI8658(IMU, TS):
             if value not in supported:
                 raise ValueError(f"{name} is not supported by QMI8658")
         super().__init__()
-        self._i2c = i2c
+        self._i2c = I2C(i2c_bus, auto_open=False)
         self.addr = addr
         self.mode = mode
         self.acc_scale = acc_scale
@@ -161,10 +158,9 @@ class QMI8658(IMU, TS):
 
     @wrap_error_as(QMI8658Error, "QMI8658 open failed", catch=OSError)
     def open(self):
-        """Reset, verify, and configure the sensor on its open I2C bus."""
+        """Open Linux I2C, then reset, verify, and configure the sensor."""
         self.close()
-        if not self._i2c.is_opened:
-            raise QMI8658Error("QMI8658 I2C bus is not open")
+        self._i2c.open()
         self._active = True
         try:
             self._write(self._RESET, 0xB0)
@@ -194,18 +190,17 @@ class QMI8658(IMU, TS):
             sleep(max(0.2, 1.0 / min(active_odrs)))
         except Exception:
             self._active = False
+            self._i2c.close()
             raise
 
     @wrap_error_as(QMI8658Error, "QMI8658 close failed", catch=OSError)
     def close(self):
-        """Disable sensor outputs without closing the caller-owned I2C bus."""
-        if not self._active:
-            return
         try:
-            self._write(self._CTRL7, self._read(self._CTRL7) & 0xF0)
-            # self._write(self._CTRL1, self._read(self._CTRL1) | 0x01)
+            if self._active:
+                self._write(self._CTRL7, self._read(self._CTRL7) & 0xF0)
         finally:
             self._active = False
+            self._i2c.close()
 
     def __enter__(self):
         """Open the sensor if needed and return it for a ``with`` statement."""

@@ -4,7 +4,7 @@
 from os import sync
 
 from dara.core._error_helpers import wrap_error_as
-from dara.device.pmu import PMU, PMUError, PMUPowerChannel, pmu_drivers
+from dara.device.pmu import PMUError, PMUPowerChannel
 from dara.peripheral.i2c import I2C
 
 
@@ -12,8 +12,7 @@ class AXP2101Error(PMUError):
     """Raised when an AXP2101 operation cannot be completed."""
 
 
-@pmu_drivers.register("axp2101")
-class AXP2101(PMU):
+class AXP2101:
     """An AXP2101 power management unit connected over I2C."""
 
     _STATUS1 = 0x00
@@ -48,19 +47,19 @@ class AXP2101(PMU):
 
     def __init__(
         self,
-        i2c,
+        i2c_bus,
         addr = 0x34,
         *,
         auto_open = True,
     ):
-        """Create an AXP2101 on a caller-owned bus and optionally verify it."""
-        if not isinstance(i2c, I2C):
-            raise ValueError("i2c must be an I2C instance")
+        """Create an AXP2101 on Linux I2C bus ``i2c_bus``."""
+        if isinstance(i2c_bus, bool) or not isinstance(i2c_bus, int):
+            raise ValueError("i2c_bus must be an integer Linux I2C bus number")
         if not isinstance(auto_open, bool):
             raise ValueError("auto_open must be a boolean")
         if not isinstance(addr, int) or isinstance(addr, bool) or not 0 <= addr <= 0x7F:
             raise ValueError("addr must be a 7-bit integer")
-        self._i2c = i2c
+        self._i2c = I2C(i2c_bus, auto_open=False)
         self.addr = addr
         self._active = False
         if auto_open:
@@ -68,22 +67,23 @@ class AXP2101(PMU):
 
     @wrap_error_as(AXP2101Error, "AXP2101 open failed", catch=OSError)
     def open(self):
-        """Verify the AXP2101 chip identifier on its open I2C bus."""
+        """Open Linux I2C and verify the AXP2101 chip identifier."""
         self.close()
-        if not self._i2c.is_opened:
-            raise AXP2101Error("AXP2101 I2C bus is not open")
+        self._i2c.open()
         self._active = True
         try:
             if self._read(self._VERSION) & 0xCF not in self._DEVICE_IDS:
                 raise AXP2101Error("unexpected AXP2101 device ID")
         except Exception:
             self._active = False
+            self._i2c.close()
             raise
 
     @wrap_error_as(AXP2101Error, "AXP2101 close failed", catch=OSError)
     def close(self):
-        """Deactivate the PMU without changing outputs or closing its bus."""
+        """Deactivate the PMU without changing outputs and close its bus."""
         self._active = False
+        self._i2c.close()
 
     def __enter__(self):
         """Open the PMU if needed and return it for a ``with`` statement."""

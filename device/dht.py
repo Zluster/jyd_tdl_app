@@ -6,8 +6,8 @@ from math import isfinite
 from time import monotonic, sleep
 
 from dara.core._error_helpers import wrap_error_as
-from dara.device.hs import HS, HSData, HSError, hs_drivers
-from dara.device.ts import TS, TSData, TSError, ts_drivers
+from dara.device.hs import HSData, HSError
+from dara.device.ts import TSData, TSError
 from dara.peripheral.gpio import (
     GPIO,
     GPIODirection,
@@ -37,9 +37,7 @@ class DHTData(HSData, TSData):
         self.humidity = humidity
 
 
-@ts_drivers.register("dht")
-@hs_drivers.register("dht")
-class DHT(TS, HS):
+class DHT:
     """A DHT11 or DHT22 sensor connected to a GPIO line."""
 
     _EDGE_TIMEOUT = 0.001

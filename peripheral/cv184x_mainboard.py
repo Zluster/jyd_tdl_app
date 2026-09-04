@@ -1612,14 +1612,14 @@ BOARD_CONFIG = BoardConfig(
             # ),
         },
         i2c={
-            "I2C0": I2CInfo(
+            "I2C2": I2CInfo(
                 dev="/dev/i2c-2",
                 scl="B1",
                 sda="B2",
                 scl_func="IIC2_SCL",
                 sda_func="IIC2_SDA",
             ),
-            "I2C2": I2CInfo(
+            "I2C4": I2CInfo(
                 dev="/dev/i2c-4",
                 scl="B9",
                 sda="E10",

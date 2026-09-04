@@ -5,8 +5,8 @@ from math import isfinite
 from time import sleep
 
 from dara.core._error_helpers import wrap_error_as
-from dara.device.hs import HS, HSData, HSError, hs_drivers
-from dara.device.ts import TS, TSData, TSError, ts_drivers
+from dara.device.hs import HSData, HSError
+from dara.device.ts import TSData, TSError
 from dara.peripheral.i2c import I2C
 
 
@@ -23,9 +23,7 @@ class AHT20Data(HSData, TSData):
         self.humidity = humidity
 
 
-@ts_drivers.register("aht20")
-@hs_drivers.register("aht20")
-class AHT20(TS, HS):
+class AHT20:
     """An AHT20 temperature and humidity sensor on an I2C bus."""
 
     _POWER_ON_DELAY = 0.5
@@ -34,16 +32,16 @@ class AHT20(TS, HS):
 
     def __init__(
         self,
-        i2c,
+        i2c_bus,
         addr = 0x38,
         *,
         temperature_offset = 0.0,
         humidity_offset = 0.0,
         auto_open = True,
     ):
-        """Create an AHT20 on ``i2c`` and optionally initialize it."""
-        if not isinstance(i2c, I2C):
-            raise ValueError("i2c must be a Dara I2C instance")
+        """Create an AHT20 on Linux I2C bus ``i2c_bus``."""
+        if isinstance(i2c_bus, bool) or not isinstance(i2c_bus, int):
+            raise ValueError("i2c_bus must be an integer Linux I2C bus number")
         if isinstance(addr, bool) or not isinstance(addr, int) or not 0 <= addr <= 0x7F:
             raise ValueError("addr must be a 7-bit integer")
         for name, value in (
@@ -59,7 +57,7 @@ class AHT20(TS, HS):
         if not isinstance(auto_open, bool):
             raise ValueError("auto_open must be a boolean")
 
-        self._i2c = i2c
+        self._i2c = I2C(i2c_bus, auto_open=False)
         self.addr = addr
         self.temperature_offset = float(temperature_offset)
         self.humidity_offset = float(humidity_offset)
@@ -79,10 +77,9 @@ class AHT20(TS, HS):
 
     @wrap_error_as(AHT20Error, "AHT20 open failed", catch=OSError)
     def open(self):
-        """Initialize the sensor without taking ownership of its I2C bus."""
+        """Open Linux I2C and initialize the sensor."""
         self.close()
-        if not self._i2c.is_opened:
-            raise AHT20Error("AHT20 I2C bus is not open")
+        self._i2c.open()
         self._active = True
         try:
             sleep(self._POWER_ON_DELAY)
@@ -92,11 +89,13 @@ class AHT20(TS, HS):
             sleep(0.01)
         except Exception:
             self._active = False
+            self._i2c.close()
             raise
 
     def close(self):
-        """Deactivate the sensor without closing its caller-owned I2C bus."""
+        """Deactivate the sensor and close its Linux I2C bus."""
         self._active = False
+        self._i2c.close()
 
     @property
     def is_opened(self):

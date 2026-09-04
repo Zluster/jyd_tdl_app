@@ -1,14 +1,12 @@
-"""Shared inertial measurement unit types and behavior."""
+"""Inertial measurement data types and gyro calibration support."""
 
 
-from abc import ABC, abstractmethod
 from enum import Enum, IntEnum
 import json
 from math import isfinite, radians
 import os
 from time import monotonic, sleep
 
-from dara.core.registry import Registry
 from dara.core._error_helpers import wrap_error_as
 
 
@@ -123,40 +121,17 @@ class IMUData:
 _CALIBRATION_PATH = "/data/etc/dara/imu_calibration.json"
 
 
-class IMU(ABC):
-    """Abstract inertial measurement unit with shared gyro calibration support."""
+class GyroCalibration:
+    """Reusable gyro calibration behavior for concrete IMU drivers.
+
+    This is not a hardware-device abstraction.  QMI8658 and LSM6DSOWTR use
+    the same persisted calibration format while each owns its I2C lifecycle.
+    """
 
     def __init__(self):
         """Initialize shared inertial measurement unit state."""
         self.mode = None
         self.calib_gyro_data = IMUGyroCalibration(0.0, 0.0, 0.0)
-
-    @abstractmethod
-    def open(self):
-        """Open the device and initialize its sensor."""
-
-    @abstractmethod
-    def close(self):
-        """Deactivate the device without closing its peripheral bus."""
-
-    def __enter__(self):
-        """Open the device if needed and return it for a ``with`` statement."""
-        if not self.is_opened:
-            self.open()
-        return self
-
-    def __exit__(self, *args):
-        """Close the device when leaving a ``with`` statement."""
-        self.close()
-
-    @property
-    @abstractmethod
-    def is_opened(self):
-        """Return whether the device is open."""
-
-    @abstractmethod
-    def read_imu(self, calib_gyro = True, radian = False):
-        """Return acceleration and optional calibrated or converted gyro data."""
 
     def _calibrate_gyro(
         self,
@@ -328,7 +303,3 @@ class IMU(ABC):
                 raise IMUError(f"calibration profile '{save_id}' has invalid gyro bias")
             values.append(float(value))
         return IMUGyroCalibration(values[0], values[1], values[2])
-
-
-imu_drivers = Registry[IMU]("IMU drivers")
-"""Registry of available inertial measurement unit driver classes."""

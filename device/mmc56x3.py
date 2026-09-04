@@ -5,8 +5,8 @@ from math import nan
 from time import monotonic, sleep
 
 from dara.core._error_helpers import wrap_error_as
-from dara.device.mag import Mag, MagData, MagError, mag_drivers
-from dara.device.ts import TS, TSData, TSError, ts_drivers
+from dara.device.mag import MagData, MagError
+from dara.device.ts import TSData, TSError
 from dara.peripheral.i2c import I2C
 
 
@@ -35,9 +35,7 @@ class MMC56X3Calibration:
         self.sample_count = sample_count
 
 
-@mag_drivers.register("mmc56x3")
-@ts_drivers.register("mmc56x3")
-class MMC56X3(Mag, TS):
+class MMC56X3:
     """An MMC5603 or MMC5613 magnetometer connected over I2C."""
 
     _OUT_X = 0x00
@@ -55,27 +53,20 @@ class MMC56X3(Mag, TS):
 
     def __init__(
         self,
-        i2c = None,
+        i2c_bus = 2,
         addr = 0x30,
         *,
         auto_open = True,
     ):
-        """Create an MMC56X3 and optionally initialize it on an I2C bus.
-
-        When ``i2c`` is omitted, I2C0 is opened here rather than while this
-        module is imported.  This preserves the convenient default without
-        making ``import dara.device.mmc56x3`` touch board hardware.
-        """
-        if i2c is None:
-            i2c = I2C(0)
-        if not isinstance(i2c, I2C):
-            raise ValueError("i2c must be an I2C instance")
+        """Create an MMC56X3 on Linux I2C bus ``i2c_bus``."""
+        if isinstance(i2c_bus, bool) or not isinstance(i2c_bus, int):
+            raise ValueError("i2c_bus must be an integer Linux I2C bus number")
         if not isinstance(addr, int) or isinstance(addr, bool) or not 0 <= addr <= 0x7F:
             raise ValueError("addr must be a 7-bit integer")
         if not isinstance(auto_open, bool):
             raise ValueError("auto_open must be a boolean")
 
-        self._i2c = i2c
+        self._i2c = I2C(i2c_bus, auto_open=False)
         self.addr = addr
         self._active = False
         self._ctrl2 = 0
@@ -86,10 +77,9 @@ class MMC56X3(Mag, TS):
 
     @wrap_error_as(MMC56X3Error, "MMC56X3 open failed", catch=OSError)
     def open(self):
-        """Verify and initialize the sensor on its open I2C bus."""
+        """Open Linux I2C and verify and initialize the sensor."""
         self.close()
-        if not self._i2c.is_opened:
-            raise MMC56X3Error("MMC56X3 I2C bus is not open")
+        self._i2c.open()
         self._active = True
         try:
             if self._read(self._PRODUCT_ID) not in (0x00, 0x10):
@@ -97,18 +87,18 @@ class MMC56X3(Mag, TS):
             self.reset()
         except Exception:
             self._active = False
+            self._i2c.close()
             raise
 
     @wrap_error_as(MMC56X3Error, "MMC56X3 close failed", catch=OSError)
     def close(self):
-        """Disable continuous sampling without closing the caller-owned bus."""
-        if not self._active:
-            return
         try:
-            self._ctrl2 &= ~self._CONTINUOUS
-            self._write(self._CTRL2, self._ctrl2)
+            if self._active:
+                self._ctrl2 &= ~self._CONTINUOUS
+                self._write(self._CTRL2, self._ctrl2)
         finally:
             self._active = False
+            self._i2c.close()
 
     def __enter__(self):
         """Open the sensor if needed and return it for a ``with`` statement."""

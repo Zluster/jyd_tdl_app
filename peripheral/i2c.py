@@ -15,10 +15,11 @@ class I2CError(OSError):
 
 
 class I2C:
-    """An I2C bus selected by its board configuration identifier.
+    """An I2C bus selected by its Linux bus number.
 
-    ``I2C(0)`` selects the ``I2C0`` entry in :class:`PinMap`. Named entries,
-    such as ``I2C("I2C0")``, are also supported.
+    ``I2C(2)`` selects the board configuration entry ``I2C2`` and opens
+    ``/dev/i2c-2``. Named entries, such as ``I2C("I2C2")``, are also
+    supported for board-configuration tools.
     """
 
 

@@ -5,7 +5,7 @@ from struct import unpack
 
 from dara.core._error_helpers import wrap_error_as
 from dara.device.imu import (
-    IMU,
+    GyroCalibration,
     IMUAccOdr,
     IMUAccScale,
     IMUData,
@@ -13,9 +13,8 @@ from dara.device.imu import (
     IMUGyroOdr,
     IMUGyroScale,
     IMUMode,
-    imu_drivers,
 )
-from dara.device.ts import TS, TSData, TSError, ts_drivers
+from dara.device.ts import TSData, TSError
 from dara.peripheral.i2c import I2C
 
 
@@ -33,9 +32,7 @@ class LSM6DSOWTRData(TSData, IMUData):
         self.temperature = temperature
 
 
-@imu_drivers.register("lsm6dsowtr")
-@ts_drivers.register("lsm6dsowtr")
-class LSM6DSOWTR(IMU, TS):
+class LSM6DSOWTR(GyroCalibration):
     """An LSM6DSOWTR accelerometer and gyroscope connected over I2C."""
 
     _WHO_AM_I = 0x0F
@@ -71,7 +68,7 @@ class LSM6DSOWTR(IMU, TS):
 
     def __init__(
         self,
-        i2c,
+        i2c_bus,
         addr = 0x6B,
         mode = IMUMode.DUAL,
         acc_scale = IMUAccScale.ACC_SCALE_2G,
@@ -81,9 +78,9 @@ class LSM6DSOWTR(IMU, TS):
         *,
         auto_open = True,
     ):
-        """Create an LSM6DSOWTR on a caller-owned bus and optionally initialize it."""
-        if not isinstance(i2c, I2C):
-            raise ValueError("i2c must be an I2C instance")
+        """Create an LSM6DSOWTR on Linux I2C bus ``i2c_bus``."""
+        if isinstance(i2c_bus, bool) or not isinstance(i2c_bus, int):
+            raise ValueError("i2c_bus must be an integer Linux I2C bus number")
         if not isinstance(addr, int) or isinstance(addr, bool) or not 0 <= addr <= 0x7F:
             raise ValueError("addr must be a 7-bit integer")
         for name, value, enum_type in (
@@ -104,7 +101,7 @@ class LSM6DSOWTR(IMU, TS):
                 raise ValueError(f"{name} is not supported by LSM6DSOWTR")
 
         super().__init__()
-        self._i2c = i2c
+        self._i2c = I2C(i2c_bus, auto_open=False)
         self.addr = addr
         self.mode = mode
         self.acc_scale = acc_scale
@@ -117,10 +114,9 @@ class LSM6DSOWTR(IMU, TS):
 
     @wrap_error_as(LSM6DSOWTRError, "LSM6DSOWTR open failed", catch=OSError)
     def open(self):
-        """Verify and configure the sensor on its open I2C bus."""
+        """Open Linux I2C and verify and configure the sensor."""
         self.close()
-        if not self._i2c.is_opened:
-            raise LSM6DSOWTRError("LSM6DSOWTR I2C bus is not open")
+        self._i2c.open()
         self._active = True
         try:
             if self._read(self._WHO_AM_I) != self._DEVICE_ID:
@@ -144,18 +140,18 @@ class LSM6DSOWTR(IMU, TS):
             )
         except Exception:
             self._active = False
+            self._i2c.close()
             raise
 
     @wrap_error_as(LSM6DSOWTRError, "LSM6DSOWTR close failed", catch=OSError)
     def close(self):
-        """Disable sensor outputs without closing the caller-owned I2C bus."""
-        if not self._active:
-            return
         try:
-            self._write(self._CTRL1_XL, 0)
-            self._write(self._CTRL2_G, 0)
+            if self._active:
+                self._write(self._CTRL1_XL, 0)
+                self._write(self._CTRL2_G, 0)
         finally:
             self._active = False
+            self._i2c.close()
 
     def __enter__(self):
         """Open the sensor if needed and return it for a ``with`` statement."""
