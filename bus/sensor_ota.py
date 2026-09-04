@@ -13,8 +13,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from serial_port import SerialPort
-from jydbus_uart import crc16_modbus
+if __package__:
+    from .jydbus_uart import crc16_modbus
+    from .serial_port import SerialPort
+else:
+    from jydbus_uart import crc16_modbus
+    from serial_port import SerialPort
 
 SENSOR_OTA_SLOT_A = 0
 SENSOR_OTA_SLOT_B = 1

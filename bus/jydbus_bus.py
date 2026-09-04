@@ -4,10 +4,16 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from jydbus_uart import JydbusData, JydbusUart, JydbusUartCommandResult
+if __package__:
+    from .jydbus_uart import JydbusData, JydbusUart, JydbusUartCommandResult
+else:
+    from jydbus_uart import JydbusData, JydbusUart, JydbusUartCommandResult
 
 if TYPE_CHECKING:
-    from devices import SensorDevice
+    if __package__:
+        from .devices import SensorDevice
+    else:
+        from devices import SensorDevice
 
 
 class JydBus:
@@ -47,7 +53,10 @@ class JydBus:
 
     def create_device(self, sensor_type: int,
                       sensor_number: int = 1) -> SensorDevice:
-        from devices import create_device
+        if __package__:
+            from .devices import create_device
+        else:
+            from devices import create_device
 
         return create_device(self, sensor_type, sensor_number)
 

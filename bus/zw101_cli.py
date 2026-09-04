@@ -7,11 +7,20 @@ import argparse
 import errno
 import sys
 
-from jydbus_uart import JydbusUart
-from zw101_control import (ZW101_CONTROL_CLEAR_DATABASE, ZW101_CONTROL_DELETE,
-                           ZW101_CONTROL_ENROLL, ZW101_CONTROL_MATCH,
-                           ZW101_CONTROL_DEFAULT_TIMEOUT_MS, run_zw101_command,
-                           zw101_status_name)
+if __package__:
+    from .jydbus_uart import JydbusUart
+    from .zw101_control import (ZW101_CONTROL_CLEAR_DATABASE,
+                                ZW101_CONTROL_DELETE, ZW101_CONTROL_ENROLL,
+                                ZW101_CONTROL_MATCH,
+                                ZW101_CONTROL_DEFAULT_TIMEOUT_MS,
+                                run_zw101_command, zw101_status_name)
+else:
+    from jydbus_uart import JydbusUart
+    from zw101_control import (ZW101_CONTROL_CLEAR_DATABASE,
+                               ZW101_CONTROL_DELETE, ZW101_CONTROL_ENROLL,
+                               ZW101_CONTROL_MATCH,
+                               ZW101_CONTROL_DEFAULT_TIMEOUT_MS,
+                               run_zw101_command, zw101_status_name)
 
 
 def number(text: str) -> int:

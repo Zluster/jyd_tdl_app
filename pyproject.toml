@@ -18,7 +18,7 @@ authors = [
     { name = "RMaixtr", email = "aixtr@outlook.com" },
 ]
 
-license = "MIT"
+license = { text = "MIT" }
 
 [project.optional-dependencies]
 bluetooth = ["dbus-fast>=5.0.22"]

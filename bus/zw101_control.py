@@ -6,8 +6,12 @@ import errno
 import time
 from dataclasses import dataclass
 
-from jydbus_uart import (JYDBUS_FRAME_TYPE_QUERY, JYDBUS_TYPE_ZW101,
-                         JydbusUart)
+if __package__:
+    from .jydbus_uart import (JYDBUS_FRAME_TYPE_QUERY, JYDBUS_TYPE_ZW101,
+                              JydbusUart)
+else:
+    from jydbus_uart import (JYDBUS_FRAME_TYPE_QUERY, JYDBUS_TYPE_ZW101,
+                             JydbusUart)
 
 ZW101_CONTROL_DEFAULT_TIMEOUT_MS = 35000
 ZW101_CONTROL_MAX_TEMPLATE_ID = 49

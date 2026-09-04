@@ -5,8 +5,12 @@ from __future__ import annotations
 
 import argparse
 
-from devices import WS2812BPanel
-from jydbus_bus import JydBus
+if __package__:
+    from .devices import WS2812BPanel
+    from .jydbus_bus import JydBus
+else:
+    from devices import WS2812BPanel
+    from jydbus_bus import JydBus
 
 
 def parse_integer(text: str) -> int:

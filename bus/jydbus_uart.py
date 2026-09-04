@@ -12,7 +12,10 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
-from serial_port import SerialPort
+if __package__:
+    from .serial_port import SerialPort
+else:
+    from serial_port import SerialPort
 
 JYDBUS_UART_MAX_PAYLOAD = 32
 JYDBUS_UART_MAX_TX_PAYLOAD = 196

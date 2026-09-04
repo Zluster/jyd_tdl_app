@@ -7,8 +7,14 @@ import argparse
 import errno
 import sys
 
-from sensor_ota import (SENSOR_OTA_SLOT_A, SENSOR_OTA_SLOT_B, OtaDeviceError,
-                        SensorOta, SensorOtaStatus, ota_protocol_selftest)
+if __package__:
+    from .sensor_ota import (SENSOR_OTA_SLOT_A, SENSOR_OTA_SLOT_B,
+                             OtaDeviceError, SensorOta, SensorOtaStatus,
+                             ota_protocol_selftest)
+else:
+    from sensor_ota import (SENSOR_OTA_SLOT_A, SENSOR_OTA_SLOT_B,
+                            OtaDeviceError, SensorOta, SensorOtaStatus,
+                            ota_protocol_selftest)
 
 
 def number(text: str) -> int:

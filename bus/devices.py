@@ -6,24 +6,52 @@ import errno
 import threading
 from typing import TYPE_CHECKING, ClassVar
 
-from jydbus_uart import (PAJ7620_AUTO_UPLOAD_INTERVAL_MS, JYDBUS_TYPE_AHT10,
-                         JYDBUS_TYPE_BMP390, JYDBUS_TYPE_BUTTON_PB1,
-                         JYDBUS_TYPE_FAN,
-                         JYDBUS_TYPE_JOYSTICK, JYDBUS_TYPE_KNOB_SWITCH_ADC,
-                         JYDBUS_TYPE_MAX30102, JYDBUS_TYPE_MFRC522,
-                         JYDBUS_TYPE_PAJ7620U2, JYDBUS_TYPE_PHOTORESISTOR_ADC,
-                         JYDBUS_TYPE_SOIL_MOISTURE_ADC, JYDBUS_TYPE_VL53L0X,
-                         JYDBUS_TYPE_WATER_LEVEL_ADC, JYDBUS_TYPE_WS2812B,
-                         JYDBUS_TYPE_ZSPD4003, JYDBUS_TYPE_ZW101,
-                         JYDBUS_UART_COMMAND_QUERY_SENSOR, JydbusData,
-                         jydbus_name)
-from zw101_control import (ZW101_CONTROL_CLEAR_DATABASE, ZW101_CONTROL_DELETE,
-                           ZW101_CONTROL_ENROLL, ZW101_CONTROL_MATCH,
-                           ZW101_CONTROL_DEFAULT_TIMEOUT_MS, ZW101Result,
-                           run_zw101_command)
+if __package__:
+    from .jydbus_uart import (PAJ7620_AUTO_UPLOAD_INTERVAL_MS,
+                              JYDBUS_TYPE_AHT10, JYDBUS_TYPE_BMP390,
+                              JYDBUS_TYPE_BUTTON_PB1, JYDBUS_TYPE_FAN,
+                              JYDBUS_TYPE_JOYSTICK,
+                              JYDBUS_TYPE_KNOB_SWITCH_ADC,
+                              JYDBUS_TYPE_MAX30102, JYDBUS_TYPE_MFRC522,
+                              JYDBUS_TYPE_PAJ7620U2,
+                              JYDBUS_TYPE_PHOTORESISTOR_ADC,
+                              JYDBUS_TYPE_SOIL_MOISTURE_ADC,
+                              JYDBUS_TYPE_VL53L0X, JYDBUS_TYPE_WATER_LEVEL_ADC,
+                              JYDBUS_TYPE_WS2812B, JYDBUS_TYPE_ZSPD4003,
+                              JYDBUS_TYPE_ZW101,
+                              JYDBUS_UART_COMMAND_QUERY_SENSOR, JydbusData,
+                              jydbus_name)
+    from .zw101_control import (ZW101_CONTROL_CLEAR_DATABASE,
+                                ZW101_CONTROL_DELETE, ZW101_CONTROL_ENROLL,
+                                ZW101_CONTROL_MATCH,
+                                ZW101_CONTROL_DEFAULT_TIMEOUT_MS, ZW101Result,
+                                run_zw101_command)
+else:
+    from jydbus_uart import (PAJ7620_AUTO_UPLOAD_INTERVAL_MS,
+                             JYDBUS_TYPE_AHT10, JYDBUS_TYPE_BMP390,
+                             JYDBUS_TYPE_BUTTON_PB1, JYDBUS_TYPE_FAN,
+                             JYDBUS_TYPE_JOYSTICK,
+                             JYDBUS_TYPE_KNOB_SWITCH_ADC,
+                             JYDBUS_TYPE_MAX30102, JYDBUS_TYPE_MFRC522,
+                             JYDBUS_TYPE_PAJ7620U2,
+                             JYDBUS_TYPE_PHOTORESISTOR_ADC,
+                             JYDBUS_TYPE_SOIL_MOISTURE_ADC,
+                             JYDBUS_TYPE_VL53L0X, JYDBUS_TYPE_WATER_LEVEL_ADC,
+                             JYDBUS_TYPE_WS2812B, JYDBUS_TYPE_ZSPD4003,
+                             JYDBUS_TYPE_ZW101,
+                             JYDBUS_UART_COMMAND_QUERY_SENSOR, JydbusData,
+                             jydbus_name)
+    from zw101_control import (ZW101_CONTROL_CLEAR_DATABASE,
+                               ZW101_CONTROL_DELETE, ZW101_CONTROL_ENROLL,
+                               ZW101_CONTROL_MATCH,
+                               ZW101_CONTROL_DEFAULT_TIMEOUT_MS, ZW101Result,
+                               run_zw101_command)
 
 if TYPE_CHECKING:
-    from jydbus_bus import JydBus
+    if __package__:
+        from .jydbus_bus import JydBus
+    else:
+        from jydbus_bus import JydBus
 
 
 class SensorDevice:
