@@ -20,6 +20,12 @@ jyd-ui 线程执行并等结果（MicroPython 不可重入且绑定该线程）�
                           （事件对象不能跨桥，MicroPython 侧吞掉）
     bind_touch(obj)       在对象上采集按下、移动和松开的触摸事件
     read_touch()          读取一条 (phase, x, y) 触摸事件
+    LinePool(parent, n)   n 条 lv.line 的批量绘制：draw(lines/boxes/points)
+                          一次桥调用画完检测框、骨架、十字点；set_bars 画柱状
+    LabelPool(parent, n)  n 个 lv.label 的批量文本：set_all([(x, y, text)])
+                          （lv.line 的点数组是 list[dict]，过不了桥，所以控件
+                          和点数组都建在 MicroPython 侧，CPython 每帧只传一根
+                          bytes；控件随 parent 删除，池自动失效）
 
 另外代理对象的 set_src() 做了增强：可直接传 jyd.image 的 Image
 （零拷贝建 dsc；Image 像素内存必须比控件活得久），其余参数照旧转发。
@@ -44,6 +50,8 @@ set_style_bg_opa。bind 等回调在 jyd-ui 线程的 tick 栈里执行：回调
 可以继续调 lv（同线程直通不排队），与你自己线程共享的状态要自己
 留意并发。
 """
+
+import struct
 
 from . import _runtime
 from ._mpyc.proxy import Attribute as _Attribute
@@ -207,6 +215,197 @@ def read_touch():
         return None
     phase, x, y = value.split(",", 2)
     return phase, int(x), int(y)
+
+
+# ---- 批量绘制池：线段 / 标签 ----
+
+#: MP 侧实现。每个池一个 id，注册表 _jyd_pools 按 id 存控件列表，支持
+#: 同时存在多个池（一个应用框 + 骨架、另一个应用柱状条互不干扰）。
+#: parent 删除（appfw 退出应用整屏 delete）时注册项随 DELETE 事件移除，
+#: 之后再对该 id 下发只是空操作，不会碰已删除的 LVGL 对象。
+#: 线段 payload 是 int16 LE 扁平 [x1,y1,x2,y2]*n；标签 payload 每条
+#: int16 x, int16 y, uint16 长度, utf-8 文本。多余控件隐藏，空 payload 全隐
+_POOL_SRC = r"""
+import struct as _jyd_struct
+import lvgl as _jyd_lv
+
+_jyd_pools = {}
+_jyd_pool_seq = [0]
+
+def _jyd_pool_register(parent, widgets):
+    _jyd_pool_seq[0] += 1
+    pid = _jyd_pool_seq[0]
+    _jyd_pools[pid] = widgets
+    parent.add_event_cb(lambda e: _jyd_pools.pop(pid, None),
+                        _jyd_lv.EVENT.DELETE, None)
+    return pid
+
+def _jyd_lines_new(parent, n, color_hex, width):
+    lines = []
+    for i in range(n):
+        pts = [{'x': 0, 'y': 0}, {'x': 0, 'y': 0}]
+        ln = _jyd_lv.line(parent)
+        ln.set_style_line_color(_jyd_lv.color_hex(color_hex), 0)
+        ln.set_style_line_width(width, 0)
+        ln.set_points(pts, 2)
+        ln.add_flag(_jyd_lv.obj.FLAG.HIDDEN)
+        lines.append((ln, pts))
+    return _jyd_pool_register(parent, lines)
+
+def _jyd_lines_set(pid, payload):
+    lines = _jyd_pools.get(pid)
+    if lines is None:
+        return
+    n = len(payload) // 8
+    for i in range(len(lines)):
+        ln, pts = lines[i]
+        if i < n:
+            x1, y1, x2, y2 = _jyd_struct.unpack_from('<hhhh', payload, i * 8)
+            pts[0]['x'] = x1
+            pts[0]['y'] = y1
+            pts[1]['x'] = x2
+            pts[1]['y'] = y2
+            ln.set_points(pts, 2)
+            ln.remove_flag(_jyd_lv.obj.FLAG.HIDDEN)
+        else:
+            ln.add_flag(_jyd_lv.obj.FLAG.HIDDEN)
+
+def _jyd_bars_set(pid, x0, step, base, heights):
+    lines = _jyd_pools.get(pid)
+    if lines is None:
+        return
+    n = min(len(lines), len(heights) // 2)
+    for i in range(n):
+        h = _jyd_struct.unpack_from('<h', heights, i * 2)[0]
+        ln, pts = lines[i]
+        x = x0 + i * step
+        pts[0]['x'] = x
+        pts[0]['y'] = base
+        pts[1]['x'] = x
+        pts[1]['y'] = base - h
+        ln.set_points(pts, 2)
+        ln.remove_flag(_jyd_lv.obj.FLAG.HIDDEN)
+    for i in range(n, len(lines)):
+        lines[i][0].add_flag(_jyd_lv.obj.FLAG.HIDDEN)
+
+def _jyd_labels_new(parent, n, color_hex):
+    labels = []
+    for i in range(n):
+        lb = _jyd_lv.label(parent)
+        lb.set_style_text_color(_jyd_lv.color_hex(color_hex), 0)
+        lb.set_text("")
+        lb.add_flag(_jyd_lv.obj.FLAG.HIDDEN)
+        labels.append(lb)
+    return _jyd_pool_register(parent, labels)
+
+def _jyd_labels_set(pid, payload):
+    labels = _jyd_pools.get(pid)
+    if labels is None:
+        return
+    off = 0
+    i = 0
+    while i < len(labels) and off + 6 <= len(payload):
+        x, y, n = _jyd_struct.unpack_from('<hhH', payload, off)
+        off += 6
+        lb = labels[i]
+        lb.set_text(bytes(payload[off:off + n]).decode())
+        lb.set_pos(x, y)
+        lb.remove_flag(_jyd_lv.obj.FLAG.HIDDEN)
+        off += n
+        i += 1
+    for j in range(i, len(labels)):
+        labels[j].add_flag(_jyd_lv.obj.FLAG.HIDDEN)
+"""
+
+_pool_state = {"ready": False}
+
+
+def _ensure_pool_mp():
+    rt = _runtime.runtime().ensure_display()
+    if not _pool_state["ready"]:
+        rt.m.exec(_POOL_SRC)
+        _pool_state["ready"] = True
+    return rt
+
+
+def _i16(v):
+    v = int(v)
+    return -32768 if v < -32768 else (32767 if v > 32767 else v)
+
+
+class LinePool:
+    """n 条 lv.line 的批量绘制。parent 是 LVGL 父对象代理（通常是应用
+    screen），线段控件随 parent 一起删除，之后再 draw 只是空操作。
+
+        pool = lv.LinePool(scr, 80)                 # 容量 80 条线段
+        pool.draw(boxes=[(x1, y1, x2, y2)],          # 每框 4 条
+                  lines=[(x1, y1, x2, y2)],          # 骨架/多边形边
+                  points=[(x, y)], point_size=4)     # 每点 2 条（十字）
+        pool.draw()                                  # 全部隐藏
+
+    一帧一次桥调用；超出容量的部分丢弃，用不到的控件隐藏。"""
+
+    def __init__(self, parent, capacity, color=0x00E676, width=3):
+        rt = _ensure_pool_mp()
+        self._m = rt.m
+        self._n = int(capacity)
+        # parent 是代理对象，创建走 proxy_call 编组；之后全标量走 m.call 快速路径
+        self._id = rt.m.proxy_call("_jyd_lines_new", parent, self._n,
+                                   int(color), int(width))
+
+    @property
+    def capacity(self):
+        return self._n
+
+    def draw(self, lines=(), boxes=(), points=(), point_size=4):
+        # 展开顺序 框 -> 线 -> 点：容量不够时先保住框
+        coords = []
+        for x1, y1, x2, y2 in boxes:
+            coords += (x1, y1, x2, y1, x2, y1, x2, y2,
+                       x2, y2, x1, y2, x1, y2, x1, y1)
+        for x1, y1, x2, y2 in lines:
+            coords += (x1, y1, x2, y2)
+        r = point_size
+        for x, y in points:
+            coords += (x - r, y, x + r, y, x, y - r, x, y + r)
+        del coords[self._n * 4:]
+        payload = struct.pack("<%dh" % len(coords), *[_i16(v) for v in coords])
+        self._m.call("_jyd_lines_set", self._id, payload)
+
+    def set_bars(self, x0, step, base, heights):
+        """柱状图：第 i 条画 (x0+i*step, base) -> (x0+i*step, base-h[i])。
+
+        heights 是 int16 LE 的 bytes（如 np.asarray(h, dtype='<i2').tobytes()）；
+        条数超过容量的丢弃，不足的隐藏。"""
+        self._m.call("_jyd_bars_set", self._id, int(x0), int(step), int(base),
+                     bytes(heights))
+
+
+class LabelPool:
+    """n 个 lv.label 的批量文本（检测框标签、分类列表这类小文本）。
+
+        labels = lv.LabelPool(scr, 6)
+        labels.set_all([(x, y, "person 0.93"), ...])   # 一次桥调用
+        labels.set_all([])                             # 全部隐藏
+
+    parent 删除后再 set_all 只是空操作。"""
+
+    def __init__(self, parent, capacity, color=0xFFFFFF):
+        rt = _ensure_pool_mp()
+        self._m = rt.m
+        self._n = int(capacity)
+        self._id = rt.m.proxy_call("_jyd_labels_new", parent, self._n, int(color))
+
+    @property
+    def capacity(self):
+        return self._n
+
+    def set_all(self, items):
+        parts = []
+        for x, y, text in list(items)[:self._n]:
+            data = str(text).encode("utf-8")
+            parts.append(struct.pack("<hhH", _i16(x), _i16(y), len(data)) + data)
+        self._m.call("_jyd_labels_set", self._id, b"".join(parts))
 
 
 def _proxy_set_src(self, src):
