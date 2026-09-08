@@ -49,6 +49,7 @@ struct SharedDeviceState {
   unsigned int users = 0;
   unsigned int runtimes = 0;
   bool retain_until_process_exit = false;
+  std::vector<void *> retained_runtimes;
 };
 
 inline SharedDeviceState &sharedDeviceState() {
@@ -123,39 +124,21 @@ inline void *createRuntime(bm_handle_t handle) {
 inline void destroyRuntime(void *runtime) noexcept {
   if (!runtime) return;
   SharedDeviceState &state = sharedDeviceState();
-  bool final_runtime = false;
   {
     std::lock_guard<std::mutex> lock(state.mutex);
     if (state.runtimes > 0) --state.runtimes;
-    final_runtime = state.runtimes == 0;
-    if (std::getenv("TDL_BENCH_PROFILE"))
-      std::fprintf(stderr,
-                   "[bmrt] destroyRuntime runtime=%p final=%d remaining=%u\n",
-                   runtime, final_runtime ? 1 : 0, state.runtimes);
-  }
-
-  // On CV184X, destruction of the final runtime unloads an a53lite kernel
-  // module. That library uses a noexcept destructor and terminates the host
-  // process when the small core rejects the unload, so an outer catch cannot
-  // recover. Keep the final runtime and its device handle until process exit.
-  // This is bounded to one application lifetime, not one inference frame.
-  if (final_runtime) {
-    std::lock_guard<std::mutex> lock(state.mutex);
     state.retain_until_process_exit = true;
+    state.retained_runtimes.push_back(runtime);
     if (std::getenv("TDL_BENCH_PROFILE"))
       std::fprintf(stderr,
-                   "[bmrt] keeping final runtime until process exit\n");
-    return;
+                   "[bmrt] retaining runtime=%p until process exit remaining=%u\n",
+                   runtime, state.runtimes);
   }
 
-  try {
-    bmrt_destroy(runtime);
-  } catch (const std::exception &exception) {
-    std::fprintf(stderr, "bmrt_destroy ignored during shutdown: %s\n",
-                 exception.what());
-  } catch (...) {
-    std::fprintf(stderr, "bmrt_destroy ignored an unknown shutdown exception\n");
-  }
+  // CV184X a53lite can reject unloading any member of a multi-runtime model
+  // bundle, not merely the final runtime. Its destructor terminates the host
+  // process, so retain all runtimes until process exit. Applications should
+  // load each model once and reuse it rather than repeatedly reloading it.
 }
 
 inline std::string toUpper(std::string value) {

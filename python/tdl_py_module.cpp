@@ -61,6 +61,20 @@ void registerAudioBindings(nb::module_ &m);
 
 namespace {
 
+#ifdef TDL_PY_WITH_NPU
+void registerAudioAlgorithmAliases(nb::module_ &m) {
+  try {
+    const nb::module_ audio = nb::module_::import_("tdl_audio");
+    for (const char *name : {"SpeakerRecognizer", "StreamingAsr", "KeywordSpotter"}) {
+      m.attr(name) = audio.attr(name);
+    }
+  } catch (const nb::python_error &) {
+    // Keep tdl_py usable for vision-only deployments without tdl_audio.
+    PyErr_Clear();
+  }
+}
+#endif
+
 [[noreturn]] void raise(const std::string &message) {
   throw std::runtime_error(message);
 }
@@ -1477,6 +1491,9 @@ NB_MODULE(tdl_py, m) {
       });
 
   registerAudioBindings(m);
+#ifdef TDL_PY_WITH_NPU
+  registerAudioAlgorithmAliases(m);
+#endif
 
   // --- touch input -----------------------------------------------------------
   nb::class_<tdl_app::TouchEvent>(m, "TouchEvent",

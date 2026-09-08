@@ -347,7 +347,9 @@ if(TDL_APP_BUILD_PYTHON)
     CXX_STANDARD_REQUIRED ON
     CXX_VISIBILITY_PRESET hidden
   )
-  target_compile_definitions(tdl_py PRIVATE NB_COMPACT_ASSERTIONS)
+  target_compile_definitions(tdl_py PRIVATE
+    NB_COMPACT_ASSERTIONS
+    TDL_PY_AUDIO_BASE_ONLY)
   if(TDL_APP_PY_WITH_NPU)
     target_compile_definitions(tdl_py PRIVATE TDL_PY_WITH_NPU)
     target_include_directories(tdl_py PRIVATE "${CMAKE_CURRENT_LIST_DIR}/src")
@@ -364,10 +366,7 @@ if(TDL_APP_BUILD_PYTHON)
     "${TDL_CV184X_INCLUDE_DIRS}"
   )
   target_link_libraries(tdl_py PRIVATE
-    tdl_app_sdk
-    tdl_app_speaker_core
-    tdl_app_npu_asr_core
-    tdl_app_npu_direct_kws_core)
+    tdl_app_sdk)
   target_link_options(tdl_py PRIVATE -Wl,--gc-sections -Wl,--as-needed)
 
   # The audio-NPU bindings stay separate from tdl_py so voice applications do

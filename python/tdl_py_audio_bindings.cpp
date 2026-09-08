@@ -14,7 +14,7 @@
 
 #include "tdl_app/audio.hpp"
 
-#ifdef TDL_PY_WITH_NPU
+#if defined(TDL_PY_WITH_NPU) && !defined(TDL_PY_AUDIO_BASE_ONLY)
 #include "tdl_app/direct_keyword_spotter.hpp"
 #include "tdl_app/npu_asr_recognizer.hpp"
 #include "tdl_app/speaker_recognizer.hpp"
@@ -24,6 +24,7 @@ namespace nb = nanobind;
 
 namespace {
 
+#if defined(TDL_PY_WITH_NPU) && !defined(TDL_PY_AUDIO_BASE_ONLY)
 bool pcm16FromBytes(const nb::bytes &pcm, std::vector<std::int16_t> *samples,
                     std::string *error) {
   if (!samples) {
@@ -97,8 +98,9 @@ class RealtimeMicrophone {
   }
 
  private:
-  tdl_app::Audio audio_;
+ tdl_app::Audio audio_;
 };
+#endif
 
 // High-level AI/AO facade for Python. Audio operations return false and
 // preserve the hardware error in last_error so an application can decide how
@@ -284,7 +286,7 @@ class PyAudio {
 };
 #endif
 
-#ifdef TDL_PY_WITH_NPU
+#if defined(TDL_PY_WITH_NPU) && !defined(TDL_PY_AUDIO_BASE_ONLY)
 class PySpeakerRecognizer {
  public:
   bool load(const std::string &model_spec) {
@@ -842,7 +844,7 @@ void registerAudioBindings(nb::module_ &m) {
       .def_prop_ro("last_error", &PyAudio::lastError);
 #endif
 
-#ifdef TDL_PY_WITH_NPU
+#if defined(TDL_PY_WITH_NPU) && !defined(TDL_PY_AUDIO_BASE_ONLY)
   // --- Speaker recognition -------------------------------------------------
   nb::class_<PySpeakerRecognizer>(m, "SpeakerRecognizer",
       "CAMPPlus speaker enrollment and recognition over 16 kHz mono PCM.")
