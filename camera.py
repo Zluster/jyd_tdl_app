@@ -3,10 +3,10 @@
 通道是板级固定配置（dual-OS 小核负责采集），按预设工厂取用：
 
     前摄采集 grp0 / 显示 grp1：
-        rgb()       grp0/ch0  720x480   RGB888_PLANAR（Python 图像处理）
+        rgb()       grp0/ch0  720x480   BGR888_PLANAR（Python 图像处理）
         ai()        grp0/ch1  640x640   RGB888_PLANAR（NN 推理输入，letterbox 黑边）
         live()      grp0/ch2  720x480   NV12（与屏幕预览同源，CV 识别常用）
-        sub_rgb()   grp0/ch3  640x640   NV21
+        sub_rgb()   grp0/ch3  320x240   BGR888_PLANAR
         screen()    grp1/ch0  720x480   NV12（显示处理通道，送 VO 的画面）
 
     后摄采集 grp3（规格为布局名义值，实际以小核配置为准）：
@@ -67,7 +67,7 @@ class Camera:
         """取一帧并按帧格式转成 Image，到下一次同通道
         read_image()/read() 前有效：
 
-        - RGB888 / RGB888_PLANAR：剥行填充、交错成紧凑 RGB Image
+        - RGB888 / RGB888_PLANAR / BGR888_PLANAR：剥行填充、交错成紧凑 RGB Image
           （拷贝约 1 MB，缓冲跨帧复用，帧拷贝后立即归还 VPSS）。
           内存按 _maix_image 的 "RGB" 模式约定排成 B,G,R 字节序，
           to_lv / save / 颜色算法共用这一约定
@@ -103,11 +103,13 @@ class Camera:
                     src = y * stride
                     buf[y * w:y * w + w] = mv[src:src + w]
                 mode = "L"
-            elif fmt in (tdl_py.FORMAT_RGB888, tdl_py.FORMAT_RGB888_PLANAR):
+            elif fmt in (tdl_py.FORMAT_RGB888, tdl_py.FORMAT_RGB888_PLANAR,
+                         tdl_py.FORMAT_BGR888_PLANAR):
                 buf = (held if isinstance(held, bytearray)
                        and len(held) == n * 3 else bytearray(n * 3))
                 mv = frame.data
-                if fmt == tdl_py.FORMAT_RGB888_PLANAR:
+                if fmt in (tdl_py.FORMAT_RGB888_PLANAR,
+                           tdl_py.FORMAT_BGR888_PLANAR):
                     tight = bytearray(n)       # 单 plane 去填充的临时缓冲
                     for pi in range(3):
                         base = frame.plane_offsets[pi]
@@ -118,10 +120,12 @@ class Camera:
                             for y in range(h):
                                 src = base + y * stride
                                 tight[y * w:y * w + w] = mv[src:src + w]
-                        # plane 顺序是 R,G,B，而 _maix_image 的 "RGB" 模式
-                        # 内存按 OpenCV 约定存 B,G,R：倒序交错（R -> 字节 2），
-                        # 否则 to_lv/save/颜色算法全都红蓝互换
-                        buf[2 - pi::3] = tight
+                        if fmt == tdl_py.FORMAT_RGB888_PLANAR:
+                            # RGB planes -> OpenCV-compatible B,G,R bytes.
+                            buf[2 - pi::3] = tight
+                        else:
+                            # BGR planes are already in the Image byte order.
+                            buf[pi::3] = tight
                 else:                          # FORMAT_RGB888：packed R,G,B
                     row = w * 3
                     stride = frame.strides[0]
@@ -137,7 +141,7 @@ class Camera:
             else:
                 raise RuntimeError(
                     "grp%d/ch%d 帧格式 %d 不支持 read_image（支持 RGB888/"
-                    "RGB888_PLANAR/NV12/NV21）"
+                    "RGB888_PLANAR/BGR888_PLANAR/NV12/NV21）"
                     % (self._group, self._channel, fmt))
         finally:
             if not keep_frame:
@@ -253,7 +257,7 @@ def to_screen(x, y, frame_width=640, frame_height=640):
 # ---- 前摄 grp0 / 显示 grp1 ----
 
 def rgb(timeout_ms=1000) -> Camera:
-    """grp0/ch0，720x480 RGB888_PLANAR。"""
+    """grp0/ch0，720x480 BGR888_PLANAR。"""
     return _get(tdl_py.VpssCamera.rgb, timeout_ms)
 
 def ai(timeout_ms=1000) -> Camera:
@@ -265,7 +269,7 @@ def live(timeout_ms=1000) -> Camera:
     return _get(tdl_py.VpssCamera.live, timeout_ms)
 
 def sub_rgb(timeout_ms=1000) -> Camera:
-    """grp0/ch3，320x240 NV21。"""
+    """grp0/ch3，320x240 BGR888_PLANAR。"""
     return _get(tdl_py.VpssCamera.sub_rgb, timeout_ms)
 
 def screen(timeout_ms=1000) -> Camera:
@@ -276,7 +280,7 @@ def screen(timeout_ms=1000) -> Camera:
 # ---- 后摄 grp3（规格为名义值，实际以小核配置为准） ----
 
 def rear_rgb(timeout_ms=1000) -> Camera:
-    """grp3/ch0，720x480 RGB888_PLANAR。"""
+    """grp3/ch0，720x480 BGR888_PLANAR。"""
     return _get(tdl_py.VpssCamera.rear_rgb, timeout_ms)
 
 def rear_ai(timeout_ms=1000) -> Camera:
@@ -288,5 +292,5 @@ def rear_live(timeout_ms=1000) -> Camera:
     return _get(tdl_py.VpssCamera.rear_live, timeout_ms)
 
 def rear_sub_rgb(timeout_ms=1000) -> Camera:
-    """grp3/ch3，320x240 NV21。"""
+    """grp3/ch3，320x240 BGR888_PLANAR。"""
     return _get(tdl_py.VpssCamera.rear_sub_rgb, timeout_ms)
