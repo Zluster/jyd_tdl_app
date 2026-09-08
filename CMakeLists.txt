@@ -398,6 +398,7 @@ if(TDL_APP_BUILD_PYTHON)
     "${CMAKE_CURRENT_LIST_DIR}/src"
   )
   target_link_libraries(tdl_audio PRIVATE
+    tdl_app_sdk
     tdl_app_speaker_core
     tdl_app_npu_asr_core
     tdl_app_npu_direct_kws_core)
