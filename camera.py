@@ -45,7 +45,7 @@ class Camera:
         self._cam = raw
         self._key = key
         self._group, self._channel = key
-        self._held = None      # read_image 的像素缓冲（当前 Image 借用中）
+        self._held = None      # read_image 的像素缓冲（当前 Image 借用中，跨帧复用）
 
     @property
     def group(self):
@@ -64,88 +64,39 @@ class Camera:
         return self._cam.read()
 
     def read_image(self):
-        """取一帧并按帧格式转成 Image，到下一次同通道
-        read_image()/read() 前有效：
+        """取一帧并转成紧凑 Image，到下一次同通道 read_image()/read()
+        前有效：
 
-        - RGB888 / RGB888_PLANAR / BGR888_PLANAR：剥行填充、交错成紧凑 RGB Image
-          （拷贝约 1 MB，缓冲跨帧复用，帧拷贝后立即归还 VPSS）。
-          内存按 _maix_image 的 "RGB" 模式约定排成 B,G,R 字节序，
-          to_lv / save / 颜色算法共用这一约定
-        - NV12 / NV21：Y 平面灰度 Image。stride == width 时零拷贝
-          （借帧内存，帧由 Camera 持有到下一次读），有行填充时剥成
-          紧凑缓冲（拷贝约 0.35 MB）
-        - 其他格式抛 RuntimeError"""
-        held, self._held = self._held, None    # 旧 Image 按约定此刻失效
-        if held is not None and not isinstance(held, bytearray):
-            try:
-                held.release()                 # 上一次的零拷贝帧，归还 VPSS
-            except Exception:
-                pass
-            held = None
+        - RGB888 / BGR888 / RGB888_PLANAR / BGR888_PLANAR：出 "RGB" 模式
+          Image，内存按 _maix_image 约定排成 B,G,R 字节序（to_lv / save /
+          颜色算法共用这一约定），约 1 MB
+        - NV12 / NV21：出 Y 平面灰度 Image，约 0.35 MB
+        - 其他格式抛 RuntimeError
+
+        转换（剥 stride 填充、planar 交错、对调 R/B）由 tdl_py 的
+        Frame.copy_to 在**持 GIL 的单次原生调用**里完成，帧随即归还 VPSS。
+        像素缓冲由本对象常驻复用、跨帧地址不变，它很可能正是 LVGL 控件
+        的零拷贝像素源，而 jyd-ui 线程的渲染同样持 GIL——单次原生调用
+        才是与渲染互斥的依据，绝不能退回 Python 层原地多步改写（渲染
+        线程会看到只换了一个颜色分量的半成品，动起来就是彩色重影）。"""
         from . import image
-        frame = self._cam.read()
-        keep_frame = False
-        try:
-            w, h = frame.width, frame.height
-            n = w * h
-            fmt = frame.format
+        with self._cam.read() as frame:        # 出块即归还 VPSS，不再持有帧
+            w, h, fmt = frame.width, frame.height, frame.format
             if fmt in (tdl_py.FORMAT_NV12, tdl_py.FORMAT_NV21):
-                stride = frame.strides[0]
-                if stride == w:                # 零拷贝：Y 平面直接建灰度视图
-                    img = image.new(size=(w, h), mode="L", addr=frame.addr)
-                    self._held = frame
-                    keep_frame = True
-                    return img
-                buf = (held if isinstance(held, bytearray) and len(held) == n
-                       else bytearray(n))
-                mv = frame.data
-                for y in range(h):             # 逐行剥掉行尾对齐填充
-                    src = y * stride
-                    buf[y * w:y * w + w] = mv[src:src + w]
-                mode = "L"
-            elif fmt in (tdl_py.FORMAT_RGB888, tdl_py.FORMAT_RGB888_PLANAR,
+                mode, layout, bpp = "L", "gray", 1
+            elif fmt in (tdl_py.FORMAT_RGB888, tdl_py.FORMAT_BGR888,
+                         tdl_py.FORMAT_RGB888_PLANAR,
                          tdl_py.FORMAT_BGR888_PLANAR):
-                buf = (held if isinstance(held, bytearray)
-                       and len(held) == n * 3 else bytearray(n * 3))
-                mv = frame.data
-                if fmt in (tdl_py.FORMAT_RGB888_PLANAR,
-                           tdl_py.FORMAT_BGR888_PLANAR):
-                    tight = bytearray(n)       # 单 plane 去填充的临时缓冲
-                    for pi in range(3):
-                        base = frame.plane_offsets[pi]
-                        stride = frame.strides[pi]
-                        if stride == w:
-                            tight[:] = mv[base:base + n]
-                        else:                  # 逐行剥掉行尾对齐填充
-                            for y in range(h):
-                                src = base + y * stride
-                                tight[y * w:y * w + w] = mv[src:src + w]
-                        if fmt == tdl_py.FORMAT_RGB888_PLANAR:
-                            # RGB planes -> OpenCV-compatible B,G,R bytes.
-                            buf[2 - pi::3] = tight
-                        else:
-                            # BGR planes are already in the Image byte order.
-                            buf[pi::3] = tight
-                else:                          # FORMAT_RGB888：packed R,G,B
-                    row = w * 3
-                    stride = frame.strides[0]
-                    if stride == row:
-                        buf[:] = mv[:row * h]
-                    else:
-                        for y in range(h):
-                            src = y * stride
-                            buf[y * row:y * row + row] = mv[src:src + row]
-                    # 同上换成 B,G,R 字节序（原地对调 R/B 分量）
-                    buf[0::3], buf[2::3] = buf[2::3], buf[0::3]
-                mode = "RGB"
+                mode, layout, bpp = "RGB", "bgr", 3
             else:
                 raise RuntimeError(
                     "grp%d/ch%d 帧格式 %d 不支持 read_image（支持 RGB888/"
-                    "RGB888_PLANAR/BGR888_PLANAR/NV12/NV21）"
+                    "BGR888/RGB888_PLANAR/BGR888_PLANAR/NV12/NV21）"
                     % (self._group, self._channel, fmt))
-        finally:
-            if not keep_frame:
-                frame.release()                # 拷贝路径：帧立即归还 VPSS
+            buf = self._held
+            if buf is None or len(buf) != w * h * bpp:
+                buf = bytearray(w * h * bpp)
+            frame.copy_to(buf, layout)
         addr = ctypes.addressof((ctypes.c_ubyte * len(buf)).from_buffer(buf))
         img = image.new(size=(w, h), mode=mode, addr=addr)
         self._held = buf
@@ -160,14 +111,7 @@ class Camera:
             cam.close()
 
     def _drop_held(self):
-        if self._held is not None:
-            held, self._held = self._held, None
-            release = getattr(held, "release", None)   # Frame 需归还，缓冲交 GC
-            if release is not None:
-                try:
-                    release()
-                except Exception:
-                    pass
+        self._held = None      # 旧 Image 的像素缓冲交 GC（按约定此刻失效）
 
     def __repr__(self):
         state = "closed" if self._cam is None else "open"
