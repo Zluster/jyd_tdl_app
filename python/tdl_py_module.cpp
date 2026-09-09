@@ -1,7 +1,7 @@
 // Python bindings (nanobind) for the CV184X dual-OS big-core media path:
 //   - VpssCamera: attach to a small-core VPSS channel and fetch frames with
-//     zero-copy access (CVI_SYS_Mmap of the VB buffer, exposed as memoryview
-//     plus raw addr/size for ctypes users).
+//     zero-copy access (CVI_SYS_MmapCache + IonInvalidateCache of the VB
+//     buffer, exposed as memoryview plus raw addr/size for ctypes users).
 //   - Osd: RGN overlay region attached to a VPSS channel; the double-buffered
 //     canvas is exposed as a writable memoryview plus raw addr/size.
 //   - Detector/Classifier/KeypointDetector/InstanceSegmenter/PlateRecognizer:
@@ -22,6 +22,10 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+
+#ifdef __ARM_NEON
+#include <arm_neon.h>
+#endif
 
 #include "cvi_comm_video.h"
 #include "cvi_region.h"
@@ -121,11 +125,65 @@ nb::object memoryviewFrom(void *data, std::size_t size, bool writable) {
   return nb::steal(view);
 }
 
+// --- pixel row helpers for PyFrame::copyTo --------------------------------
+//
+void copyRows(unsigned char *dst, const unsigned char *src,
+              std::size_t row_bytes, std::size_t src_stride, std::size_t rows) {
+  if (src_stride == row_bytes) {
+    std::memcpy(dst, src, row_bytes * rows);
+    return;
+  }
+  for (std::size_t y = 0; y < rows; ++y) {
+    std::memcpy(dst + y * row_bytes, src + y * src_stride, row_bytes);
+  }
+}
+
+// Interleave one row of three 8-bit planes into packed 3-byte pixels laid
+// out as (c0, c1, c2) per pixel.
+void interleaveRow(unsigned char *dst, const unsigned char *c0,
+                   const unsigned char *c1, const unsigned char *c2,
+                   std::size_t n) {
+  std::size_t x = 0;
+#ifdef __ARM_NEON
+  for (; x + 16 <= n; x += 16, dst += 48) {
+    uint8x16x3_t px;
+    px.val[0] = vld1q_u8(c0 + x);
+    px.val[1] = vld1q_u8(c1 + x);
+    px.val[2] = vld1q_u8(c2 + x);
+    vst3q_u8(dst, px);
+  }
+#endif
+  for (; x < n; ++x, dst += 3) {
+    dst[0] = c0[x];
+    dst[1] = c1[x];
+    dst[2] = c2[x];
+  }
+}
+
+void swapRow(unsigned char *dst, const unsigned char *src, std::size_t n) {
+  std::size_t x = 0;
+#ifdef __ARM_NEON
+  for (; x + 16 <= n; x += 16, src += 48, dst += 48) {
+    uint8x16x3_t px = vld3q_u8(src);
+    const uint8x16_t first = px.val[0];
+    px.val[0] = px.val[2];
+    px.val[2] = first;
+    vst3q_u8(dst, px);
+  }
+#endif
+  for (; x < n; ++x, src += 3, dst += 3) {
+    dst[0] = src[2];
+    dst[1] = src[1];
+    dst[2] = src[0];
+  }
+}
+
 class PyVpssCamera;
 
-// A single captured frame: metadata copied out of VIDEO_FRAME_INFO_S plus the
-// CVI_SYS_Mmap'ed view over all planes (planes are contiguous in the VB block,
-// as relied upon by camera_demo_support::frameToBgrMat).
+// A single captured frame: metadata copied out of VIDEO_FRAME_INFO_S plus a
+// cached (CVI_SYS_MmapCache, invalidated on read) view over all planes (planes
+// are contiguous in the VB block, as relied upon by
+// camera_demo_support::frameToBgrMat).
 class PyFrame {
  public:
   PyFrame(PyVpssCamera *camera, const VIDEO_FRAME_INFO_S &info,
@@ -198,6 +256,90 @@ class PyFrame {
     }
     return memoryviewFrom(mapped_ + plane_offsets_[index],
                           plane_sizes_[index], false);
+  }
+
+  void copyTo(nb::object dst, const std::string &layout) {
+    requireValid();
+    std::size_t bpp = 0;
+    if (layout == "bgr") {
+      bpp = 3;
+    } else if (layout == "gray") {
+      bpp = 1;
+    } else {
+      raise("copy_to: layout must be \"bgr\" or \"gray\", got \"" + layout +
+            "\"");
+    }
+    Py_buffer view;
+    if (PyObject_GetBuffer(dst.ptr(), &view, PyBUF_WRITABLE) != 0) {
+      throw nb::python_error();
+    }
+    struct Release {
+      Py_buffer *view;
+      ~Release() { PyBuffer_Release(view); }
+    } release_guard{&view};
+
+    const std::size_t w = static_cast<std::size_t>(width_);
+    const std::size_t h = static_cast<std::size_t>(height_);
+    const std::size_t need = w * h * bpp;
+    if (static_cast<std::size_t>(view.len) != need) {
+      raise("copy_to: buffer holds " + std::to_string(view.len) +
+            " bytes, frame needs " + std::to_string(need) + " (" +
+            std::to_string(w) + "x" + std::to_string(h) + "x" +
+            std::to_string(bpp) + ")");
+    }
+    unsigned char *out = static_cast<unsigned char *>(view.buf);
+
+    switch (format_) {
+      case tdl_app::PixelFormat::NV12:
+      case tdl_app::PixelFormat::NV21: {
+        if (bpp != 1) {
+          raise("copy_to: NV12/NV21 frames only support layout \"gray\"");
+        }
+        copyRows(out, mapped_ + plane_offsets_[0], w, strides_[0], h);
+        break;
+      }
+      case tdl_app::PixelFormat::RGB888:
+      case tdl_app::PixelFormat::BGR888: {
+        if (bpp != 3) {
+          raise("copy_to: RGB/BGR frames only support layout \"bgr\"");
+        }
+        const unsigned char *src = mapped_ + plane_offsets_[0];
+        if (format_ == tdl_app::PixelFormat::BGR888) {
+          copyRows(out, src, w * 3, strides_[0], h);
+          break;
+        }
+        for (std::size_t y = 0; y < h; ++y) {
+          swapRow(out + y * w * 3, src + y * strides_[0], w);
+        }
+        break;
+      }
+      case tdl_app::PixelFormat::RGB888_PLANAR:
+      case tdl_app::PixelFormat::BGR888_PLANAR: {
+        if (bpp != 3) {
+          raise("copy_to: RGB/BGR frames only support layout \"bgr\"");
+        }
+        if (plane_count_ < 3) {
+          raise("copy_to: planar frame reports only " +
+                std::to_string(plane_count_) + " plane(s)");
+        }
+        // Destination is B,G,R: RGB planes are fed to the interleaver
+        // reversed, BGR planes in memory order. One pass over each row.
+        const bool rgb_order = format_ == tdl_app::PixelFormat::RGB888_PLANAR;
+        const int ib = rgb_order ? 2 : 0;   // plane holding B
+        const int ir = rgb_order ? 0 : 2;   // plane holding R
+        const unsigned char *pb = mapped_ + plane_offsets_[ib];
+        const unsigned char *pg = mapped_ + plane_offsets_[1];
+        const unsigned char *pr = mapped_ + plane_offsets_[ir];
+        for (std::size_t y = 0; y < h; ++y) {
+          interleaveRow(out + y * w * 3, pb + y * strides_[ib],
+                        pg + y * strides_[1], pr + y * strides_[ir], w);
+        }
+        break;
+      }
+      default:
+        raise("copy_to: unsupported pixel format " + std::to_string(format_) +
+              " (RGB888/BGR888/RGB888_PLANAR/BGR888_PLANAR/NV12/NV21)");
+    }
   }
 
   int width_ = 0;
@@ -282,10 +424,10 @@ class PyVpssCamera {
     }
 
     auto *mapped = static_cast<unsigned char *>(
-        CVI_SYS_Mmap(vf.u64PhyAddr[0], static_cast<CVI_U32>(map_size)));
+        CVI_SYS_MmapCache(vf.u64PhyAddr[0], static_cast<CVI_U32>(map_size)));
     if (!mapped) {
       camera_.releaseFrame();
-      raise("CVI_SYS_Mmap failed");
+      raise("CVI_SYS_MmapCache failed");
     }
     CVI_SYS_IonInvalidateCache(vf.u64PhyAddr[0], mapped,
                                static_cast<CVI_U32>(map_size));
@@ -1225,6 +1367,13 @@ NB_MODULE(tdl_py, m) {
                    "Zero-copy read-only memoryview over all planes")
       .def("plane", &PyFrame::plane, nb::arg("index"),
            "Zero-copy read-only memoryview of one plane")
+      .def("copy_to", &PyFrame::copyTo, nb::arg("dst"),
+           nb::arg("layout") = "bgr",
+           "Copy the frame into a writable contiguous buffer of exactly "
+           "width*height*bpp bytes, stripping row padding: layout \"bgr\" "
+           "(3 bytes/pixel B,G,R; packed or planar RGB/BGR frames) or "
+           "\"gray\" (1 byte/pixel luma; NV12/NV21). Runs with the GIL held "
+           "so the update is atomic for a renderer on another thread.")
       .def_prop_ro("strides",
                    [](const PyFrame &f) {
                      return nb::make_tuple(f.strides_[0], f.strides_[1],
