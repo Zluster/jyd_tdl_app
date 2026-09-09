@@ -583,7 +583,7 @@ class PyStreamingAsr {
       last_error_ = "ASR model is not loaded";
       return false;
     }
-    recognizer_.reset();
+    recognizer_.resetStream();
     std::string error;
     bool ok = false;
     {
@@ -643,7 +643,7 @@ class PyStreamingAsr {
   bool listening() const { return microphone_.opened(); }
 
   void reset() {
-    recognizer_.reset();
+    recognizer_.resetStream();
     last_error_.clear();
   }
 

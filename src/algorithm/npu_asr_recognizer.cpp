@@ -306,6 +306,29 @@ class NpuStreamingAsr::Impl {
   bool initialized() const { return fbank_ != nullptr; }
   const std::string &text() const { return text_; }
 
+  void resetStream() {
+    if (!fbank_) return;
+    knf::FbankOptions options;
+    options.frame_opts.samp_freq = kSampleRate;
+    options.frame_opts.dither = 0.0f;
+    options.frame_opts.snip_edges = false;
+    options.mel_opts.num_bins = kFbankBins;
+    options.mel_opts.high_freq = -400.0f;
+    fbank_.reset(new knf::OnlineFbank(options));
+    for (Cache &cache : caches_) {
+      std::fill(cache.floats.begin(), cache.floats.end(), 0.0f);
+      std::fill(cache.integers.begin(), cache.integers.end(), 0);
+    }
+    std::fill(encoder_input_.begin(), encoder_input_.end(), 0.0f);
+    std::fill(decoder_input_.begin(), decoder_input_.end(), 0);
+    std::fill(decoder_feature_.begin(), decoder_feature_.end(), 0.0f);
+    emitted_tokens_.clear();
+    processed_frames_ = 0;
+    decoder_ready_ = false;
+    finished_ = false;
+    text_.clear();
+  }
+
   void reset() {
     fbank_.reset();
     encoder_.reset();
@@ -464,6 +487,7 @@ const std::string &NpuStreamingAsr::text() const {
   static const std::string empty;
   return impl_ ? impl_->text() : empty;
 }
+void NpuStreamingAsr::resetStream() { if (impl_) impl_->resetStream(); }
 void NpuStreamingAsr::reset() { if (impl_) impl_->reset(); }
 
 }  // namespace tdl_app

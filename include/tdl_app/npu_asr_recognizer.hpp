@@ -35,6 +35,8 @@ class NpuStreamingAsr {
 
   bool initialized() const;
   const std::string &text() const;
+  // Start a new utterance while retaining the loaded NPU model bundle.
+  void resetStream();
   void reset();
 
  private:
