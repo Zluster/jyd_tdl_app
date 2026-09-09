@@ -48,6 +48,8 @@ struct SharedDeviceState {
   bm_handle_t handle = nullptr;
   unsigned int users = 0;
   unsigned int runtimes = 0;
+  bool retain_until_process_exit = false;
+  std::vector<void *> retained_runtimes;
 };
 
 inline SharedDeviceState &sharedDeviceState() {
@@ -84,6 +86,12 @@ inline void releaseDevice(bm_handle_t *handle) noexcept {
   if (std::getenv("TDL_BENCH_PROFILE"))
     std::fprintf(stderr, "[bmrt] releaseDevice users=%u\n", state.users);
   if (state.users != 0 || !state.handle) return;
+  if (state.retain_until_process_exit) {
+    if (std::getenv("TDL_BENCH_PROFILE"))
+      std::fprintf(stderr,
+                   "[bmrt] keeping final device handle until process exit\n");
+    return;
+  }
   if (std::getenv("TDL_BENCH_PROFILE"))
     std::fprintf(stderr, "[bmrt] bm_dev_free begin handle=%p\n",
                  static_cast<void *>(state.handle));
@@ -116,32 +124,21 @@ inline void *createRuntime(bm_handle_t handle) {
 inline void destroyRuntime(void *runtime) noexcept {
   if (!runtime) return;
   SharedDeviceState &state = sharedDeviceState();
-  bool final_runtime = false;
   {
     std::lock_guard<std::mutex> lock(state.mutex);
     if (state.runtimes > 0) --state.runtimes;
-    final_runtime = state.runtimes == 0;
+    state.retain_until_process_exit = true;
+    state.retained_runtimes.push_back(runtime);
     if (std::getenv("TDL_BENCH_PROFILE"))
       std::fprintf(stderr,
-                   "[bmrt] destroyRuntime runtime=%p final=%d remaining=%u\n",
-                   runtime, final_runtime ? 1 : 0, state.runtimes);
+                   "[bmrt] retaining runtime=%p until process exit remaining=%u\n",
+                   runtime, state.runtimes);
   }
 
-  try {
-    // CV184X a53lite can throw while unloading the final model's coefficient
-    // module. bm_dev_free immediately after this resets the final device
-    // handle, so the final runtime skips only that redundant coeff release.
-    if (final_runtime) {
-      bmrt_destroy_without_coeff(runtime);
-    } else {
-      bmrt_destroy(runtime);
-    }
-  } catch (const std::exception &exception) {
-    std::fprintf(stderr, "bmrt_destroy ignored during shutdown: %s\n",
-                 exception.what());
-  } catch (...) {
-    std::fprintf(stderr, "bmrt_destroy ignored an unknown shutdown exception\n");
-  }
+  // CV184X a53lite can reject unloading any member of a multi-runtime model
+  // bundle, not merely the final runtime. Its destructor terminates the host
+  // process, so retain all runtimes until process exit. Applications should
+  // load each model once and reuse it rather than repeatedly reloading it.
 }
 
 inline std::string toUpper(std::string value) {

@@ -703,7 +703,7 @@ class PyKeywordSpotter {
       last_error_ = "KWS model is not loaded";
       return false;
     }
-    spotter_.reset();
+    spotter_.resetStream();
     std::string error;
     bool ok = false;
     {
@@ -759,7 +759,7 @@ class PyKeywordSpotter {
   nb::list scores() const { return result(spotter_.scores()); }
 
   void reset() {
-    spotter_.reset();
+    spotter_.resetStream();
     last_error_.clear();
   }
 

@@ -37,6 +37,8 @@ class DirectKeywordSpotter {
               std::string *error = nullptr);
   std::vector<DirectKeywordResult> scores() const;
   bool initialized() const;
+  // Clear the current audio stream without unloading the loaded NPU models.
+  void resetStream();
   void reset();
 
  private:

@@ -452,6 +452,24 @@ class DirectKeywordSpotterCore {
 
   bool initialized() const { return fbank_ != nullptr; }
   std::vector<KeywordHit> scores() const { return last_scores_; }
+  void resetStream() {
+    if (!fbank_) return;
+    knf::FbankOptions options;
+    options.frame_opts.samp_freq = kSampleRate;
+    options.frame_opts.dither = 0.0f;
+    options.frame_opts.snip_edges = false;
+    options.mel_opts.num_bins = kFbankBins;
+    options.mel_opts.high_freq = -400.0f;
+    fbank_.reset(new knf::OnlineFbank(options));
+    for (Cache &cache : caches_) {
+      std::fill(cache.floats.begin(), cache.floats.end(), 0.0f);
+      std::fill(cache.integers.begin(), cache.integers.end(), 0);
+    }
+    std::fill(encoder_input_.begin(), encoder_input_.end(), 0.0f);
+    beams_.clear();
+    last_scores_.clear();
+    processed_frames_ = 0;
+  }
   void clear() { reset(); }
 
  private:
@@ -793,5 +811,6 @@ bool DirectKeywordSpotter::accept(const std::vector<std::int16_t> &pcm, std::vec
 bool DirectKeywordSpotter::finish(std::vector<DirectKeywordResult> *hits, std::string *error) { std::vector<KeywordHit> raw; const bool ok = impl_ && impl_->spotter.finish(&raw, error); if (ok) copyResults(raw, hits); return ok; }
 std::vector<DirectKeywordResult> DirectKeywordSpotter::scores() const { std::vector<DirectKeywordResult> out; if (impl_) copyResults(impl_->spotter.scores(), &out); return out; }
 bool DirectKeywordSpotter::initialized() const { return impl_ && impl_->spotter.initialized(); }
+void DirectKeywordSpotter::resetStream() { if (impl_) impl_->spotter.resetStream(); }
 void DirectKeywordSpotter::reset() { if (impl_) impl_->spotter.clear(); }
 }  // namespace tdl_app
