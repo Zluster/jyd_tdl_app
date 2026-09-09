@@ -258,7 +258,10 @@ class KeywordSpotter:
             self._wrapper_error = "register at least one keyword before start"
             return False
         if not self._native.initialized:
-            if not self._load_registered_keywords():
+            if self._keywords_path:
+                ok = self._native.load(self._model_spec, self._keywords_path,
+                                       self._threshold, self._beam_width)
+            elif not self._load_registered_keywords():
                 return False
         ok = self._native.start(input_volume, points_per_frame, timeout_ms)
         if ok:
