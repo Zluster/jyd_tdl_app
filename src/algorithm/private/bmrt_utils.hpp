@@ -42,14 +42,12 @@ inline void setError(std::string *error, const std::string &message) {
 
 // BMRT on CV184X permits several runtimes on one device but its a53lite
 // teardown is not reliable when every model owns and frees a separate handle.
-// Keep one process-wide device handle alive until the final model closes.
+// Keep one process-wide device handle alive for later model reloads.
 struct SharedDeviceState {
   std::mutex mutex;
   bm_handle_t handle = nullptr;
   unsigned int users = 0;
   unsigned int runtimes = 0;
-  bool retain_until_process_exit = false;
-  std::vector<void *> retained_runtimes;
 };
 
 inline SharedDeviceState &sharedDeviceState() {
@@ -85,28 +83,13 @@ inline void releaseDevice(bm_handle_t *handle) noexcept {
   --state.users;
   if (std::getenv("TDL_BENCH_PROFILE"))
     std::fprintf(stderr, "[bmrt] releaseDevice users=%u\n", state.users);
-  if (state.users != 0 || !state.handle) return;
-  if (state.retain_until_process_exit) {
-    if (std::getenv("TDL_BENCH_PROFILE"))
-      std::fprintf(stderr,
-                   "[bmrt] keeping final device handle until process exit\n");
-    return;
-  }
-  if (std::getenv("TDL_BENCH_PROFILE"))
-    std::fprintf(stderr, "[bmrt] bm_dev_free begin handle=%p\n",
+  // Reopening the CV184X device after the last model closes leaves a53lite in
+  // an invalid state for a later multi-model load. Keep this one fixed device
+  // context for the process; every model runtime and its buffers are still
+  // destroyed independently below. The kernel closes the handle at exit.
+  if (state.users == 0 && std::getenv("TDL_BENCH_PROFILE"))
+    std::fprintf(stderr, "[bmrt] keeping process device handle=%p\n",
                  static_cast<void *>(state.handle));
-  try {
-    bm_dev_free(state.handle);
-  } catch (const std::exception &exception) {
-    std::fprintf(stderr, "bm_dev_free ignored during shutdown: %s\n",
-                 exception.what());
-  } catch (...) {
-    std::fprintf(stderr,
-                 "bm_dev_free ignored an unknown shutdown exception\n");
-  }
-  state.handle = nullptr;
-  if (std::getenv("TDL_BENCH_PROFILE"))
-    std::fprintf(stderr, "[bmrt] bm_dev_free end\n");
 }
 
 inline void *createRuntime(bm_handle_t handle) {
@@ -124,21 +107,24 @@ inline void *createRuntime(bm_handle_t handle) {
 inline void destroyRuntime(void *runtime) noexcept {
   if (!runtime) return;
   SharedDeviceState &state = sharedDeviceState();
-  {
-    std::lock_guard<std::mutex> lock(state.mutex);
-    if (state.runtimes > 0) --state.runtimes;
-    state.retain_until_process_exit = true;
-    state.retained_runtimes.push_back(runtime);
-    if (std::getenv("TDL_BENCH_PROFILE"))
-      std::fprintf(stderr,
-                   "[bmrt] retaining runtime=%p until process exit remaining=%u\n",
-                   runtime, state.runtimes);
+  // Every model owns its runtime, while all runtimes share the device handle.
+  // Fully destroy the runtime here; the final Session releases the device only
+  // after every runtime has gone away.
+  try {
+    bmrt_destroy(runtime);
+  } catch (const std::exception &exception) {
+    std::fprintf(stderr, "bmrt_destroy ignored during shutdown: %s\n",
+                 exception.what());
+  } catch (...) {
+    std::fprintf(stderr, "bmrt_destroy ignored an unknown shutdown exception\n");
   }
 
-  // CV184X a53lite can reject unloading any member of a multi-runtime model
-  // bundle, not merely the final runtime. Its destructor terminates the host
-  // process, so retain all runtimes until process exit. Applications should
-  // load each model once and reuse it rather than repeatedly reloading it.
+  std::lock_guard<std::mutex> lock(state.mutex);
+  if (state.runtimes > 0) --state.runtimes;
+  if (std::getenv("TDL_BENCH_PROFILE"))
+    std::fprintf(stderr,
+                 "[bmrt] destroyRuntime runtime=%p remaining=%u users=%u\n",
+                 runtime, state.runtimes, state.users);
 }
 
 inline std::string toUpper(std::string value) {

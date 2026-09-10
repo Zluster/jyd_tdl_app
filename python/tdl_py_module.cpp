@@ -42,6 +42,7 @@
 #include "tdl_app/rgb_led.hpp"
 
 #ifdef TDL_PY_WITH_NPU
+#include "algorithm/private/bmrt_utils.hpp"
 #include "algorithm/private/vpss_preprocessor.hpp"
 #include "tdl_app/classifier.hpp"
 #include "tdl_app/byte_tracker.hpp"
@@ -544,7 +545,7 @@ class PyFaceDenseLandmark {
       return false;
     }
 
-    if (bm_dev_request(&handle_, 0) != BM_SUCCESS) {
+    if (!tdl_app::bmrt_runtime::acquireDevice(&handle_, error)) {
       fail(error, "bm_dev_request failed");
       close();
       return false;
@@ -552,7 +553,7 @@ class PyFaceDenseLandmark {
     if (!firmware.empty()) {
       setenv("BMRUNTIME_USING_FIRMWARE", firmware.c_str(), 1);
     }
-    runtime_ = bmrt_create(handle_);
+    runtime_ = tdl_app::bmrt_runtime::createRuntime(handle_);
     if (!runtime_) {
       fail(error, "bmrt_create failed");
       close();
@@ -724,12 +725,11 @@ class PyFaceDenseLandmark {
     }
     output_memories_.clear();
     if (runtime_) {
-      bmrt_destroy(runtime_);
+      tdl_app::bmrt_runtime::destroyRuntime(runtime_);
       runtime_ = nullptr;
     }
     if (handle_) {
-      bm_dev_free(handle_);
-      handle_ = nullptr;
+      tdl_app::bmrt_runtime::releaseDevice(&handle_);
     }
     net_info_ = nullptr;
     net_name_.clear();
