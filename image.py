@@ -100,8 +100,11 @@ def to_lv(img, parent=None):
     - mode 支持 L/RGB/RGBA/RGB16，对应 L8/RGB888/ARGB8888/RGB565
     - 等价写法：w = lv.image(parent); w.set_src(img)（见 jyd.lv）
     - 像素内存归宿主侧所有，必须比控件活得久。camera.read_image() 的
-      缓冲由 Camera 常驻复用（同尺寸不换地址）：预览场景控件建一次，
-      之后每帧 read_image() 后 widget.invalidate() 即可刷新画面。
+      缓冲由 Camera 常驻复用（同尺寸不换地址）：预览场景控件建一次即可。
+      但每帧刷新请用 lv.show(img)，不要只 widget.invalidate()：渲染在
+      jyd-ui 线程异步进行，只标脏的话下一次 read_image() 会先于重绘把
+      缓冲覆盖掉，画上去的内容根本来不及上屏；lv.show(img) 是同步交接，
+      返回即已渲染。自己管控件的话在 invalidate() 之后调 lv.refr_now(None)。
     """
     args = _lv_args(img)
     rt = _ensure_mp()

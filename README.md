@@ -107,7 +107,8 @@ from dara import lv
 dara 特有接口：
 
 - `lv.show(fps=None)`：可选的帧率限速 / 显示 Image。UI 渲染（tick + 触摸）
-  由 dara 内部线程自转，不调 show 界面也在跑；纯 UI 循环给 `fps` 防空转
+  由 dara 内部线程自转，不调 show 界面也在跑；纯 UI 循环给 `fps` 防空转。
+  传 Image 时同步渲染，返回即已上屏，之后可以放心覆盖或重画这张图
 - `lv.bind(obj, lv.EVENT.CLICKED, fn)`：LVGL 事件绑定到 CPython 无参回调
   （回调在 dara 的 UI 线程执行）
 - 控件 `set_src(Image)`：直接显示 image 模块的 Image（见上节）

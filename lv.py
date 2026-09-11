@@ -12,10 +12,11 @@ jyd-ui 线程执行并等结果（MicroPython 不可重入且绑定该线程）�
                        show(img)        显示/刷新 Image（控件托管见下）
                        show(img, fps)   两者兼有
                      传 img 时模块内部只维护一个 lv.image 控件并复用：
-                     同一块像素缓冲只 invalidate() 标脏重绘，缓冲地址/
-                     尺寸/格式变了才重设 dsc；控件挂在当前活动屏上，
-                     换屏或所在屏被删（appfw 退出应用会删屏）时在新的
-                     活动屏上重建；Image 引用由模块保活
+                     同一块像素缓冲标脏后当场渲染（show 返回即已上屏，
+                     之后覆盖 img 安全），缓冲地址/尺寸/格式变了才重设
+                     dsc；控件挂在当前活动屏上，换屏或所在屏被删（appfw
+                     退出应用会删屏）时在新的活动屏上重建；Image 引用由
+                     模块保活
     bind(obj, code, fn)   LVGL 事件 -> CPython 无参回调
                           （事件对象不能跨桥，MicroPython 侧吞掉）
     bind_touch(obj)       在对象上采集按下、移动和松开的触摸事件
@@ -101,10 +102,16 @@ _touch_state = {"ready": False}
 
 
 #: show(img) 的 MP 侧控件托管。控件、缓冲签名都放 MP 侧，每帧一次
-#: m.call 就完成"活着且在当前屏上？-> 重建 / 重设源 / 标脏"三选一。
+#: m.call 就完成"活着且在当前屏上？-> 重建 / 重设源 / 标脏 -> 立即渲染"。
 #: 控件挂在活动屏上，屏被删（appfw 退出应用整屏 delete）后代理会抛
 #: LvReferenceError，换屏后 get_screen() 不再是活动屏：两种情况都在当前
-#: 活动屏上重建，而不是抱着死控件。依赖 jyd.image 注入的 _jyd_img_set
+#: 活动屏上重建，而不是抱着死控件。依赖 jyd.image 注入的 _jyd_img_set。
+#:
+#: 结尾的 refr_now 是同步交接的关键：只标脏的话，重绘要等 jyd-ui 线程
+#: 下一次刷新定时器（默认 33ms），而调用方一返回就会用下一帧覆盖同一块
+#: 像素缓冲（camera.read_image 复用缓冲、copy_to 只要 1ms），渲染几乎
+#: 永远只看到没画过的原始帧——画上去的框和字全部"消失"。refr_now 在
+#: 本任务内把脏区域渲染并 flush 完，show 返回即已上屏，之后随便覆盖
 _SHOW_SRC = r"""
 import lvgl as _jyd_lv
 
@@ -127,8 +134,9 @@ def _jyd_show_img(w, h, cf_name, addr, size):
     if sig != _jyd_show_sig:     # 首次 / 缓冲变了：重设 dsc
         _jyd_img_set(widget, w, h, cf_name, addr, size)
         _jyd_show_sig = sig
-    else:                        # 内容更新：仅标脏触发重绘
+    else:                        # 内容更新：标脏
         widget.invalidate()
+    _jyd_lv.refr_now(None)       # 当场渲染 + flush：返回即上屏
 """
 
 #: show(img) 的进程内状态：img 最近一次的 Image（保活：控件 dsc 零拷贝
@@ -158,11 +166,16 @@ def show(image=None, fps=None):
 
     UI 渲染由 jyd-ui 线程自转，show 不驱动心跳（不调它 UI 也在跑），
     保留它是给循环控节奏。传 Image 时由本模块托管一个 lv.image
-    控件：每次调用都把控件标脏（零拷贝共享像素，重绘即显示最新内
-    容）；换了不同的像素缓冲（地址/尺寸/格式变化）自动重设控件源，
-    仍复用同一控件。控件挂在当前活动屏上：换屏了、或所在屏被删了
+    控件：零拷贝共享像素，每次调用标脏并**当场渲染上屏**（同步交接：
+    show 返回时这一帧已经翻到屏幕上，之后覆盖/重画 img 都安全——
+    camera.read_image() 复用同一块缓冲，画完框直接 show 再取下一帧就是
+    这个契约）；换了不同的像素缓冲（地址/尺寸/格式变化）自动重设控件
+    源，仍复用同一控件。控件挂在当前活动屏上：换屏了、或所在屏被删了
     （appfw 退出应用会整屏删除），下一次 show 在新的活动屏上重建。
-    相机预览就是 `while True: lv.show(camera.read_image())`。"""
+    相机预览就是 `while True: lv.show(camera.read_image())`。
+
+    别在 bind 回调里调 show(img)：回调本身在 LVGL 的事件栈里，再触发
+    一次渲染属于嵌套刷新。"""
     if image is not None:
         import _maix_image
         if isinstance(image, _maix_image.Image):
