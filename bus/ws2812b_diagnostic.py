@@ -17,6 +17,13 @@ def parse_integer(text: str) -> int:
     return int(text, 0)
 
 
+def parse_rgb(text: str) -> tuple[int, int, int]:
+    components = tuple(int(item.strip(), 0) for item in text.split(","))
+    if len(components) != 3 or any(not 0 <= item <= 255 for item in components):
+        raise argparse.ArgumentTypeError("color must be R,G,B; each value is 0..255")
+    return components  # type: ignore[return-value]
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Set one WS2812B pixel and print UART diagnostics."
@@ -25,7 +32,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--baud", type=parse_integer, default=115200)
     parser.add_argument("--sensor-number", type=parse_integer, default=1)
     parser.add_argument("--led-index", type=parse_integer, default=0)
-    parser.add_argument("--color", type=parse_integer, default=0xFF0000)
+    parser.add_argument("--color", type=parse_rgb, default=(255, 0, 0))
     return parser
 
 
@@ -68,7 +75,7 @@ def main() -> int:
             "WS2812B command succeeded:",
             f"sensor={args.sensor_number}",
             f"led={args.led_index}",
-            f"color=0x{args.color:06X}",
+            f"color={args.color}",
         )
         print_diagnostics(bus)
         return 0

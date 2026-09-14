@@ -32,18 +32,39 @@ with JydBus("/dev/ttyS2", 115200) as bus:
 通用操作为 `request_update()`、`request_data()`、`write_value()`、
 `enable_auto_upload()` 和 `disable_auto_upload()`。
 
+扫描整条级联链路：
+
+```python
+from dara.bus.jydbus_bus import JydBus
+
+with JydBus("/dev/ttyS2", 115200) as bus:
+    sensors = bus.scan()
+    for sensor_name, sensor_number in sensors:
+        print(f"{sensor_name} number={sensor_number}")
+```
+
+`scan()` 返回所有已发现节点的 `(sensor_name, sensor_number)` 列表；没有收到响应时
+返回空列表，串口或发送错误会抛出 `OSError`。需要完整命令状态时使用
+`bus.run_command(JYDBUS_UART_COMMAND_SCAN)`。
+
 WS2812B 示例：
 
 ```python
 from devices import WS2812BPanel
 from jydbus_bus import JydBus
 
-colors = [0x000000] * 128
-colors[15] = 0xFF0000
+colors = [(0, 0, 0)] * 128
+colors[15] = (255, 0, 0)
 
 with JydBus("/dev/ttyS2") as bus:
     panel = WS2812BPanel(bus, 1)
     panel.display_frame(colors)
+```
+
+设置 128 颗灯为同一种颜色时，传入 `(red, green, blue)` RGB 元组：
+
+```python
+panel.set_all_colors(color=(255, 0, 0))
 ```
 
 整屏数据会自动分成两个 64 灯数据块，并在全部数据到达后统一刷新。需要同时更新多颗灯时，
@@ -89,6 +110,7 @@ Bootloader 直连。版本号范围为 `1..0xFFFFFFFF`，必须单调递增；�
 ## 硬件工具
 
 ```bash
+python3 scan_hardware.py --device /dev/ttyS2 --baud 115200
 python3 examples/example_dual_uart.py --device /dev/ttyS2
 python3 examples/paj7620_example.py --device /dev/ttyS2 --number 1
 python3 zw101_cli.py /dev/ttyS2 match

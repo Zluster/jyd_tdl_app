@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import errno
 import threading
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, Iterable
 
 if __package__:
     from .jydbus_uart import (PAJ7620_AUTO_UPLOAD_INTERVAL_MS,
@@ -19,7 +19,8 @@ if __package__:
                               JYDBUS_TYPE_VL53L0X, JYDBUS_TYPE_WATER_LEVEL_ADC,
                               JYDBUS_TYPE_WS2812B, JYDBUS_TYPE_ZSPD4003,
                               JYDBUS_TYPE_ZW101,
-                              JYDBUS_UART_COMMAND_QUERY_SENSOR, JydbusData,
+                              JYDBUS_UART_COMMAND_QUERY_SENSOR,
+                              WS2812B_LED_COUNT, JydbusData,
                               jydbus_name)
     from .zw101_control import (ZW101_CONTROL_CLEAR_DATABASE,
                                 ZW101_CONTROL_DELETE, ZW101_CONTROL_ENROLL,
@@ -39,7 +40,8 @@ else:
                              JYDBUS_TYPE_VL53L0X, JYDBUS_TYPE_WATER_LEVEL_ADC,
                              JYDBUS_TYPE_WS2812B, JYDBUS_TYPE_ZSPD4003,
                              JYDBUS_TYPE_ZW101,
-                             JYDBUS_UART_COMMAND_QUERY_SENSOR, JydbusData,
+                             JYDBUS_UART_COMMAND_QUERY_SENSOR,
+                             WS2812B_LED_COUNT, JydbusData,
                              jydbus_name)
     from zw101_control import (ZW101_CONTROL_CLEAR_DATABASE,
                                ZW101_CONTROL_DELETE, ZW101_CONTROL_ENROLL,
@@ -159,12 +161,73 @@ class MFRC522Reader(SensorDevice):
 class WS2812BPanel(SensorDevice):
     SENSOR_TYPE = JYDBUS_TYPE_WS2812B
 
-    def set_pixel_color(self, led_index: int, color: int) -> int:
-        return self.bus.uart.set_ws2812b_pixel_color(self.sensor_number,
-                                                    led_index, color)
+    def __init__(self, bus: JydBus, sensor_number: int = 1) -> None:
+        super().__init__(bus, sensor_number)
+        self.brightness = 100
+        self._colors = [(0, 0, 0)] * WS2812B_LED_COUNT
+        self._state_lock = threading.RLock()
 
-    def display_frame(self, colors: object) -> int:
-        return self.bus.uart.display_ws2812b_frame(self.sensor_number, colors)
+    def set_brightness(self, brightness: int) -> int:
+        """Set brightness and immediately redraw the current frame."""
+        if (not isinstance(brightness, int) or isinstance(brightness, bool) or
+                not 0 <= brightness <= 100):
+            raise OSError(
+                errno.EINVAL,
+                "WS2812B brightness must be an integer from 0 to 100")
+        with self._state_lock:
+            packed_colors = [self._pack_color(color, brightness)
+                             for color in self._colors]
+            result = self.bus.uart.display_ws2812b_frame(
+                self.sensor_number, packed_colors)
+            self.brightness = brightness
+            return result
+
+    def _pack_color(self, color: tuple[int, int, int],
+                    brightness: int | None = None) -> int:
+        if (not isinstance(color, tuple) or len(color) != 3 or
+                any(not isinstance(component, int) or
+                    not 0 <= component <= 0xFF for component in color)):
+            raise OSError(errno.EINVAL,
+                          "WS2812B color must be an (r, g, b) tuple; "
+                          "each component must be 0..255")
+        scale = self.brightness if brightness is None else brightness
+        red, green, blue = (component * scale // 100
+                            for component in color)
+        return (red << 16) | (green << 8) | blue
+
+    def set_pixel_color(self, led_index: int,
+                        color: tuple[int, int, int]) -> int:
+        if (not isinstance(led_index, int) or isinstance(led_index, bool) or
+                not 0 <= led_index < WS2812B_LED_COUNT):
+            raise OSError(errno.EINVAL, "WS2812B led index must be 0..127")
+        with self._state_lock:
+            packed_color = self._pack_color(color)
+            result = self.bus.uart.set_ws2812b_pixel_color(
+                self.sensor_number, led_index, packed_color)
+            self._colors[led_index] = color
+            return result
+
+    def set_all_colors(self, color: tuple[int, int, int]) -> int:
+        """Set one RGB tuple on all 128 LEDs."""
+        with self._state_lock:
+            packed_color = self._pack_color(color)
+            result = self.bus.uart.display_ws2812b_frame(
+                self.sensor_number, [packed_color] * WS2812B_LED_COUNT)
+            self._colors = [color] * WS2812B_LED_COUNT
+            return result
+
+    def display_frame(self,
+                      colors: Iterable[tuple[int, int, int]]) -> int:
+        color_values = list(colors)
+        if len(color_values) != WS2812B_LED_COUNT:
+            raise OSError(errno.EINVAL, "WS2812B frame must contain 128 colors")
+        with self._state_lock:
+            packed_colors = [self._pack_color(color)
+                             for color in color_values]
+            result = self.bus.uart.display_ws2812b_frame(
+                self.sensor_number, packed_colors)
+            self._colors = color_values
+            return result
 
 
 class ZW101FingerprintSensor(SensorDevice):

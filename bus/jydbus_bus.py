@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import errno
 from typing import TYPE_CHECKING
 
 if __package__:
-    from .jydbus_uart import JydbusData, JydbusUart, JydbusUartCommandResult
+    from .jydbus_uart import (JYDBUS_UART_COMMAND_SCAN, JydbusData,
+                              JydbusUart, JydbusUartCommandResult,
+                              jydbus_name)
 else:
-    from jydbus_uart import JydbusData, JydbusUart, JydbusUartCommandResult
+    from jydbus_uart import (JYDBUS_UART_COMMAND_SCAN, JydbusData,
+                             JydbusUart, JydbusUartCommandResult,
+                             jydbus_name)
 
 if TYPE_CHECKING:
     if __package__:
@@ -44,6 +49,15 @@ class JydBus:
                               enabled: bool, interval_ms: int) -> int:
         return self.uart.configure_auto_upload(sensor_type, sensor_number,
                                                enabled, interval_ms)
+
+    def scan(self) -> list[tuple[str, int]]:
+        """Return all discovered nodes as ``(sensor_name, sensor_number)``."""
+        result = self.uart.execute_command(JYDBUS_UART_COMMAND_SCAN)
+        if result.status != 0:
+            code = -result.status if result.status < 0 else result.status
+            raise OSError(code or errno.EIO, "bus scan failed")
+        return [(jydbus_name(step.sensor_type), step.sensor_number)
+                for step in result.steps]
 
     def run_command(self, command: int, sensor_type: int = 0,
                     sensor_number: int = 0,

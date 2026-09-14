@@ -101,9 +101,11 @@ PAJ7620_AUTO_UPLOAD_INTERVAL_MS = 100
 CONFIG_FRAME_GAP = AUTO_UPLOAD_INTERVAL_MS / JYDBUS_UART_JYDBUS_NUMBER_MAX / 1000.0
 WS2812B_REQUEST_RETRIES = 3
 WS2812B_FRAME_RETRIES = 3
-# GD32 receives one frame at a time using UART IDLE + DMA. Keep a short idle
-# interval between streamed chunks so adjacent frames cannot be merged.
-WS2812B_FRAME_GAP = 0.001
+# A 196-byte payload occupies about 17.8 ms at 115200 baud. Each GD32 node
+# forwards it only after reception, so the next frame must not arrive while the
+# receive flag is still owned by the main loop.
+WS2812B_FRAME_GAP = 0.025
+WS2812B_COMMAND_GAP = 0.002
 
 COMMAND_TARGETS = (
     JYDBUS_TYPE_PHOTORESISTOR_ADC, JYDBUS_TYPE_AHT10, JYDBUS_TYPE_BMP390,
@@ -391,8 +393,9 @@ class JydbusUart:
                                             sensor_number).sequence
             except OSError:
                 previous = 0
-            started = self._write_timed(JYDBUS_FRAME_TYPE_QUERY, JYDBUS_TYPE_WS2812B,
-                                        sensor_number, payload)
+            started = self._write_timed(JYDBUS_FRAME_TYPE_QUERY,
+                                        JYDBUS_TYPE_WS2812B,
+                                        sensor_number, payload, drain=True)
             deadline = started / 1_000_000 + QUERY_RESPONSE_TIMEOUT + \
                 sensor_number * QUERY_HOP_TIMEOUT
             while time.monotonic() < deadline:
@@ -412,6 +415,7 @@ class JydbusUart:
                                 raise OSError(errno.EPROTO,
                                               f"WS2812B command 0x{command:02X} failed: "
                                               f"status 0x{status:02X}")
+                            time.sleep(WS2812B_COMMAND_GAP)
                             return value
                 except OSError as exc:
                     if exc.errno == errno.EPROTO:
