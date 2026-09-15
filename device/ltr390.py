@@ -81,9 +81,13 @@ class LTR390:
         window_factor = 1.0,
         auto_open = True,
     ):
-        """Create an LTR390 on Linux I2C bus ``i2c_bus``."""
-        if isinstance(i2c_bus, bool) or not isinstance(i2c_bus, int):
-            raise ValueError("i2c_bus must be an integer Linux I2C bus number")
+        """Create an LTR390 on an :class:`I2C` object or mapped bus ID."""
+        if isinstance(i2c_bus, I2C):
+            self._i2c = i2c_bus
+        elif isinstance(i2c_bus, (int, str)) and not isinstance(i2c_bus, bool):
+            self._i2c = I2C(i2c_bus, auto_open=False)
+        else:
+            raise ValueError("i2c must be an I2C object or mapped I2C identifier")
         if isinstance(addr, bool) or not isinstance(addr, int) or not 0 <= addr <= 0x7F:
             raise ValueError("addr must be a 7-bit integer")
         if (
@@ -96,20 +100,22 @@ class LTR390:
         if not isinstance(auto_open, bool):
             raise ValueError("auto_open must be a boolean")
 
-        self._i2c = I2C(i2c_bus, auto_open=False)
         self.addr = addr
         self._threshold = None
         self.window_factor = float(window_factor)
         self._active = False
+        self._opened_i2c_here = False
         self.reset(mode, gain, resolution, threshold)
         if auto_open:
             self.open()
 
     @wrap_error_as(LTR390Error, "LTR390 open failed", catch=OSError)
     def open(self):
-        """Open Linux I2C, then verify, reset, and enable the sensor."""
+        """Open I2C if needed, then verify, reset, and enable the sensor."""
         self.close()
-        self._i2c.open()
+        if not self._i2c.is_opened:
+            self._i2c.open()
+            self._opened_i2c_here = True
         self._active = True
         try:
             if self._read(self._PART_ID) >> 4 != 0x0B:
@@ -121,7 +127,9 @@ class LTR390:
                 raise LTR390Error("LTR390 did not enable")
         except Exception:
             self._active = False
-            self._i2c.close()
+            if self._opened_i2c_here:
+                self._i2c.close()
+                self._opened_i2c_here = False
             raise
 
     @wrap_error_as(LTR390Error, "LTR390 close failed", catch=OSError)
@@ -131,7 +139,9 @@ class LTR390:
                 self._set_enabled(False)
         finally:
             self._active = False
-            self._i2c.close()
+            if self._opened_i2c_here:
+                self._i2c.close()
+                self._opened_i2c_here = False
 
     def __enter__(self):
         """Open the sensor if needed and return it for a ``with`` statement."""

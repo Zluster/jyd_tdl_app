@@ -39,9 +39,13 @@ class AHT20:
         humidity_offset = 0.0,
         auto_open = True,
     ):
-        """Create an AHT20 on Linux I2C bus ``i2c_bus``."""
-        if isinstance(i2c_bus, bool) or not isinstance(i2c_bus, int):
-            raise ValueError("i2c_bus must be an integer Linux I2C bus number")
+        """Create an AHT20 on an :class:`I2C` object or mapped bus ID."""
+        if isinstance(i2c_bus, I2C):
+            self._i2c = i2c_bus
+        elif isinstance(i2c_bus, (int, str)) and not isinstance(i2c_bus, bool):
+            self._i2c = I2C(i2c_bus, auto_open=False)
+        else:
+            raise ValueError("i2c must be an I2C object or mapped I2C identifier")
         if isinstance(addr, bool) or not isinstance(addr, int) or not 0 <= addr <= 0x7F:
             raise ValueError("addr must be a 7-bit integer")
         for name, value in (
@@ -57,11 +61,11 @@ class AHT20:
         if not isinstance(auto_open, bool):
             raise ValueError("auto_open must be a boolean")
 
-        self._i2c = I2C(i2c_bus, auto_open=False)
         self.addr = addr
         self.temperature_offset = float(temperature_offset)
         self.humidity_offset = float(humidity_offset)
         self._active = False
+        self._opened_i2c_here = False
         if auto_open:
             self.open()
 
@@ -77,9 +81,11 @@ class AHT20:
 
     @wrap_error_as(AHT20Error, "AHT20 open failed", catch=OSError)
     def open(self):
-        """Open Linux I2C and initialize the sensor."""
+        """Open I2C if needed and initialize the sensor."""
         self.close()
-        self._i2c.open()
+        if not self._i2c.is_opened:
+            self._i2c.open()
+            self._opened_i2c_here = True
         self._active = True
         try:
             sleep(self._POWER_ON_DELAY)
@@ -89,13 +95,17 @@ class AHT20:
             sleep(0.01)
         except Exception:
             self._active = False
-            self._i2c.close()
+            if self._opened_i2c_here:
+                self._i2c.close()
+                self._opened_i2c_here = False
             raise
 
     def close(self):
-        """Deactivate the sensor and close its Linux I2C bus."""
+        """Deactivate the sensor without closing a caller-owned I2C bus."""
         self._active = False
-        self._i2c.close()
+        if self._opened_i2c_here:
+            self._i2c.close()
+            self._opened_i2c_here = False
 
     @property
     def is_opened(self):

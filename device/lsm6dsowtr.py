@@ -78,9 +78,18 @@ class LSM6DSOWTR(GyroCalibration):
         *,
         auto_open = True,
     ):
-        """Create an LSM6DSOWTR on Linux I2C bus ``i2c_bus``."""
-        if isinstance(i2c_bus, bool) or not isinstance(i2c_bus, int):
-            raise ValueError("i2c_bus must be an integer Linux I2C bus number")
+        """Create an LSM6DSOWTR on an :class:`I2C` object or mapped bus ID.
+
+        ``LSM6DSOWTR(I2C(2))`` is preferred because the bus and its pin-map
+        identity remain visible in user code.  Integer/string identifiers are
+        accepted for compatibility.
+        """
+        if isinstance(i2c_bus, I2C):
+            self._i2c = i2c_bus
+        elif isinstance(i2c_bus, (int, str)) and not isinstance(i2c_bus, bool):
+            self._i2c = I2C(i2c_bus, auto_open=False)
+        else:
+            raise ValueError("i2c must be an I2C object or mapped I2C identifier")
         if not isinstance(addr, int) or isinstance(addr, bool) or not 0 <= addr <= 0x7F:
             raise ValueError("addr must be a 7-bit integer")
         for name, value, enum_type in (
@@ -101,7 +110,6 @@ class LSM6DSOWTR(GyroCalibration):
                 raise ValueError(f"{name} is not supported by LSM6DSOWTR")
 
         super().__init__()
-        self._i2c = I2C(i2c_bus, auto_open=False)
         self.addr = addr
         self.mode = mode
         self.acc_scale = acc_scale
@@ -109,14 +117,17 @@ class LSM6DSOWTR(GyroCalibration):
         self.gyro_scale = gyro_scale
         self.gyro_odr = gyro_odr
         self._active = False
+        self._opened_i2c_here = False
         if auto_open:
             self.open()
 
     @wrap_error_as(LSM6DSOWTRError, "LSM6DSOWTR open failed", catch=OSError)
     def open(self):
-        """Open Linux I2C and verify and configure the sensor."""
+        """Open I2C if needed, then verify and configure the sensor."""
         self.close()
-        self._i2c.open()
+        if not self._i2c.is_opened:
+            self._i2c.open()
+            self._opened_i2c_here = True
         self._active = True
         try:
             if self._read(self._WHO_AM_I) != self._DEVICE_ID:
@@ -140,7 +151,9 @@ class LSM6DSOWTR(GyroCalibration):
             )
         except Exception:
             self._active = False
-            self._i2c.close()
+            if self._opened_i2c_here:
+                self._i2c.close()
+                self._opened_i2c_here = False
             raise
 
     @wrap_error_as(LSM6DSOWTRError, "LSM6DSOWTR close failed", catch=OSError)
@@ -151,7 +164,9 @@ class LSM6DSOWTR(GyroCalibration):
                 self._write(self._CTRL2_G, 0)
         finally:
             self._active = False
-            self._i2c.close()
+            if self._opened_i2c_here:
+                self._i2c.close()
+                self._opened_i2c_here = False
 
     def __enter__(self):
         """Open the sensor if needed and return it for a ``with`` statement."""

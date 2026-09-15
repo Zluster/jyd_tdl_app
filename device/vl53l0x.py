@@ -139,19 +139,23 @@ class VL53L0X:
         timeout_ms = 0,
         auto_open = True,
     ):
-        """Create a VL53L0X on Linux I2C bus ``i2c_bus``."""
-        if isinstance(i2c_bus, bool) or not isinstance(i2c_bus, int):
-            raise ValueError("i2c_bus must be an integer Linux I2C bus number")
+        """Create a VL53L0X on an :class:`I2C` object or mapped bus ID."""
+        if isinstance(i2c_bus, I2C):
+            self._i2c = i2c_bus
+        elif isinstance(i2c_bus, (int, str)) and not isinstance(i2c_bus, bool):
+            self._i2c = I2C(i2c_bus, auto_open=False)
+        else:
+            raise ValueError("i2c must be an I2C object or mapped I2C identifier")
         if isinstance(addr, bool) or not isinstance(addr, int) or not 0 <= addr <= 0x7F:
             raise ValueError("addr must be a 7-bit integer")
         if not isinstance(io_2v8, bool):
             raise ValueError("io_2v8 must be a boolean")
         if not isinstance(auto_open, bool):
             raise ValueError("auto_open must be a boolean")
-        self._i2c = I2C(i2c_bus, auto_open=False)
         self._addr = addr
         self._io_2v8 = io_2v8
         self._active = False
+        self._opened_i2c_here = False
         self._continuous = False
         self._stop_variable = 0
         self._measurement_timing_budget_us = 0
@@ -177,9 +181,11 @@ class VL53L0X:
 
     @wrap_error_as(VL53L0XError, "VL53L0X open failed", catch=OSError)
     def open(self):
-        """Verify, initialize, tune, and calibrate the sensor."""
+        """Open I2C if needed, then verify, initialize, tune, and calibrate."""
         self.close()
-        self._i2c.open()
+        if not self._i2c.is_opened:
+            self._i2c.open()
+            self._opened_i2c_here = True
         self._active = True
         try:
             if self._read_reg(self._MODEL_ID) != 0xEE:
@@ -228,7 +234,9 @@ class VL53L0X:
         except Exception:
             self._active = False
             self._continuous = False
-            self._i2c.close()
+            if self._opened_i2c_here:
+                self._i2c.close()
+                self._opened_i2c_here = False
             raise
 
     @wrap_error_as(VL53L0XError, "VL53L0X close failed", catch=OSError)
@@ -239,7 +247,9 @@ class VL53L0X:
         finally:
             self._continuous = False
             self._active = False
-            self._i2c.close()
+            if self._opened_i2c_here:
+                self._i2c.close()
+                self._opened_i2c_here = False
 
     @property
     def is_opened(self):
