@@ -15,12 +15,23 @@ else:
 
 #import lv_pm
 #pm = lv_pm.pm()
-# evdev driver for mouse
+# LVGL pointer driver for the physical touchscreen and the remote uinput
+# touchscreen.  The physical GT911 currently uses the historical reversed
+# coordinate convention; browser/uinput events are already LCD coordinates.
 class mouse_indev:
-    def __init__(self, scr=None, dev="/dev/input/event0"):
-        self.evdev = open(dev, 'rb')
+    def __init__(self, scr=None, devices=None):
+        if devices is None:
+            devices = (
+                ("/dev/input/event0", True, "screen"),
+                ("/dev/input/event1", False, "remote"),
+            )
+        self.device_specs = devices
         self.poll = select.poll()
-        self.poll.register(self.evdev.fileno())
+        self.sources = []
+        self._scan_ticks = 0
+        self._open_configured_sources()
+        if not self.sources:
+            raise OSError("no touchscreen input device is available")
         self.scr = scr if scr else lv.screen_active()
         self.hor_res = self.scr.get_width()
         self.ver_res = self.scr.get_height()
@@ -30,61 +41,131 @@ class mouse_indev:
         self.indev.set_type(lv.INDEV_TYPE.POINTER)
         self.indev.set_read_cb(self.mouse_read)
 
-        # with open(path + 'mouse.png', 'rb') as f:
-        #     png_data = f.read()
-
-        # img = lv.image_dsc_t({
-        #     "data_size": len(png_data),
-        #     "data": png_data,
-        # })
-
-        # mouse_img = lv.image(self.scr)
-        # mouse_img.set_src(img)
-        # self.indev.set_cursor(mouse_img)
-        
         self.timer = self.indev.get_read_timer()
         self.timer.set_period(16)
-        
-        self.x = 50
-        self.y = 50
-        self.b = 0
+
+        self.owner = None       # source that owns the current one-finger touch
+        self.last_source = self.sources[0]
+
+    def _open_configured_sources(self):
+        for path, invert, name in self.device_specs:
+            already_open = False
+            for source in self.sources:
+                if source["path"] == path:
+                    already_open = True
+                    break
+            if already_open:
+                continue
+            try:
+                evdev = open(path, 'rb')
+            except OSError:
+                # event1 is created by the WebSocket/uinput service.  The
+                # normal touchscreen remains usable before that service runs.
+                continue
+            source = {
+                "file": evdev,
+                "fd": evdev.fileno(),
+                "path": path,
+                "invert": invert,
+                "name": name,
+                "x": 50,
+                "y": 50,
+            }
+            self.poll.register(source["fd"])
+            self.sources.append(source)
+
+    def _press(self, source):
+        # LVGL pointer indev is single-touch.  The first source to press owns
+        # the gesture until it releases; the other source cannot release it.
+        if self.owner is None or self.owner is source:
+            self.owner = source
+            self.last_source = source
+
+    def _release(self, source):
+        if self.owner is source:
+            self.last_source = source
+            self.owner = None
+
+    def _read_event(self, source):
+        time_sec, time_usec, event_type, code, value = ustruct.unpack(
+            EV_FMT, source["file"].read(EV_SIZE))
+        if event_type == 0x03:
+            # event0 normally uses ABS_MT_POSITION_X/Y (53/54).  Virtual
+            # uinput producers commonly use either those codes or ABS_X/Y
+            # (0/1), so accept both forms.
+            if code == 53 or code == 0:
+                source["x"] = value
+                if self.owner is None or self.owner is source:
+                    self.last_source = source
+            elif code == 54 or code == 1:
+                source["y"] = value
+                if self.owner is None or self.owner is source:
+                    self.last_source = source
+            elif code == 57:  # ABS_MT_TRACKING_ID: -1 is contact release.
+                if value >= 0:
+                    self._press(source)
+                else:
+                    self._release(source)
+        elif event_type == 0x01 and (code == 330 or code == 272):
+            # BTN_TOUCH is normal for a touchscreen; BTN_LEFT makes a
+            # mouse-style uinput producer usable for temporary diagnostics.
+            if value:
+                self._press(source)
+            else:
+                self._release(source)
+
+    def _drain_source(self, source):
+        self._read_event(source)
+        # Drain only the same fd.  Checking the global poll set before every
+        # read avoids blocking on a source while another source is ready.
+        while True:
+            ready = False
+            for fd, flags in self.poll.poll(0):
+                if fd == source["fd"] and flags & select.POLLIN:
+                    ready = True
+                    break
+            if not ready:
+                break
+            self._read_event(source)
 
     def mouse_read(self, indev, data) -> int:
-        # Check if there is input to be read from evdev
-        if not self.poll.poll()[0][1] & select.POLLIN:
+        # The WebSocket service can create its uinput device after launcher
+        # starts.  Retry unopened configured paths about once per second.
+        self._scan_ticks += 1
+        if self._scan_ticks >= 64:
+            self._scan_ticks = 0
+            self._open_configured_sources()
+        # Read every currently-ready input source.  Each source has a separate
+        # file descriptor, so real and remote touches do not consume each
+        # other's evdev stream.
+        events = self.poll.poll(0)
+        if not events:
             return 0
-        while True:
-            # Data is relative, update coordinates
-            time_sec, time_usec, _type, code, value = ustruct.unpack(EV_FMT, self.evdev.read(EV_SIZE))
-            if _type == 0x03:
-                if code == 53:
-                    self.x = value
-                elif code == 54:
-                    self.y = value
-            # elif code == 50:
-            #     self.b = value
-            elif _type == 0x01 and code == 330:
-                self.b = value
-            if not self.poll.poll()[0][1] & select.POLLIN:
-                break
-        data.point.x = self.hor_res - self.x
-        data.point.y = self.ver_res - self.y
+        for fd, flags in events:
+            if not flags & select.POLLIN:
+                continue
+            for source in self.sources:
+                if source["fd"] == fd:
+                    self._drain_source(source)
+                    break
 
-        # data.point.x = int(data.point.x / 2) + 256
-        # data.point.y = int(data.point.y / 2) #150
-        
-        # Handle coordinate overflow cases
-        # data.point.x = min(data.point.x, self.hor_res - 1)
-        # data.point.y = min(data.point.y, self.ver_res - 1)
-        # data.point.x = max(data.point.x, 0)
-        # data.point.y = max(data.point.y, 0)
-
-        # Update "pressed" status
-        data.state = lv.INDEV_STATE.PRESSED if ((self.b & 1) == 1) else lv.INDEV_STATE.RELEASED
+        source = self.owner if self.owner is not None else self.last_source
+        x = source["x"]
+        y = source["y"]
+        if source["invert"]:
+            x = self.hor_res - 1 - x
+            y = self.ver_res - 1 - y
+        data.point.x = max(0, min(self.hor_res - 1, x))
+        data.point.y = max(0, min(self.ver_res - 1, y))
+        data.state = (
+            lv.INDEV_STATE.PRESSED
+            if self.owner is not None
+            else lv.INDEV_STATE.RELEASED
+        )
 
         return 0
 
     def delete(self):
-        self.evdev.close()
+        for source in self.sources:
+            source["file"].close()
         self.indev.enable(False)
-
