@@ -1,7 +1,7 @@
 # ruff: noqa: E402
 """QMI8658 six-axis inertial measurement unit driver."""
 
-from dara.device.imu import IMU, IMUAccOdr, IMUAccScale, IMUData, IMUError, IMUGyroOdr, IMUGyroScale, IMUMode, imu_drivers
+from dara.device.imu import IMU, IMUAccOdr, IMUAccScale, IMUAttitude, IMUData, IMUError, IMUGyroOdr, IMUGyroScale, IMUMode, imu_drivers
 from dara.device.ts import TS, TSData, TSError, ts_drivers
 from dara.peripheral.i2c import I2C
 
@@ -34,8 +34,8 @@ class QMI8658(IMU, TS):
     _ACC_SCALE = ...
     _GYRO_SCALE = ...
     _GYRO_ODR = ...
-    def __init__(self, i2c: I2C, addr: int = ..., mode: IMUMode = ..., acc_scale: IMUAccScale = ..., acc_odr: IMUAccOdr = ..., gyro_scale: IMUGyroScale = ..., gyro_odr: IMUGyroOdr = ..., *, auto_open: bool = ...) -> None:
-        """Create a QMI8658 on a caller-owned bus and optionally initialize it."""
+    def __init__(self, i2c_bus: I2C | int | str, addr: int = ..., mode: IMUMode = ..., acc_scale: IMUAccScale = ..., acc_odr: IMUAccOdr = ..., gyro_scale: IMUGyroScale = ..., gyro_odr: IMUGyroOdr = ..., *, auto_open: bool = ...) -> None:
+        """Create a QMI8658 on an I2C object or mapped bus identifier."""
         ...
 
     def open(self) -> None:
@@ -69,6 +69,18 @@ class QMI8658(IMU, TS):
 
     def read_temperature(self) -> float:
         """Return the temperature in degrees Celsius."""
+        ...
+
+    def configure_attitude(self, correction: float = ..., reference_hz: float = ...) -> IMUAttitude:
+        """Configure the built-in complementary attitude filter."""
+        ...
+
+    def reset_attitude(self, roll: float = ..., pitch: float = ..., yaw: float = ...) -> IMUAttitude:
+        """Reset the built-in attitude estimate and return it in degrees."""
+        ...
+
+    def read_attitude(self, dt: float | None = ...) -> IMUAttitude:
+        """Read one IMU sample and return roll, pitch, and relative yaw."""
         ...
 
     def calibrate_cod(self) -> bool:

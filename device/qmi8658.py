@@ -10,6 +10,8 @@ from dara.device.imu import (
     GyroCalibration,
     IMUAccOdr,
     IMUAccScale,
+    IMUAttitude,
+    IMUComplementaryFilter,
     IMUData,
     IMUError,
     IMUGyroOdr,
@@ -116,16 +118,26 @@ class QMI8658(GyroCalibration):
         i2c_bus,
         addr = 0x6B,
         mode = IMUMode.DUAL,
-        acc_scale = IMUAccScale.ACC_SCALE_2G,
-        acc_odr = IMUAccOdr.ACC_ODR_8000,
-        gyro_scale = IMUGyroScale.GYRO_SCALE_16DPS,
-        gyro_odr = IMUGyroOdr.GYRO_ODR_8000,
+        acc_scale = IMUAccScale.ACC_SCALE_4G,
+        acc_odr = IMUAccOdr.ACC_ODR_250,
+        gyro_scale = IMUGyroScale.GYRO_SCALE_512DPS,
+        gyro_odr = IMUGyroOdr.GYRO_ODR_250,
         *,
         auto_open = True,
     ):
-        """Create a QMI8658 on Linux I2C bus ``i2c_bus``."""
-        if isinstance(i2c_bus, bool) or not isinstance(i2c_bus, int):
-            raise ValueError("i2c_bus must be an integer Linux I2C bus number")
+        """Create a QMI8658 on an :class:`I2C` object or mapped bus identifier.
+
+        Prefer ``QMI8658(I2C(2))`` (or ``I2C("I2C2")``) so the application
+        clearly owns and can share the pin-mapped bus.  Integer and string
+        bus identifiers remain supported for compatibility, for example
+        ``QMI8658(2)``.
+        """
+        if isinstance(i2c_bus, I2C):
+            self._i2c = i2c_bus
+        elif isinstance(i2c_bus, (int, str)) and not isinstance(i2c_bus, bool):
+            self._i2c = I2C(i2c_bus, auto_open=False)
+        else:
+            raise ValueError("i2c must be an I2C object or mapped I2C identifier")
         if not isinstance(addr, int) or isinstance(addr, bool) or not 0 <= addr <= 0x7F:
             raise ValueError("addr must be a 7-bit integer")
         for name, value, enum_type in (
@@ -145,7 +157,9 @@ class QMI8658(GyroCalibration):
             if value not in supported:
                 raise ValueError(f"{name} is not supported by QMI8658")
         super().__init__()
-        self._i2c = I2C(i2c_bus, auto_open=False)
+        # Lazily constructed so ordinary raw IMU applications pay no cost for
+        # the convenience attitude API.
+        self._attitude_filter = None
         self.addr = addr
         self.mode = mode
         self.acc_scale = acc_scale
@@ -153,14 +167,17 @@ class QMI8658(GyroCalibration):
         self.gyro_scale = gyro_scale
         self.gyro_odr = gyro_odr
         self._active = False
+        self._opened_i2c_here = False
         if auto_open:
             self.open()
 
     @wrap_error_as(QMI8658Error, "QMI8658 open failed", catch=OSError)
     def open(self):
-        """Open Linux I2C, then reset, verify, and configure the sensor."""
+        """Open I2C if needed, then reset, verify, and configure the sensor."""
         self.close()
-        self._i2c.open()
+        if not self._i2c.is_opened:
+            self._i2c.open()
+            self._opened_i2c_here = True
         self._active = True
         try:
             self._write(self._RESET, 0xB0)
@@ -190,7 +207,9 @@ class QMI8658(GyroCalibration):
             sleep(max(0.2, 1.0 / min(active_odrs)))
         except Exception:
             self._active = False
-            self._i2c.close()
+            if self._opened_i2c_here:
+                self._i2c.close()
+                self._opened_i2c_here = False
             raise
 
     @wrap_error_as(QMI8658Error, "QMI8658 close failed", catch=OSError)
@@ -200,7 +219,9 @@ class QMI8658(GyroCalibration):
                 self._write(self._CTRL7, self._read(self._CTRL7) & 0xF0)
         finally:
             self._active = False
-            self._i2c.close()
+            if self._opened_i2c_here:
+                self._i2c.close()
+                self._opened_i2c_here = False
 
     def __enter__(self):
         """Open the sensor if needed and return it for a ``with`` statement."""
@@ -242,6 +263,41 @@ class QMI8658(GyroCalibration):
     def read_temperature(self):
         """Return the temperature in degrees Celsius."""
         return self.read_all().temperature
+
+    def configure_attitude(self, correction = 0.02, reference_hz = 100.0):
+        """Configure the built-in complementary attitude filter.
+
+        Applications that only need a simple attitude estimate normally do
+        not need this method: :meth:`read_attitude` lazily creates a default
+        98%% gyro / 2%% accelerometer filter.  Call this method before the
+        first read only when different filter tuning is required.
+        """
+        self._attitude_filter = IMUComplementaryFilter(correction, reference_hz)
+        return self._attitude_filter.attitude
+
+    def reset_attitude(self, roll = 0.0, pitch = 0.0, yaw = 0.0):
+        """Reset the built-in attitude estimate and return it in degrees."""
+        if self._attitude_filter is None:
+            self._attitude_filter = IMUComplementaryFilter()
+        return self._attitude_filter.reset(roll, pitch, yaw)
+
+    def read_attitude(self, dt = None):
+        """Read one IMU sample and return roll, pitch, and relative yaw.
+
+        The first call automatically creates the default complementary
+        filter, so typical applications only need ``imu.read_attitude()``.
+        Gyroscope data is internally read in degrees per second. ``dt`` is
+        optional and expressed in seconds; omit it for monotonic timing.
+        A six-axis IMU has no absolute heading reference, so yaw is relative
+        to :meth:`reset_attitude` and will drift over time.
+        """
+        if self.mode is not IMUMode.DUAL:
+            raise QMI8658Error("attitude estimation requires mode=IMUMode.DUAL")
+        if self._attitude_filter is None:
+            self._attitude_filter = IMUComplementaryFilter()
+        return self._attitude_filter.update(
+            self.read_imu(calib_gyro=True, radian=False), dt=dt
+        )
 
     @wrap_error_as(QMI8658Error, "QMI8658 COD calibration failed", catch=OSError)
     def calibrate_cod(self):

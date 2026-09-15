@@ -3,7 +3,7 @@
 
 from enum import Enum, IntEnum
 import json
-from math import isfinite, radians
+from math import atan2, degrees, isfinite, radians, sqrt
 import os
 from time import monotonic, sleep
 
@@ -116,6 +116,160 @@ class IMUData:
         """Initialize accelerometer and gyroscope samples."""
         self.acc = acc
         self.gyro = gyro
+
+
+class IMUAttitude:
+    """Roll, pitch, and relative yaw estimated from a six-axis IMU.
+
+    The three public angles are degrees.  A six-axis IMU has no absolute
+    heading reference, so ``yaw`` is relative to :meth:`IMUComplementaryFilter.reset`
+    and will drift over time.  Use a calibrated magnetometer when an absolute
+    compass heading is required.
+    """
+
+    def __init__(self, roll=0.0, pitch=0.0, yaw=0.0):
+        """Create an attitude in degrees."""
+        self.roll = float(roll)
+        self.pitch = float(pitch)
+        self.yaw = float(yaw)
+
+    @property
+    def roll_radians(self):
+        """Roll in radians."""
+        return radians(self.roll)
+
+    @property
+    def pitch_radians(self):
+        """Pitch in radians."""
+        return radians(self.pitch)
+
+    @property
+    def yaw_radians(self):
+        """Relative yaw in radians."""
+        return radians(self.yaw)
+
+
+class IMUComplementaryFilter:
+    """A conventional six-axis complementary attitude filter.
+
+    Gyroscope input is expected in degrees per second, matching
+    :meth:`read_imu` with its default ``radian=False``.  Acceleration may be
+    expressed in g or m/s² because only its direction is used.
+    """
+
+    def __init__(self, correction=0.02, reference_hz=100.0):
+        """Create a filter.
+
+        ``correction`` is the accelerometer correction applied at
+        ``reference_hz`` while the device is not accelerating.  The default
+        0.02 is the classic 98%% gyro / 2%% accelerometer blend.  Increase it
+        for less long-term tilt drift; decrease it for less response to
+        linear acceleration.
+        """
+        if (
+            isinstance(correction, bool)
+            or not isinstance(correction, (int, float))
+            or not 0.0 < correction <= 1.0
+        ):
+            raise ValueError("correction must be a number in (0.0, 1.0]")
+        if (
+            isinstance(reference_hz, bool)
+            or not isinstance(reference_hz, (int, float))
+            or reference_hz <= 0
+        ):
+            raise ValueError("reference_hz must be a positive number")
+        self.correction = float(correction)
+        self.reference_hz = float(reference_hz)
+        self.reset()
+
+    def reset(self, roll=0.0, pitch=0.0, yaw=0.0):
+        """Reset attitude and timing; all angles are degrees."""
+        for name, value in (("roll", roll), ("pitch", pitch), ("yaw", yaw)):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not isfinite(value)
+            ):
+                raise ValueError(f"{name} must be a finite number")
+        self._attitude = IMUAttitude(roll, pitch, yaw)
+        self._last_time = None
+        return self.attitude
+
+    @property
+    def attitude(self):
+        """Return a snapshot of the current attitude in degrees."""
+        return IMUAttitude(
+            self._attitude.roll, self._attitude.pitch, self._attitude.yaw
+        )
+
+    def update(self, sample, dt=None):
+        """Update from one :class:`IMUData` sample and return an attitude.
+
+        Pass ``dt`` in seconds for deterministic replay/testing.  When it is
+        omitted, elapsed monotonic time is used.  The first valid sample uses
+        gravity to initialize roll/pitch and does not integrate yaw.
+        """
+        try:
+            acc = tuple(sample.acc)
+            gyro = tuple(sample.gyro)
+        except (AttributeError, TypeError) as error:
+            raise ValueError("sample must provide three-axis acc and gyro values") from error
+        if len(acc) != 3 or len(gyro) != 3 or any(
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not isfinite(value)
+            for value in (*acc, *gyro)
+        ):
+            raise ValueError("sample acc and gyro must each contain three finite numbers")
+
+        now = monotonic()
+        if dt is None:
+            dt = None if self._last_time is None else now - self._last_time
+        elif (
+            isinstance(dt, bool)
+            or not isinstance(dt, (int, float))
+            or not 0.0 < dt <= 1.0
+        ):
+            raise ValueError("dt must be a number greater than 0 and at most 1 second")
+        self._last_time = now
+
+        roll_acc, pitch_acc = self._acc_tilt(acc)
+        if dt is None:
+            if roll_acc is not None:
+                self._attitude.roll = roll_acc
+                self._attitude.pitch = pitch_acc
+            return self.attitude
+
+        roll = self._attitude.roll + float(gyro[0]) * dt
+        pitch = self._attitude.pitch + float(gyro[1]) * dt
+        yaw = self._wrap_degrees(self._attitude.yaw + float(gyro[2]) * dt)
+        if roll_acc is not None:
+            gyro_weight = (1.0 - self.correction) ** (dt * self.reference_hz)
+            roll = self._blend_angle(roll, roll_acc, gyro_weight)
+            pitch = self._blend_angle(pitch, pitch_acc, gyro_weight)
+        self._attitude.roll = self._wrap_degrees(roll)
+        self._attitude.pitch = self._wrap_degrees(pitch)
+        self._attitude.yaw = yaw
+        return self.attitude
+
+    @staticmethod
+    def _acc_tilt(acc):
+        """Return gravity-derived roll/pitch, or ``(None, None)`` when invalid."""
+        ax, ay, az = (float(value) for value in acc)
+        norm = sqrt(ax * ax + ay * ay + az * az)
+        if norm <= 1e-9:
+            return None, None
+        return degrees(atan2(ay, az)), degrees(atan2(-ax, sqrt(ay * ay + az * az)))
+
+    @staticmethod
+    def _wrap_degrees(value):
+        """Normalize an angle to [-180, 180)."""
+        return (value + 180.0) % 360.0 - 180.0
+
+    @classmethod
+    def _blend_angle(cls, predicted, measured, gyro_weight):
+        """Blend the shortest angular difference without 180-degree jumps."""
+        return predicted + (1.0 - gyro_weight) * cls._wrap_degrees(measured - predicted)
 
 
 _CALIBRATION_PATH = "/data/etc/dara/imu_calibration.json"

@@ -110,6 +110,47 @@ class IMUData:
         ...
 
 
+class IMUAttitude:
+    """Roll, pitch, and relative yaw estimated from a six-axis IMU, in degrees."""
+    roll: float
+    pitch: float
+    yaw: float
+    def __init__(self, roll: float = ..., pitch: float = ..., yaw: float = ...) -> None:
+        """Create an attitude in degrees."""
+        ...
+    @property
+    def roll_radians(self) -> float:
+        """Roll in radians."""
+        ...
+    @property
+    def pitch_radians(self) -> float:
+        """Pitch in radians."""
+        ...
+    @property
+    def yaw_radians(self) -> float:
+        """Relative yaw in radians."""
+        ...
+
+
+class IMUComplementaryFilter:
+    """A six-axis complementary attitude filter for IMUData samples."""
+    correction: float
+    reference_hz: float
+    def __init__(self, correction: float = ..., reference_hz: float = ...) -> None:
+        """Create a 98% gyro / 2% accelerometer filter by default."""
+        ...
+    def reset(self, roll: float = ..., pitch: float = ..., yaw: float = ...) -> IMUAttitude:
+        """Reset attitude and timing; all angles are degrees."""
+        ...
+    @property
+    def attitude(self) -> IMUAttitude:
+        """Return a snapshot of the current attitude in degrees."""
+        ...
+    def update(self, sample: IMUData, dt: float | None = ...) -> IMUAttitude:
+        """Update from one sample; gyro is degrees/s and acceleration may be g or m/s²."""
+        ...
+
+
 
 _CALIBRATION_PATH = ...
 class IMU(ABC):
