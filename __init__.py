@@ -46,6 +46,7 @@ _SUBMODULES = (
     "nn",
     "audio",
     "lv",
+    "screen",
     "bus",
     "core",
     "device",
