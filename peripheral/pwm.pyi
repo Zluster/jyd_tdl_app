@@ -13,8 +13,8 @@ class PWM:
     """A PWM output selected by its board configuration identifier."""
     info: PWMInfo
     _periphery_instance: _PeripheryPWM | None
-    def __init__(self, id: int | str, freq: int | float | None = ..., duty: int | float | None = ..., enable: bool | None = ..., *, auto_open: bool = ...) -> None:
-        """Create a PWM output and optionally open its mapped channel."""
+    def __init__(self, id: int | str, freq: int | float | None = ..., duty: int | float | None = ..., enable: bool | None = ..., *, frequency: int | float | None = ..., duty_cycle: int | float | None = ..., auto_open: bool = ...) -> None:
+        """Create a PWM output; prefer frequency (Hz) and duty_cycle (0.0-1.0)."""
         ...
 
     def open(self) -> None:
@@ -65,6 +65,12 @@ class PWM:
 
     def set_duty(self, value: int | float) -> None:
         """Set the output duty cycle as a ratio from 0.0 to 1.0."""
+        ...
+    def get_duty_percent(self) -> float:
+        """Read duty cycle as a percentage from 0.0 through 100.0."""
+        ...
+    def set_duty_percent(self, value: int | float) -> None:
+        """Set duty cycle as a percentage from 0.0 through 100.0."""
         ...
     @property
     def _backend(self) -> _PeripheryPWM: ...

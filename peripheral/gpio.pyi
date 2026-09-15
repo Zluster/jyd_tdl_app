@@ -46,12 +46,12 @@ class GPIO:
     """A GPIO pin selected by its board configuration identifier."""
     info: GPIOInfo
     _periphery_instance: _PeripheryGPIO | None
-    def __init__(self, id: int | str, direction: GPIODirection = ..., pull: GPIOPull = ..., edge: GPIOEdge = ..., drive: GPIODrive = ..., inverted: bool = ..., *, auto_open: bool = ...) -> None:
-        """Create a GPIO pin and optionally open its mapped line."""
+    def __init__(self, id: int | str, direction: GPIODirection = ..., pull: GPIOPull = ..., edge: GPIOEdge = ..., drive: GPIODrive = ..., inverted: bool = ..., *, initial: bool | None = ..., active_low: bool | None = ..., auto_open: bool = ...) -> None:
+        """Create a GPIO pin; use OUT with initial=True/False for an output level."""
         ...
 
-    def reset(self, direction: GPIODirection = ..., pull: GPIOPull = ..., edge: GPIOEdge = ..., drive: GPIODrive = ..., inverted: bool = ...) -> None:
-        """Set the GPIO direction, pull, edge, drive, and active-low configuration."""
+    def reset(self, direction: GPIODirection = ..., pull: GPIOPull = ..., edge: GPIOEdge = ..., drive: GPIODrive = ..., inverted: bool = ..., *, initial: bool | None = ..., active_low: bool | None = ...) -> None:
+        """Set GPIO configuration; initial requires direction=GPIODirection.OUT."""
         ...
 
     @property
@@ -77,6 +77,11 @@ class GPIO:
     @property
     def inverted(self) -> bool:
         """Whether GPIO values use active-low logic."""
+        ...
+
+    @property
+    def active_low(self) -> bool:
+        """Whether GPIO values use active-low logic (alias of inverted)."""
         ...
 
     def open(self) -> None:

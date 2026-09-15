@@ -245,6 +245,16 @@ class PinMap:
         ...
 
     @classmethod
+    def list_ids(cls, kind: str) -> tuple[str, ...]:
+        """Return configured identifiers for adc, softkey, gpio, i2c, pwm, spi, or uart."""
+        ...
+
+    @classmethod
+    def describe(cls, kind: str, identifier: int | str) -> dict[str, object]:
+        """Return a plain descriptive mapping for one configured peripheral."""
+        ...
+
+    @classmethod
     def get_pins(cls) -> tuple[str, ...]:
         """Return the configured pin identifiers."""
         ...

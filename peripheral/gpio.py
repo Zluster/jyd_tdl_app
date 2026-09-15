@@ -64,13 +64,25 @@ class GPIO:
         drive = GPIODrive.DEFAULT,
         inverted = False,
         *,
+        initial = None,
+        active_low = None,
         auto_open = True,
     ):
-        """Create a GPIO pin and optionally open its mapped line."""
+        """Create a mapped GPIO line and optionally open it.
+
+        For an output, prefer the explicit form
+        ``GPIO("LED", GPIODirection.OUT, initial=False)``.  ``initial`` is
+        the inactive/active level applied while requesting the line.  The
+        older ``GPIODirection.HIGH`` and ``GPIODirection.LOW`` forms remain
+        supported.  ``active_low`` is a readable alias for ``inverted``.
+        """
         self.id = id
         self.info = PinMap.get_gpio(id)
         self._periphery_instance = None
-        self.reset(direction, pull, edge, drive, inverted)
+        self.reset(
+            direction, pull, edge, drive, inverted,
+            initial=initial, active_low=active_low,
+        )
         if auto_open:
             self.open()
 
@@ -81,8 +93,16 @@ class GPIO:
         edge = GPIOEdge.NONE,
         drive = GPIODrive.DEFAULT,
         inverted = False,
+        *,
+        initial = None,
+        active_low = None,
     ):
-        """Set the GPIO direction, pull, edge, drive, and active-low configuration."""
+        """Set GPIO configuration and re-open an already open line.
+
+        ``initial`` may be used only with ``GPIODirection.OUT`` and is a
+        boolean initial output level.  ``active_low`` and ``inverted`` select
+        the same Linux active-low behavior; they must agree if both are used.
+        """
         if not isinstance(direction, GPIODirection):
             raise ValueError("direction must be a GPIODirection value")
         if not isinstance(pull, GPIOPull):
@@ -93,6 +113,18 @@ class GPIO:
             raise ValueError("drive must be a GPIODrive value")
         if not isinstance(inverted, bool):
             raise ValueError("inverted must be a bool")
+        if active_low is not None:
+            if not isinstance(active_low, bool):
+                raise ValueError("active_low must be a bool or None")
+            if inverted is not False and inverted != active_low:
+                raise ValueError("inverted and active_low must have the same value")
+            inverted = active_low
+        if initial is not None:
+            if not isinstance(initial, bool):
+                raise ValueError("initial must be a bool or None")
+            if direction is not GPIODirection.OUT:
+                raise ValueError("initial requires direction=GPIODirection.OUT")
+            direction = GPIODirection.HIGH if initial else GPIODirection.LOW
         self._direction = direction
         self._pull = pull
         self._edge = edge
@@ -124,6 +156,11 @@ class GPIO:
     @property
     def inverted(self):
         """Whether GPIO values use active-low logic."""
+        return self._inverted
+
+    @property
+    def active_low(self):
+        """Whether GPIO values use active-low logic (alias of :attr:`inverted`)."""
         return self._inverted
 
     @wrap_error_as(GPIOError, "GPIO open failed", catch=_PeripheryGPIOError)

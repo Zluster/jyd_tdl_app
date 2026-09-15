@@ -378,6 +378,111 @@ class PinMap:
         return cls.wdt
 
     @classmethod
+    def list_ids(cls, kind):
+        """Return configured identifiers for one peripheral kind.
+
+        ``kind`` is one of ``"adc"``, ``"softkey"``, ``"gpio"``,
+        ``"i2c"``, ``"pwm"``, ``"spi"``, or ``"uart"``.  This is the
+        intended way for applications and examples to discover the names to
+        pass to constructors instead of guessing hardware channel numbers.
+        """
+        if not cls._initialized:
+            cls.init()
+        mappings = {
+            "adc": cls.adc,
+            "softkey": cls.softkey,
+            "gpio": cls.gpio,
+            "i2c": cls.i2c,
+            "pwm": cls.pwm,
+            "spi": cls.spi,
+            "uart": cls.uart,
+        }
+        try:
+            return tuple(sorted(mappings[kind]))
+        except KeyError as error:
+            available = ", ".join(mappings)
+            raise ValueError(
+                f"unknown peripheral kind '{kind}'; available kinds: {available}"
+            ) from error
+
+    @classmethod
+    def describe(cls, kind, identifier):
+        """Return a plain dictionary describing one configured peripheral.
+
+        The result deliberately uses descriptive keys such as ``line`` and
+        ``channel`` rather than exposing the board-config's ambiguous ``num``
+        field.  It is suitable for startup diagnostics and user-facing setup
+        tools; use the typed ``get_*`` methods for driver implementation.
+        """
+        if not isinstance(kind, str):
+            raise ValueError("kind must be a peripheral kind string")
+        getters = {
+            "adc": cls.get_adc,
+            "gpio": cls.get_gpio,
+            "i2c": cls.get_i2c,
+            "pwm": cls.get_pwm,
+            "spi": cls.get_spi,
+            "uart": cls.get_uart,
+        }
+        try:
+            getter = getters[kind]
+        except KeyError as error:
+            available = ", ".join(getters)
+            raise ValueError(
+                f"describe does not support '{kind}'; available kinds: {available}"
+            ) from error
+        info = getter(identifier)
+        if kind == "gpio":
+            return {
+                "id": cls._gpio_name(identifier),
+                "pin": info.pin,
+                "function": info.pin_func,
+                "gpiochip": info.chip,
+                "line": info.num,
+            }
+        if kind == "pwm":
+            return {
+                "id": cls._pwm_name(identifier),
+                "pin": info.pin,
+                "function": info.pin_func,
+                "pwmchip": info.chip,
+                "channel": info.num,
+                "frequency": info.freq,
+                "duty_cycle": info.duty_cycle,
+                "enabled": info.enable,
+            }
+        if kind == "i2c":
+            return {
+                "id": cls._i2c_name(identifier),
+                "device": info.dev,
+                "scl_pin": info.scl,
+                "sda_pin": info.sda,
+            }
+        if kind == "uart":
+            return {
+                "id": cls._uart_name(identifier),
+                "device": info.dev,
+                "tx_pin": info.tx,
+                "rx_pin": info.rx,
+            }
+        if kind == "adc":
+            return {
+                "id": cls._adc_name(identifier),
+                "pin": info.pin,
+                "sysfs": info.sysfs,
+                "resolution_bits": info.resolution,
+                "vref_volts": info.vref,
+            }
+        return {
+            "id": cls._spi_name(identifier),
+            "device": info.dev,
+            "sclk_pin": info.sclk,
+            "mosi_pin": info.mosi,
+            "miso_pin": info.miso,
+            "cs_pin": info.cs,
+        }
+
+    @classmethod
     def get_pins(cls):
         """Return the configured pin identifiers."""
         if not cls._initialized:

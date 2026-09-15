@@ -25,11 +25,27 @@ class PWM:
         duty = None,
         enable = None,
         *,
+        frequency = None,
+        duty_cycle = None,
         auto_open = True,
     ):
-        """Create a PWM output and optionally open its mapped channel."""
+        """Create a PWM output and optionally open its mapped channel.
+
+        ``freq``/``duty`` are retained for compatibility.  New code should
+        prefer ``frequency`` in Hertz and ``duty_cycle`` as a 0.0 through 1.0
+        ratio, for example ``PWM("PWM0", frequency=50, duty_cycle=0.075)``.
+        Use :meth:`set_duty_percent` when a percentage is clearer.
+        """
         self.id = id
         self.info = PinMap.get_pwm(str(id))
+        if frequency is not None:
+            if freq is not None:
+                raise ValueError("use either freq or frequency, not both")
+            freq = frequency
+        if duty_cycle is not None:
+            if duty is not None:
+                raise ValueError("use either duty or duty_cycle, not both")
+            duty = duty_cycle
         self._freq = self.info.freq if freq is None else freq
         self._duty = self.info.duty_cycle if duty is None else duty
         self._enable = self.info.enable if enable is None else enable
@@ -145,6 +161,20 @@ class PWM:
         ):
             raise ValueError("duty_cycle must be a number from 0.0 through 1.0")
         self._backend.duty_cycle = value
+
+    def get_duty_percent(self):
+        """Read duty cycle as a percentage from 0.0 through 100.0."""
+        return self.get_duty() * 100.0
+
+    def set_duty_percent(self, value):
+        """Set duty cycle as a percentage from 0.0 through 100.0."""
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not 0 <= value <= 100
+        ):
+            raise ValueError("duty_percent must be a number from 0.0 through 100.0")
+        self.set_duty(value / 100.0)
 
     @property
     def _backend(self):
