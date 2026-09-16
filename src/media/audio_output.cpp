@@ -29,9 +29,23 @@ AudioOutput::Config AudioOutput::mono16k(int device, int channel, int card_id) {
   return config;
 }
 
+int AudioOutput::periodFrames() const {
+  const int rate = static_cast<int>(config_.sample_rate);
+  if (rate <= 0 || config_.points_per_frame <= 0) {
+    return 0;
+  }
+  const int period_ms = config_.points_per_frame * 1000 / rate;
+  return rate * period_ms / 1000;
+}
+
 bool AudioOutput::open(std::string *error) {
   if (opened_) {
     return true;
+  }
+  if (periodFrames() <= 0) {
+    private_audio::setError(
+        error, "points_per_frame is shorter than 1 ms at this sample rate");
+    return false;
   }
   if (!retainAudioRuntime(error)) {
     return false;
@@ -447,8 +461,9 @@ bool AudioOutput::queryState(ChannelState *state, std::string *error) const {
   }
 
   state->total = vendor_state.u32ChnTotalNum;
-  state->free = vendor_state.u32ChnFreeNum;
-  state->busy = vendor_state.u32ChnBusyNum;
+  state->busy = vendor_state.u32ChnBusyNum <= state->total
+                    ? vendor_state.u32ChnBusyNum : 0;
+  state->free = state->total - state->busy;
   return true;
 }
 

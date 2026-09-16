@@ -66,6 +66,8 @@ class AudioOutput {
   void close();
   bool isOpen() const;
 
+  int periodFrames() const;
+
  private:
   Config config_;
   bool opened_ = false;

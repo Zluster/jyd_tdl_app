@@ -1720,6 +1720,21 @@ NB_MODULE(tdl_py, m) {
         nb::arg("device") = 0,
         "True when the VO device is already enabled (panel lit)");
 
+  m.def("vo_force_disable",
+        [](int device, int layer, int channel) {
+          std::string error;
+          if (!tdl_app::ensureMmfRuntimeInitialized(&error)) {
+            raise("MMF runtime init failed: " + error);
+          }
+          CVI_VO_DisableChn(layer, channel);
+          CVI_VO_DisableVideoLayer(layer);
+          CVI_VO_Disable(device);
+        },
+        nb::arg("device") = 0, nb::arg("layer") = 0, nb::arg("channel") = 0,
+        "Force-disable a VO device/layer/channel regardless of which process "
+        "enabled it (residue cleanup after a killed process; VoOutput.close() "
+        "only disables what it opened itself).");
+
   m.def("get_bind_source_vpss",
         [](int group, int channel) {
           return getBindSource(makeMmfChannel(CVI_ID_VPSS, group, channel));

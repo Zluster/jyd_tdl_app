@@ -9,10 +9,13 @@
 #include <cstdlib>
 #include <cstdint>
 #include <cstring>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
 #include "tdl_app/audio.hpp"
+#include "tdl_app/audio_output.hpp"
 
 #if defined(TDL_PY_WITH_NPU) && !defined(TDL_PY_AUDIO_BASE_ONLY)
 #include "tdl_app/direct_keyword_spotter.hpp"
@@ -283,6 +286,272 @@ class PyAudio {
 
   tdl_app::Audio audio_;
   std::string last_error_;
+};
+
+class PyAudioOutputStream {
+ public:
+  PyAudioOutputStream() = default;
+  ~PyAudioOutputStream() {
+    // No other thread can be inside a method here: they would still hold a
+    // reference to the Python object.  Plain lock is therefore deadlock-free.
+    std::lock_guard<std::mutex> lock(mutex_);
+    closeLocked();
+  }
+
+  PyAudioOutputStream(const PyAudioOutputStream &) = delete;
+  PyAudioOutputStream &operator=(const PyAudioOutputStream &) = delete;
+
+  bool open(int sample_rate, int channels, int bit_depth, int output_volume,
+            int points_per_frame, int frame_count, int timeout_ms,
+            int ao_device, int ao_channel, int ao_card_id) {
+    std::string error;
+    tdl_app::AudioOutput::Config config;
+    if (!buildConfig(sample_rate, channels, bit_depth, output_volume,
+                     points_per_frame, frame_count, ao_device, ao_channel,
+                     ao_card_id, &config, &error)) {
+      last_error_ = error;
+      return false;
+    }
+    if (timeout_ms < 0) {
+      last_error_ = "timeout_ms must be >= 0";
+      return false;
+    }
+    bool ok = false;
+    {
+      nb::gil_scoped_release guard;
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (output_) {
+        error = "audio output stream is already open";
+      } else {
+        std::unique_ptr<tdl_app::AudioOutput> output(
+            new tdl_app::AudioOutput(config));
+        ok = output->open(&error);
+        if (ok) {
+          output_ = std::move(output);
+          bit_width_ = config.bit_width;
+          sound_mode_ = config.sound_mode;
+          channels_ = channels;
+          frame_samples_ = output_->periodFrames();
+          frame_bytes_ = static_cast<std::size_t>(frame_samples_) *
+                         static_cast<std::size_t>(channels) *
+                         static_cast<std::size_t>(bit_depth / 8);
+          timeout_ms_ = timeout_ms;
+          sequence_ = 0;
+          paused_ = false;
+        }
+      }
+    }
+    last_error_ = ok ? std::string() : error;
+    return ok;
+  }
+
+  // Send exactly one period of interleaved PCM: frame_bytes bytes, i.e.
+  // frame_samples samples per channel (pad the tail of a file with zeros, as
+  // playWav does).  Blocks for at most timeout_ms while the driver queue is full.
+  bool write(const nb::bytes &pcm) {
+    std::vector<std::uint8_t> data(pcm.size());
+    if (!data.empty()) {
+      std::memcpy(data.data(), pcm.c_str(), pcm.size());
+    }
+    std::string error;
+    bool ok = false;
+    {
+      nb::gil_scoped_release guard;
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!output_) {
+        error = "audio output stream is not open";
+      } else if (data.size() != frame_bytes_) {
+        error = "PCM block must be exactly frame_bytes (" +
+                std::to_string(frame_bytes_) + ") bytes, got " +
+                std::to_string(data.size());
+      } else {
+        tdl_app::AudioFrame frame;
+        frame.bit_width = bit_width_;
+        frame.sound_mode = sound_mode_;
+        frame.sequence = ++sequence_;
+        frame.bytes_per_channel =
+            static_cast<std::uint32_t>(data.size() / static_cast<std::size_t>(channels_));
+        // Interleaved stereo travels in plane 0, same as Audio::writeOutputChunk.
+        frame.channels.push_back(std::move(data));
+        ok = output_->writeFrame(frame, timeout_ms_, &error);
+      }
+    }
+    last_error_ = ok ? std::string() : error;
+    return ok;
+  }
+
+  bool pause() {
+    return control([this](std::string *error) {
+      if (!output_->pause(error)) return false;
+      paused_ = true;
+      return true;
+    });
+  }
+
+  bool resume() {
+    return control([this](std::string *error) {
+      if (!output_->resume(error)) return false;
+      paused_ = false;
+      return true;
+    });
+  }
+
+  bool setVolume(int volume) {
+    return control([this, volume](std::string *error) {
+      return output_->setVolume(volume, error);
+    });
+  }
+
+  // {"total", "free", "busy"} in bytes of the channel's queue (the vendor
+  // header says "number of channel buffer", but CVI_AO_QueryChnStat reports the
+  // share buffer size and its fill level in bytes), or None on failure.  busy
+  // is how much submitted audio the library has not yet handed to the hardware;
+  // all three are 0 before the first write creates the queue.
+  nb::object bufferState() {
+    tdl_app::AudioOutput::ChannelState state;
+    std::string error;
+    bool ok = false;
+    {
+      nb::gil_scoped_release guard;
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!output_) {
+        error = "audio output stream is not open";
+      } else {
+        ok = output_->queryState(&state, &error);
+      }
+    }
+    if (!ok) {
+      last_error_ = error;
+      return nb::none();
+    }
+    last_error_.clear();
+    nb::dict out;
+    out["total"] = state.total;
+    out["free"] = state.free;
+    out["busy"] = state.busy;
+    return out;
+  }
+
+  void close() {
+    nb::gil_scoped_release guard;
+    std::lock_guard<std::mutex> lock(mutex_);
+    closeLocked();
+  }
+
+  bool opened() {
+    nb::gil_scoped_release guard;
+    std::lock_guard<std::mutex> lock(mutex_);
+    return output_ != nullptr;
+  }
+
+  bool paused() {
+    nb::gil_scoped_release guard;
+    std::lock_guard<std::mutex> lock(mutex_);
+    return output_ != nullptr && paused_;
+  }
+
+  // Effective period per write(): samples per channel, and bytes.  0 while closed.
+  int frameSamples() {
+    nb::gil_scoped_release guard;
+    std::lock_guard<std::mutex> lock(mutex_);
+    return output_ ? frame_samples_ : 0;
+  }
+
+  int frameBytes() {
+    nb::gil_scoped_release guard;
+    std::lock_guard<std::mutex> lock(mutex_);
+    return output_ ? static_cast<int>(frame_bytes_) : 0;
+  }
+
+  const std::string &lastError() const { return last_error_; }
+
+ private:
+  template <typename Fn>
+  bool control(Fn fn) {
+    std::string error;
+    bool ok = false;
+    {
+      nb::gil_scoped_release guard;
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!output_) {
+        error = "audio output stream is not open";
+      } else {
+        ok = fn(&error);
+      }
+    }
+    last_error_ = ok ? std::string() : error;
+    return ok;
+  }
+
+  void closeLocked() {
+    if (output_) {
+      output_->close();
+      output_.reset();
+    }
+    paused_ = false;
+  }
+
+  static bool buildConfig(int sample_rate, int channels, int bit_depth,
+                          int output_volume, int points_per_frame,
+                          int frame_count, int ao_device, int ao_channel,
+                          int ao_card_id, tdl_app::AudioOutput::Config *config,
+                          std::string *error) {
+    switch (sample_rate) {
+      case 8000: config->sample_rate = tdl_app::AudioSampleRate::Hz8000; break;
+      case 11025: config->sample_rate = tdl_app::AudioSampleRate::Hz11025; break;
+      case 16000: config->sample_rate = tdl_app::AudioSampleRate::Hz16000; break;
+      case 22050: config->sample_rate = tdl_app::AudioSampleRate::Hz22050; break;
+      case 24000: config->sample_rate = tdl_app::AudioSampleRate::Hz24000; break;
+      case 32000: config->sample_rate = tdl_app::AudioSampleRate::Hz32000; break;
+      case 44100: config->sample_rate = tdl_app::AudioSampleRate::Hz44100; break;
+      case 48000: config->sample_rate = tdl_app::AudioSampleRate::Hz48000; break;
+      case 64000: config->sample_rate = tdl_app::AudioSampleRate::Hz64000; break;
+      default:
+        *error = "unsupported sample rate: " + std::to_string(sample_rate);
+        return false;
+    }
+    switch (bit_depth) {
+      case 8: config->bit_width = tdl_app::AudioBitWidth::Bits8; break;
+      case 16: config->bit_width = tdl_app::AudioBitWidth::Bits16; break;
+      case 24: config->bit_width = tdl_app::AudioBitWidth::Bits24; break;
+      case 32: config->bit_width = tdl_app::AudioBitWidth::Bits32; break;
+      default:
+        *error = "bit depth must be 8/16/24/32";
+        return false;
+    }
+    if (channels == 1) {
+      config->sound_mode = tdl_app::AudioSoundMode::Mono;
+    } else if (channels == 2) {
+      config->sound_mode = tdl_app::AudioSoundMode::Stereo;
+    } else {
+      *error = "channels must be 1 or 2";
+      return false;
+    }
+    if (points_per_frame <= 0 || frame_count <= 0) {
+      *error = "points_per_frame and frame_count must be > 0";
+      return false;
+    }
+    config->device = ao_device;
+    config->channel = ao_channel;
+    config->card_id = ao_card_id;
+    config->points_per_frame = points_per_frame;
+    config->frame_count = frame_count;
+    config->channel_count = channels;
+    config->volume_db = output_volume;
+    return true;
+  }
+
+  std::mutex mutex_;
+  std::unique_ptr<tdl_app::AudioOutput> output_;
+  tdl_app::AudioBitWidth bit_width_ = tdl_app::AudioBitWidth::Bits16;
+  tdl_app::AudioSoundMode sound_mode_ = tdl_app::AudioSoundMode::Mono;
+  int channels_ = 1;
+  int frame_samples_ = 0;
+  std::size_t frame_bytes_ = 0;
+  int timeout_ms_ = 100;
+  std::uint32_t sequence_ = 0;
+  bool paused_ = false;
+  std::string last_error_;   // only touched with the GIL held
 };
 #endif
 
@@ -842,6 +1111,45 @@ void registerAudioBindings(nb::module_ &m) {
            "Return current output volume, or None on failure.")
       .def("status", &PyAudio::status)
       .def_prop_ro("last_error", &PyAudio::lastError);
+
+  // --- Streaming AO output -------------------------------------------------
+  nb::class_<PyAudioOutputStream>(m, "AudioOutputStream",
+      "One AO output channel owned by this object. open() with the PCM format, "
+      "then write() interleaved PCM blocks of exactly frame_bytes bytes "
+      "(frame_samples samples per channel -- the driver rounds points_per_frame "
+      "to whole milliseconds); pause/resume/buffer_state map onto the driver. "
+      "The channel is released by close() or when the object is garbage "
+      "collected. Methods return False on a hardware error; inspect last_error.")
+      .def(nb::init<>())
+      .def("open", &PyAudioOutputStream::open,
+           nb::arg("sample_rate") = 16000, nb::arg("channels") = 1,
+           nb::arg("bit_depth") = 16, nb::arg("output_volume") = 16,
+           nb::arg("points_per_frame") = 320, nb::arg("frame_count") = 8,
+           nb::arg("timeout_ms") = 100, nb::arg("ao_device") = 0,
+           nb::arg("ao_channel") = 0, nb::arg("ao_card_id") = -1,
+           "Open the AO channel for the given PCM format; read frame_samples "
+           "afterwards for the period the driver settled on.")
+      .def("write", &PyAudioOutputStream::write, nb::arg("pcm"),
+           "Send exactly one period (frame_bytes bytes) of interleaved PCM; "
+           "blocks at most timeout_ms while the driver queue is full.")
+      .def("pause", &PyAudioOutputStream::pause,
+           "Stop the driver from consuming queued audio (CVI_AO_PauseChn).")
+      .def("resume", &PyAudioOutputStream::resume,
+           "Continue consuming queued audio (CVI_AO_ResumeChn).")
+      .def("set_volume", &PyAudioOutputStream::setVolume, nb::arg("volume"),
+           "Change the output volume while open.")
+      .def("buffer_state", &PyAudioOutputStream::bufferState,
+           "Return {total, free, busy} bytes of the channel queue (busy = written "
+           "but not yet handed to the hardware), or None on failure.")
+      .def("close", &PyAudioOutputStream::close,
+           "Release the AO channel (idempotent).")
+      .def_prop_ro("opened", &PyAudioOutputStream::opened)
+      .def_prop_ro("paused", &PyAudioOutputStream::paused)
+      .def_prop_ro("frame_samples", &PyAudioOutputStream::frameSamples,
+                   "Samples per channel the driver accepts per write(); 0 when closed.")
+      .def_prop_ro("frame_bytes", &PyAudioOutputStream::frameBytes,
+                   "Bytes per write(); 0 when closed.")
+      .def_prop_ro("last_error", &PyAudioOutputStream::lastError);
 #endif
 
 #if defined(TDL_PY_WITH_NPU) && !defined(TDL_PY_AUDIO_BASE_ONLY)

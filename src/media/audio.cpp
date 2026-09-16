@@ -415,7 +415,9 @@ bool playPcmWav(const std::string &path, const AudioIoConfig &requested,
   if (!output.open(error)) {
     return false;
   }
-  const std::size_t frame_bytes = static_cast<std::size_t>(config.points_per_frame) *
+  // The driver only accepts frames of exactly its period, which is
+  // points_per_frame rounded to whole milliseconds (see AudioOutput::periodFrames).
+  const std::size_t frame_bytes = static_cast<std::size_t>(output.periodFrames()) *
                                   static_cast<std::size_t>(block_align);
   std::uint32_t remaining = data_size;
   std::uint32_t sequence = 0;
