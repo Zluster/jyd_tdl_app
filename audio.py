@@ -1,8 +1,12 @@
-"""CV184X real-time audio algorithms.
+"""CV184X real-time audio algorithms and playback.
 
 ``KeywordSpotter`` accepts Chinese text at runtime. The CV184X KWS model
 internally uses tone-marked pinyin pieces, which are converted here before a
 keyword is registered with the native streaming recognizer.
+
+``WavPlayer`` plays one PCM WAV file at a time with pause/resume/stop and
+progress, on top of the low-level ``AudioOutputStream`` (one AO channel per
+object).  ``Audio.play_wav`` remains the simple blocking one-shot playback.
 """
 
 from __future__ import annotations
@@ -10,6 +14,9 @@ from __future__ import annotations
 import configparser
 import os
 import tempfile
+import threading
+import time
+import wave
 from functools import lru_cache
 
 import tdl_audio
@@ -79,6 +86,317 @@ class Audio:
 
     def output_volume(self):
         return self._native.output_volume()
+
+
+#: Low-level AO output: one channel per object, interleaved PCM in, with
+#: pause/resume/buffer_state.  See WavPlayer for the file-level API.
+AudioOutputStream = tdl_py.AudioOutputStream
+
+
+class WavPlayer:
+    """Play one uncompressed PCM WAV file with pause/resume/stop and progress.
+
+    The file is parsed with the standard ``wave`` module and streamed by a
+    background thread into an :class:`AudioOutputStream`; the AO channel is
+    opened per track with the file's own sample rate / channels / bit depth.
+    The driver only accepts blocks of exactly its period, and it rounds the
+    requested ``points_per_frame`` to whole milliseconds (320 samples are
+    20 ms at 16 kHz but 288 at 48 kHz), so by default the block is chosen as
+    20 ms of the track's own rate and the size the driver actually settled on
+    (``stream.frame_samples``) is what gets written.
+
+    The library's own queue is 64 periods (about 1.3 s) deep and cannot be
+    dropped safely: ``CVI_AO_ClearChnBuf`` leaves a mark that makes the
+    following close wait about 10 s (vendor bug, see AudioOutputStream).  So
+    the worker keeps at most ``_QUEUE_PERIODS`` blocks queued and a stop just
+    lets the driver drain them: stopping or switching tracks -- including on
+    application exit -- goes quiet within roughly a tenth of a second.
+
+        player = audio.WavPlayer(volume=16)
+        player.play("/root/jyd_data/music/song.wav")   # False + last_error on failure
+        player.pause(); player.resume()
+        st = player.status()   # state/path/elapsed_ms/total_ms/volume/error
+        player.stop()          # also releases the AO channel
+
+    ``state`` is one of ``idle`` (nothing loaded / stopped), ``playing``,
+    ``paused``, ``finished`` (track played to the end) or ``error``.  There is
+    no seek; the playlist logic (next track, repeat) belongs to the caller.
+    """
+
+    IDLE, PLAYING, PAUSED, FINISHED, ERROR = "idle", "playing", "paused", "finished", "error"
+
+    #: consecutive driver write failures tolerated before giving up (each one
+    #: waited timeout_ms already); a full queue normally frees a slot within
+    #: one frame period, so this only triggers on a real AO fault
+    _MAX_WRITE_RETRIES = 25
+    #: how long to wait for the driver to play out the tail after the last write
+    _DRAIN_TIMEOUT_S = 2.0
+    #: default block length; a whole number of ms so the driver keeps it as is
+    _BLOCK_MS = 20
+    #: most blocks kept queued in the library (about 120 ms at 20 ms blocks):
+    #: enough headroom against scheduling hiccups, short enough that close()
+    #: drains it in a few tens of ms
+    _QUEUE_PERIODS = 6
+    #: periods the hardware FIFO holds beyond the library queue (the dual-OS
+    #: driver clamps its period count to 3); waited out at a natural end
+    _TAIL_PERIODS = 3
+
+    def __init__(self, volume: int = 16, points_per_frame=None,
+                 frame_count: int = 8, timeout_ms: int = 100,
+                 ao_device: int = 0, ao_channel: int = 0, ao_card_id: int = -1):
+        """``points_per_frame`` None (default) means 20 ms of each track's own
+        sample rate; an explicit value is passed to the driver as is."""
+        self._volume = int(volume)
+        self._points = None if points_per_frame is None else int(points_per_frame)
+        self._frame_count = int(frame_count)
+        self._timeout_ms = int(timeout_ms)
+        self._ao = (int(ao_device), int(ao_channel), int(ao_card_id))
+        self._cond = threading.Condition()   # guards every field below
+        self._state = self.IDLE
+        self._path = None
+        self._error = ""
+        self._stream = None
+        self._thread = None
+        self._stop_requested = False
+        self._paused = False
+        self._rate = 0
+        self._total_ms = 0
+        self._frame_samples = 0      # samples per channel in one driver block (current track)
+        self._sample_bytes = 0       # bytes per sample frame (channels x sample width)
+        self._frames_written = 0     # sample frames (per channel) handed to the driver
+
+    # ---- control ----
+
+    def play(self, path: str) -> bool:
+        """Stop whatever is playing and start ``path`` from the beginning."""
+        self.stop()
+        try:
+            info = self._probe(path)
+        except (OSError, wave.Error, ValueError) as error:
+            self._set_error("%s: %s" % (path, error))
+            return False
+        rate, channels, sample_width, nframes = info
+        points = self._points or max(1, rate * self._BLOCK_MS // 1000)
+        stream = AudioOutputStream()
+        if not stream.open(rate, channels, sample_width * 8, self._volume,
+                           points, self._frame_count, self._timeout_ms,
+                           *self._ao):
+            self._set_error(stream.last_error)
+            return False
+        frame_samples = stream.frame_samples     # what the driver really accepts per write
+        with self._cond:
+            self._stream = stream
+            self._path = path
+            self._error = ""
+            self._rate = rate
+            self._total_ms = nframes * 1000 // rate if rate else 0
+            self._frame_samples = frame_samples
+            self._sample_bytes = channels * sample_width
+            self._frames_written = 0
+            self._stop_requested = False
+            self._paused = False
+            self._state = self.PLAYING
+            self._thread = threading.Thread(target=self._pump,
+                                            args=(path, stream, frame_samples),
+                                            name="dara-wav-player", daemon=True)
+            self._thread.start()
+        return True
+
+    def pause(self) -> bool:
+        with self._cond:
+            if self._state != self.PLAYING:
+                return False
+            self._paused = True          # worker stops feeding after its current write
+            self._state = self.PAUSED
+            stream = self._stream
+        return self._report(stream, stream.pause())
+
+    def resume(self) -> bool:
+        with self._cond:
+            if self._state != self.PAUSED:
+                return False
+            stream = self._stream
+        ok = stream.resume()             # let the driver run again first...
+        with self._cond:
+            self._paused = False         # ...then wake the worker
+            self._state = self.PLAYING
+            self._cond.notify_all()
+        return self._report(stream, ok)
+
+    def stop(self) -> bool:
+        """Stop feeding, let the short queue drain and release the AO channel
+        (safe to call anytime; returns within about a tenth of a second)."""
+        with self._cond:
+            self._stop_requested = True
+            self._paused = False
+            self._cond.notify_all()
+            thread, stream = self._thread, self._stream
+            self._thread = None
+            self._stream = None
+            if self._state in (self.PLAYING, self.PAUSED):
+                self._state = self.IDLE
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=2.0)
+            if thread.is_alive():
+                print("dara.audio.WavPlayer: playback worker did not stop")
+        if stream is not None:
+            # close() lets the driver drain what is queued (at most _QUEUE_PERIODS
+            # blocks); a paused channel would never drain, so resume it first
+            if stream.paused:
+                stream.resume()
+            stream.close()
+        return True
+
+    close = stop
+
+    def set_volume(self, volume: int) -> bool:
+        """Change the output volume; applies immediately if a track is open."""
+        with self._cond:
+            self._volume = int(volume)
+            stream = self._stream
+        if stream is None:
+            return True
+        return self._report(stream, stream.set_volume(self._volume))
+
+    # ---- state ----
+
+    def status(self) -> dict:
+        """Snapshot for the UI.  elapsed_ms counts samples handed to the driver
+        minus what the driver still holds, so it stops moving while paused."""
+        with self._cond:
+            state, path, error = self._state, self._path, self._error
+            stream, rate, sample_bytes = self._stream, self._rate, self._sample_bytes
+            frames, total_ms, volume = self._frames_written, self._total_ms, self._volume
+        elapsed_ms = 0
+        if rate and frames:
+            pending = 0
+            if stream is not None and state in (self.PLAYING, self.PAUSED):
+                buf = stream.buffer_state()          # busy is in bytes
+                if buf is not None and sample_bytes:
+                    pending = buf["busy"] // sample_bytes
+            elapsed_ms = max(0, (frames - pending) * 1000 // rate)
+            if state == self.FINISHED or elapsed_ms > total_ms:
+                elapsed_ms = total_ms
+        return {"state": state, "path": path, "elapsed_ms": elapsed_ms,
+                "total_ms": total_ms, "volume": volume, "error": error}
+
+    @property
+    def state(self) -> str:
+        with self._cond:
+            return self._state
+
+    @property
+    def last_error(self) -> str:
+        with self._cond:
+            return self._error
+
+    # ---- internals ----
+
+    @staticmethod
+    def _probe(path):
+        """Validate the file and return (rate, channels, sample_width, nframes)."""
+        with wave.open(path, "rb") as source:
+            if source.getcomptype() != "NONE":
+                raise ValueError("only uncompressed PCM WAV is supported")
+            rate = source.getframerate()
+            channels = source.getnchannels()
+            width = source.getsampwidth()
+            nframes = source.getnframes()
+        if channels not in (1, 2) or width not in (1, 2, 3, 4) or rate <= 0:
+            raise ValueError("unsupported WAV layout: %d Hz, %d ch, %d bytes/sample"
+                             % (rate, channels, width))
+        if nframes <= 0:
+            raise ValueError("WAV has no audio data")
+        return rate, channels, width, nframes
+
+    def _keep_going(self):
+        """Block while paused; False once stop() was requested."""
+        with self._cond:
+            while self._paused and not self._stop_requested:
+                self._cond.wait()
+            return not self._stop_requested
+
+    def _pump(self, path, stream, frame_samples):
+        """Worker: feed blocks of exactly one driver period (frame_samples per
+        channel), never letting more than _QUEUE_PERIODS of them pile up in the
+        library, honouring pause/stop, then wait for the driver to play out the
+        tail before reporting finished.  On a stop request it returns at once
+        and leaves close to stop()."""
+        try:
+            with wave.open(path, "rb") as source:
+                rate = source.getframerate()
+                frame_bytes = frame_samples * source.getnchannels() * source.getsampwidth()
+                queue_bytes = self._QUEUE_PERIODS * frame_bytes
+                half_period_s = frame_samples / (2.0 * rate)
+                while self._keep_going():
+                    data = source.readframes(frame_samples)
+                    if not data:
+                        break
+                    if len(data) < frame_bytes:          # last block: zero-pad, as playWav does
+                        data += b"\0" * (frame_bytes - len(data))
+                    # pace: wait until this block fits under _QUEUE_PERIODS queued
+                    while True:
+                        buf = stream.buffer_state()
+                        if buf is None or buf["busy"] + frame_bytes <= queue_bytes:
+                            break
+                        time.sleep(half_period_s)
+                        if not self._keep_going():
+                            return
+                    retries = 0
+                    while not stream.write(data):
+                        # a full driver queue frees a slot within one frame period;
+                        # anything longer than _MAX_WRITE_RETRIES writes is a fault
+                        retries += 1
+                        if retries > self._MAX_WRITE_RETRIES:
+                            raise RuntimeError(stream.last_error or "audio output write failed")
+                        time.sleep(0.02)
+                        if not self._keep_going():
+                            return
+                    with self._cond:
+                        self._frames_written += frame_samples
+                else:
+                    return                               # stopped while paused
+            deadline = time.monotonic() + self._DRAIN_TIMEOUT_S
+            while time.monotonic() < deadline:
+                if not self._keep_going():
+                    return
+                buf = stream.buffer_state()
+                if buf is None or buf["busy"] == 0:
+                    break
+                time.sleep(0.02)
+            # the library queue is empty; give the hardware FIFO time to play
+            # its last periods before the channel is torn down
+            time.sleep(self._TAIL_PERIODS * frame_samples / float(rate))
+            if not self._keep_going():
+                return
+            with self._cond:
+                if self._stop_requested:
+                    return
+                self._state = self.FINISHED
+                self._stream = None
+            stream.close()                # natural end: release the AO channel
+        except Exception as error:        # file/driver fault: report, keep the object usable
+            with self._cond:
+                if self._stop_requested:
+                    return
+                self._state = self.ERROR
+                self._error = str(error)
+                self._stream = None
+            stream.close()
+
+    def _set_error(self, message):
+        with self._cond:
+            self._state = self.ERROR
+            self._error = message
+            self._path = None
+            self._stream = None
+            self._thread = None
+
+    def _report(self, stream, ok):
+        if not ok:
+            with self._cond:
+                self._error = stream.last_error
+        return ok
 
 
 SpeakerRecognizer = tdl_audio.SpeakerRecognizer
@@ -335,6 +653,8 @@ class KeywordSpotter:
 
 __all__ = [
     "Audio",
+    "AudioOutputStream",
+    "WavPlayer",
     "SpeakerRecognizer",
     "StreamingAsr",
     "SpeechRecognizer",

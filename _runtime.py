@@ -2,7 +2,9 @@
 
 通路与初始化顺序复制改造自 ai_cycle/app.py（已验证的独立宿主全套链路）：
 
-    MediaLink(live -> grp1 -> VO)                   幂等建链（已被绑就跳过）；
+    MediaLink(live -> grp1 -> VO)                   幂等建链（外来 bind 收编：
+                                                    force_unbind 后重绑成自己
+                                                    的，退出才拆得掉）；
                                                     live 段可换源/遮挡，见
                                                     camera.preview("front"/
                                                     "rear"/"off")
@@ -126,7 +128,6 @@ class _Runtime:
         self._cleanup_registered = False
         self._exit_requested = False  # web 退出按钮置位，UI 循环检测
         self._flush_error = None      # _on_flush 内捕获的异常，UI 循环检测
-        self._vo_lock = threading.Lock()  # _ensure_vo 可能被多线程调用
         self._mp_thread = None        # 初始化 MicroPython 的线程 id
         # 专职 UI 线程（jyd-ui）：显示初始化、tick 自转、转交队列消化
         # 都在该线程；用户线程的 lv 调用经 Mpyc 队列转交
@@ -151,6 +152,7 @@ class _Runtime:
 
         先屏蔽信号：清理中再来 Ctrl+C 会打断 OSD destroy，RGN handle
         泄漏后只能重启恢复（进程本来就在退出，屏蔽无副作用）。"""
+        self._ui_stop.set()
         for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
             try:
                 signal.signal(sig, signal.SIG_IGN)
@@ -158,16 +160,11 @@ class _Runtime:
                 pass
         # 先停 jyd-ui 线程：tick 停止、MicroPython 在属主线程内收尾
         # （deinit），teardown 拆画布时不能有并发渲染
-        self._stop_ui_thread()
-        self._teardown()
-
-    def _stop_ui_thread(self):
-        t = self._ui_thread
-        if (t is not None and t.is_alive()
-                and t is not threading.current_thread()):
-            self._ui_stop.set()
-            t.join(timeout=2.0)   # 循环最多睡一拍（10ms），正常远快于超时
+        if (self._ui_thread is not None and self._ui_thread.is_alive()
+                and self._ui_thread is not threading.current_thread()):
+            self._ui_thread.join(timeout=3)
         self._ui_thread = None
+        self._teardown()
 
     def _teardown(self):
         """关 VO -> 停外设 -> 断 flush -> 灭 MicroPython -> 销毁 OSD ->
@@ -238,16 +235,18 @@ class _Runtime:
     # ---- 显示 + LVGL ----
 
     def ensure_display(self):
-        """首次触碰 lv 的懒初始化（幂等）：拉起 jyd-ui 线程并等通路就绪。
+        """拉起 jyd-ui 线程并等通路就绪（幂等）。用户线程首次碰 lv 时若尚未就绪，
+        本调用负责等待。
 
         显示通路与 MicroPython 都在 jyd-ui 线程上建立/运行，本调用只
         负责拉起并等待；初始化失败时（UI 线程已回滚退出）把记录的
         原因在调用方线程重抛。"""
+        if self._ui_stop.is_set():
+            return None
         if self._display_ready:
             return self
         if self._ui_thread is None or not self._ui_thread.is_alive():
             self._register_cleanup()
-            self._ui_stop = threading.Event()
             self._ui_error = None
             t = threading.Thread(target=self._ui_main, name="jyd-ui",
                                  daemon=True)
@@ -265,10 +264,6 @@ class _Runtime:
                 raise RuntimeError("等待显示通路就绪超时")
             time.sleep(0.02)
         return self
-
-    def wait_display_ready(self, timeout=10.0):
-        """兼容旧名：ensure_display 现在本身就等待就绪。"""
-        return self.ensure_display()
 
     def _ui_main(self):
         """jyd-ui 线程主体：建显示通路 -> tick 自转 + 消化转交队列 ->
@@ -338,10 +333,16 @@ class _Runtime:
         # 1) 媒体链路：live（前摄 grp0/ch2 或后摄 grp3/ch2）-> grp1 -> VO
         #    （幂等；预览段按 _preview_rear 对齐，可随时换源）
         self._apply_preview_source()
-        if tdl_py.get_bind_source_vo(0, 0) is None:
-            link = tdl_py.MediaLink.vpss_to_vo(1, 0, 0, 0)
-            link.bind()
-            self._media_links.append(link)
+        cur_vo = tdl_py.get_bind_source_vo(0, 0)
+        if cur_vo is not None:
+            # 外来 bind 收编（理由同 _apply_preview_source）
+            if cur_vo[0] != "vpss":
+                raise RuntimeError("VO 输入源异常: %r" % (cur_vo,))
+            stale = tdl_py.MediaLink.vpss_to_vo(cur_vo[1], cur_vo[2], 0, 0)
+            stale.force_unbind()
+        link = tdl_py.MediaLink.vpss_to_vo(1, 0, 0, 0)
+        link.bind()
+        self._media_links.append(link)
 
         # 2) OSD 双缓冲 + flush 通道（先于 MicroPython 环境）。
         destroy_rgn = getattr(tdl_py, "rgn_destroy", None)
@@ -422,23 +423,23 @@ class _Runtime:
     def _apply_preview_source(self):
         """把 grp1 的 bind 源对齐到期望的 live 通道（幂等）。
 
-        bind 表只认 (源, 目标) 通道对，不认建立者：换源时外来残留
-        bind（上个进程 kill -9 未清理等）用 MediaLink.force_unbind()
-        直接拆掉再绑自己的。同源的外来 bind 沿用、不接管——固件对
-        已有源的目标重复 CVI_SYS_Bind 一律失败，"重复 bind 收编"不
-        可行，沿用也不妨碍之后换源。"""
+        bind 表只认 (源, 目标) 通道对，不认建立者。外来 bind（互斥规则
+        下即死进程残留）无论源是否相同，都用 MediaLink.force_unbind()
+        拆掉再绑自己的：同源也收编——沿用不接管的话退出时它不归我们
+        拆，残留会粘住（固件对已有源的目标重复 CVI_SYS_Bind 一律失败，
+        所以只能先拆后绑）。"""
         src_grp = (tdl_py.REAR_GROUP if self._preview_rear
                    else tdl_py.CAPTURE_GROUP)
         want = ("vpss", src_grp, tdl_py.LIVE_CHANNEL)
         cur = tdl_py.get_bind_source_vpss(1, 0)
 
-        if cur == want:
-            return          # 已是期望源（自己建的或外来沿用皆可）
+        if cur == want and self._preview_link is not None:
+            return          # 本进程已持有期望源的 bind
 
         old, self._preview_link = self._preview_link, None
         if old is not None:
             old.unbind()                        # 自己建的链路正常解绑
-        elif cur is not None:                   # 外来且源不同：强制拆掉
+        elif cur is not None:                   # 外来 bind：强制拆掉收编
             if cur[0] != "vpss":
                 raise RuntimeError("grp1 预览源异常，无法切换: %r" % (cur,))
             stale = tdl_py.MediaLink.vpss_to_vpss(cur[1], cur[2], 1, 0)
@@ -457,22 +458,21 @@ class _Runtime:
         self._exit_requested = True
 
     def _ensure_vo(self):
-        """有内容可显示后使能 VO（幂等，可多线程调用）。
+        """LVGL 首帧 flush 后使能 VO（幂等，只在 jyd-ui 线程的 flush 回调
+        里调用）。
 
-        VO 不在初始化时开，是为了避免显示未初始化的画布。原先只挂在
-        LVGL 首帧 flush 上；image.show 直绘路径不 tick LVGL，提交完一帧
-        后也要能点亮屏幕，所以抽成公共方法。两处调用时画布都已有内容
-        （LVGL 刚 flush / OSD 建立时已清成透明 + 用户首帧已提交），
-        不会闪垃圾帧。"""
+        VO 不在初始化时开，是为了避免显示未初始化的画布：flush 完成时
+        画布已有渲染好的内容，此刻点亮屏幕不会闪垃圾帧。外来已使能
+        （死进程残留）先 vo_force_disable 收编再走正常 open——VoOutput
+        只拆自己 open 的部分，不接管的话退出后 VO 一直开着。"""
         if self._vo_opened:
             return
-        with self._vo_lock:
-            if self._vo_opened or tdl_py.vo_is_enabled(0):
-                return
-            self._vo_opened = True
-            vo = tdl_py.VoOutput()
-            vo.open()
-            self._media_links.append(vo)
+        if tdl_py.vo_is_enabled(0):
+            tdl_py.vo_force_disable(0, 0, 0)
+        self._vo_opened = True
+        vo = tdl_py.VoOutput()
+        vo.open()
+        self._media_links.append(vo)
 
     def _on_flush(self, x1, y1, x2, y2, data):
         # 这是 MP/原生回调（jyd-ui 线程 tick 栈内）：任何异常都不能跨出

@@ -1,7 +1,7 @@
 """jyd.lv：嵌入 LVGL 的模块级代理。
 
-lv.* 全部属性转发到 MicroPython 里的 lvgl 模块（首次访问自动初始化
-显示通路：VPSS->VO 链路、OSD 双缓冲、嵌入解释器、触摸驱动）。UI 由
+lv.* 全部属性转发到 MicroPython 里的 lvgl 模块（显示通路随 import dara
+同步建好：VPSS->VO 链路、OSD 双缓冲、嵌入解释器、触摸驱动）。UI 由
 jyd-ui 线程自转（tick + 渲染 + 触摸分发，100 fps 上限），主线程无需
 驱动心跳；lv 调用可在任意线程发起——代理内部把每次调用排队转交
 jyd-ui 线程执行并等结果（MicroPython 不可重入且绑定该线程）。另有

@@ -15,8 +15,9 @@ import jyd 时注册加载器：进程内这三个模块名一律解析到包内
 先 import jyd 再 import tdl_py 即可。MicroPython 侧驱动（fs_driver +
 drive 显示/触摸）
 
-import 本身不碰硬件：首次用到哪块才初始化哪块（首次触碰 lv 时建
-显示通路，首次取相机时 open 通道），进程退出自动清理。
+import 即默认启动显示线程（jyd-ui：LVGL/OSD/相机预览链路；web 
+启动时左上角退出按钮立刻可见）。camera/nn/audio
+仍按需初始化（首次取相机时 open 通道），进程退出自动清理。
 
 与 launcher / ai_cycle 互斥运行（VO/OSD/相机通道独占），跑 jyd
 脚本前先停掉它们。
@@ -100,3 +101,7 @@ def __getattr__(name):
 
 def __dir__():
     return sorted(set(globals()) | set(_SUBMODULES))
+
+
+from . import _runtime
+_runtime.runtime().ensure_display()

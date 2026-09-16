@@ -45,7 +45,7 @@ with camera.read() as frame:      # 默认 AI 通道：640x640、zero-copy
 ```
 
 - `camera.read()` 返回的 `Frame` 引用 VPSS 缓冲；离开 `with` 后失效。
-- 默认 `to_screen=True`：坐标已转为屏幕 `720x480` 坐标，可直接绘制 LVGL/OSD。
+- 默认 `to_screen=True`：坐标已转为屏幕 `720x480` 坐标，可直接绘制 LVGL。
 - `to_screen=False`：返回底层 `tdl_py` 原始结果，坐标为推理帧坐标（通常是
   640x640）。
 - 无检测/无识别结果返回空列表，不返回 `None`；底层推理失败抛 `RuntimeError`。
@@ -436,7 +436,7 @@ with camera.read() as frame:
 此时返回的是底层 `tdl_py` 对象：字段结构与对应算法相同，但框、点仍是 AI 帧
 坐标（float）。其中人体姿态使用 `raw.keypoints.points`，手势是原始手结果列表，
 人脸识别是原始人脸结果列表。只有在需要映射到非 720x480 输出时才建议使用此模式；
-常规 LVGL/OSD 绘制请保留默认 `to_screen=True`。
+常规 LVGL 绘制请保留默认 `to_screen=True`。
 
 ## 旧接口兼容
 

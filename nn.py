@@ -17,7 +17,7 @@ nn.load(spec) 自动识别模型族并返回带 run(frame) 的 Model：
 结果坐标默认已映射到 720x480 屏幕坐标系（仿 launcher/apps/ai 的
 letterbox CoordMap：推理帧与屏幕显示的是同一 1600x1200 sensor 画面的
 等比嵌入，去帧黑边、按内容归一、再加屏幕黑边；ai 640x640 帧退化为
-x+40 / y-80 平移），可直接画 LVGL/OSD。转换产物是纯 Python 副本，
+x+40 / y-80 平移），可直接画 LVGL。转换产物是纯 Python 副本，
 出 with 块后仍有效。nn.load(spec, to_screen=False) 返回 tdl_py 原始
 结果（帧坐标系）。
 

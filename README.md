@@ -4,7 +4,7 @@
 传统视觉、NPU 推理（`.mud` 模型）、嵌入式 LVGL v9 UI。原生依赖
 （`tdl_py` / `_maix_image` / `mpy`）捆绑在包内，开箱即用。
 
-- import 不碰硬件：首次用到哪块才初始化哪块，进程退出自动清理
+- import 即默认启动显示线程（jyd-ui；web 启动时退出按钮立刻可见）；camera/nn/audio 按需初始化，进程退出自动清理
 - 与 launcher / ai_cycle 互斥运行（VO/OSD/相机通道独占），跑 dara 脚本前先停掉它们
 
 ## 安装
@@ -72,22 +72,19 @@ from dara import image
 
 dara 扩展：
 
-- `image.show(img)` / `img.show()`：把 RGBA Image 叠上屏幕（双缓冲 OSD
-  直绘，盖在 UI 之上）。首次调用把 img 收编进 OSD 显存（此后绘制零拷贝），
-  每次调用提交一帧；双缓冲两块画布内容独立，**每帧先 `clear()` 整幅重画**。
-  只提交叠加层、不推进 UI；画布是 B,G,R,A 字节序，要屏幕红色传
-  `color=(0, 0, 255, 255)`：
+- `image.show(img)` / `img.show()`：把 Image 同步渲染上屏，就是
+  `lv.show(img)` 的便捷写法（见下节）。内部只维护一个 LVGL 图片控件并
+  复用，零拷贝共享 img 的像素；返回时这一帧已经上屏，之后覆盖或重画
+  img 都安全。支持 L / RGB / RGBA / RGB16；显示画布是 B,G,R 字节序，
+  要屏幕红色传 `color=(0, 0, 255)`：
 
 ```python
-from dara import image
-import time
+from dara import camera, image
 
-img = image.new(size=(720, 480), mode="RGBA")
 while True:
-    img.clear()
-    img.draw_rectangle(100, 100, 300, 260, color=(0, 0, 255, 255), thickness=3)
+    img = camera.read_image()
+    img.draw_rectangle(100, 100, 300, 260, color=(0, 0, 255), thickness=3)
     image.show(img)              # 或 img.show()
-    time.sleep(0.03)
 ```
 
 - `img.to_lv(parent)` 把 Image 零拷贝显示为 LVGL 控件；等价写法
@@ -99,8 +96,9 @@ while True:
 from dara import lv
 ```
 
-`lv.*` 即 LVGL v9 API（转发到嵌入解释器，首次访问自动建显示通路）。控件、
-布局、样式等用法参考 LVGL 中文文档：
+`lv.*` 即 LVGL v9 API（转发到嵌入解释器；显示通路随 `import dara` 默认
+启动，首次访问 lv 时若尚未就绪会等待）。控件、布局、样式等用法参考 LVGL
+中文文档：
 
 <https://lvgl.100ask.net/>
 
@@ -130,7 +128,7 @@ model = nn.load("yolov8n_det_coco80.mud", threshold=0.25)
 ### `Model.run(frame)`
 
 推理一帧（`frame` 来自 `camera.read()`，调用须在 `with` 块内）。
-**结果坐标已从推理帧映射到 720×480 屏幕坐标系**，可直接用于 LVGL / OSD 画框：
+**结果坐标已从推理帧映射到 720×480 屏幕坐标系**，可直接用于 LVGL 画框：
 
 ```python
 with camera.read() as frame:
