@@ -126,36 +126,47 @@ class SensorDevice:
 class AHT10Sensor(SensorDevice):
     SENSOR_TYPE = JYDBUS_TYPE_AHT10
 
-    def measure_temperature_humidity(self) -> dict[str, object]:
-        return self.request_value()
+    def measure_temperature_humidity(self) -> tuple[float, float]:
+        """Return (temperature_c, humidity_percent)."""
+        value = self.request_value()
+        return (float(value["temperature_c"]),
+                float(value["humidity_percent"]))
 
 
 class BMP390Sensor(SensorDevice):
     SENSOR_TYPE = JYDBUS_TYPE_BMP390
 
-    def measure_temperature_pressure(self) -> dict[str, object]:
-        return self.request_value()
+    def measure_temperature_pressure(self) -> tuple[float, float]:
+        """Return (temperature_c, pressure_pa)."""
+        value = self.request_value()
+        return float(value["temperature_c"]), float(value["pressure_pa"])
 
 
 class MAX30102Sensor(SensorDevice):
     SENSOR_TYPE = JYDBUS_TYPE_MAX30102
 
-    def measure_heart_rate_oxygen(self) -> dict[str, object]:
-        return self.request_value()
+    def measure_heart_rate_oxygen(self) -> tuple[int, int]:
+        """Return (heart_rate_bpm, spo2_percent)."""
+        value = self.request_value()
+        return int(value["heart_rate_bpm"]), int(value["spo2_percent"])
 
 
 class VL53L0XSensor(SensorDevice):
     SENSOR_TYPE = JYDBUS_TYPE_VL53L0X
 
-    def measure_distance(self) -> dict[str, object]:
-        return self.request_value()
+    def measure_distance(self) -> int:
+        return int(self.request_value()["distance_mm"])
 
 
 class MFRC522Reader(SensorDevice):
     SENSOR_TYPE = JYDBUS_TYPE_MFRC522
 
-    def read_card(self) -> dict[str, object]:
-        return self.request_value()
+    def read_card(self) -> tuple[bytes, bytes] | None:
+        """Return (uid, tag_type), or None when no card is present."""
+        value = self.request_value()
+        if not value["present"]:
+            return None
+        return bytes(value["uid"]), bytes(value["tag_type"])
 
 
 class WS2812BPanel(SensorDevice):
@@ -281,58 +292,64 @@ class ZW101FingerprintSensor(SensorDevice):
 class ButtonPB1Sensor(SensorDevice):
     SENSOR_TYPE = JYDBUS_TYPE_BUTTON_PB1
 
-    def read_button(self) -> dict[str, object]:
-        return self.request_value()
+    def read_button(self) -> bool:
+        """Return True while the active-low button is pressed."""
+        return int(self.request_value()["button_level"]) == 0
 
 
 class JoystickSensor(SensorDevice):
     SENSOR_TYPE = JYDBUS_TYPE_JOYSTICK
 
-    def read_position(self) -> dict[str, object]:
-        return self.request_value()
+    def read_position(self) -> tuple[int, int]:
+        """Return (x_adc, y_adc)."""
+        value = self.request_value()
+        return int(value["x_adc"]), int(value["y_adc"])
 
 
 class PhotoresistorSensor(SensorDevice):
     SENSOR_TYPE = JYDBUS_TYPE_PHOTORESISTOR_ADC
 
-    def measure_light_level(self) -> dict[str, object]:
-        return self.request_value()
+    def measure_light_level(self) -> int:
+        return int(self.request_value()["adc"])
 
 
 class WaterLevelSensor(SensorDevice):
     SENSOR_TYPE = JYDBUS_TYPE_WATER_LEVEL_ADC
 
-    def measure_water_level(self) -> dict[str, object]:
-        return self.request_value()
+    def measure_water_level(self) -> int:
+        return int(self.request_value()["water_level_adc"])
 
 
 class SoilMoistureSensor(SensorDevice):
     SENSOR_TYPE = JYDBUS_TYPE_SOIL_MOISTURE_ADC
 
-    def measure_soil_moisture(self) -> dict[str, object]:
-        return self.request_value()
+    def measure_soil_moisture(self) -> int:
+        return int(self.request_value()["soil_moisture_adc"])
 
 
 class ZSPD4003Sensor(SensorDevice):
     SENSOR_TYPE = JYDBUS_TYPE_ZSPD4003
 
-    def measure_heart_rate_oxygen(self) -> dict[str, object]:
-        return self.request_value()
+    def measure_heart_rate_oxygen(self) -> tuple[int, int]:
+        """Return (heart_rate_bpm, spo2_percent)."""
+        value = self.request_value()
+        return int(value["heart_rate_bpm"]), int(value["spo2_percent"])
 
 
 class KnobSwitchSensor(SensorDevice):
     SENSOR_TYPE = JYDBUS_TYPE_KNOB_SWITCH_ADC
 
-    def read_position(self) -> dict[str, object]:
-        return self.request_value()
+    def read_position(self) -> int:
+        return int(self.request_value()["knob_switch_adc"])
 
 
 class PAJ7620U2GestureSensor(SensorDevice):
     SENSOR_TYPE = JYDBUS_TYPE_PAJ7620U2
     DEFAULT_UPLOAD_INTERVAL_MS = PAJ7620_AUTO_UPLOAD_INTERVAL_MS
 
-    def read_gesture(self) -> dict[str, object]:
-        return self.request_value()
+    def read_gesture(self) -> int:
+        """Return a JYDBUS_PAJ7620U2_GESTURE_* value."""
+        return int(self.request_value()["gesture"])
 
 
 class FanActuator(SensorDevice):
@@ -356,8 +373,9 @@ class FanActuator(SensorDevice):
     def turn_off(self) -> int:
         return self.set_enabled(False)
 
-    def read_state(self) -> dict[str, object]:
-        return self.request_value()
+    def read_state(self) -> int:
+        """Return the current PWM duty cycle as a percentage."""
+        return int(self.request_value()["duty_percent"])
 
 
 DEVICE_CLASS_BY_TYPE: dict[int, type[SensorDevice]] = {
