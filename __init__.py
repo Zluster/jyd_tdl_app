@@ -46,6 +46,7 @@ _SUBMODULES = (
     "image",
     "nn",
     "audio",
+    "video",
     "lv",
     "screen",
     "bus",

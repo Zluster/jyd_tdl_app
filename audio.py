@@ -61,6 +61,33 @@ class Audio:
             seconds, sample_rate, channels, input_volume,
             points_per_frame, 8, 8, timeout_ms)
 
+    def open_input_stream(self, sample_rate: int = 16000, channels: int = 1,
+                          input_volume: int = 40, points_per_frame: int = 320,
+                          timeout_ms: int = 1000, frame_count: int = 8,
+                          frame_depth: int = 8):
+        """Open a continuous PCM16 microphone stream.
+
+        Use the returned :class:`AudioInputStream` as a context manager. This
+        avoids repeatedly opening AI for each visualisation sample.
+        """
+        return AudioInputStream(self, sample_rate, channels, input_volume,
+                                points_per_frame, timeout_ms, frame_count,
+                                frame_depth)
+
+    def open_output_stream(self, sample_rate: int = 16000, channels: int = 1,
+                           output_volume: int = 16,
+                           points_per_frame: int = 960,
+                           timeout_ms: int = 1000, frame_count: int = 4,
+                           frame_depth: int = 4):
+        """Open a continuous signed-PCM16 speaker stream.
+
+        ``points_per_frame=960`` is a 60 ms period at 16 kHz and matches the
+        cloud XiaoZhi Opus packet duration.
+        """
+        return _ManagedAudioOutputStream(
+            self, sample_rate, channels, output_volume, points_per_frame,
+            timeout_ms, frame_count, frame_depth)
+
     def play_wav(self, path: str, output_volume: int = 16,
                  timeout_ms: int = 1000) -> bool:
         """Play a PCM WAV file through the selected board audio output."""
@@ -443,8 +470,74 @@ class WavPlayer:
             with self._cond:
                 self._error = stream.last_error
         return ok
+class AudioInputStream:
+    """Continuous signed-PCM microphone stream owned by one :class:`Audio`."""
+
+    def __init__(self, audio_device: Audio, sample_rate: int, channels: int,
+                 input_volume: int, points_per_frame: int,
+                 timeout_ms: int, frame_count: int, frame_depth: int):
+        self._audio = audio_device
+        self._closed = False
+        if not self._audio._native.open_input_stream(
+                sample_rate, channels, input_volume, points_per_frame,
+                frame_count, frame_depth, timeout_ms):
+            self._closed = True
+            raise RuntimeError("audio input stream open failed: " +
+                               self._audio.last_error)
+
+    def read(self):
+        """Return one signed PCM16 chunk, or ``None`` if the stream failed."""
+        if self._closed:
+            raise RuntimeError("audio input stream is closed")
+        return self._audio._native.read_input_chunk()
+
+    def close(self):
+        """Close the microphone stream. Safe to call more than once."""
+        if self._closed:
+            return True
+        self._closed = True
+        return self._audio._native.close_input_stream()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        self.close()
 
 
+class _ManagedAudioOutputStream:
+    """Continuous signed-PCM speaker stream owned by one :class:`Audio`."""
+
+    def __init__(self, audio_device: Audio, sample_rate: int, channels: int,
+                 output_volume: int, points_per_frame: int,
+                 timeout_ms: int, frame_count: int, frame_depth: int):
+        self._audio = audio_device
+        self._closed = False
+        if not self._audio._native.open_output_stream(
+                sample_rate, channels, output_volume, points_per_frame,
+                frame_count, frame_depth, timeout_ms):
+            self._closed = True
+            raise RuntimeError("audio output stream open failed: " +
+                               self._audio.last_error)
+
+    def write(self, pcm: bytes) -> bool:
+        """Queue a non-empty signed PCM16 chunk for speaker playback."""
+        if self._closed:
+            raise RuntimeError("audio output stream is closed")
+        return self._audio._native.write_output_chunk(pcm)
+
+    def close(self):
+        """Close the speaker stream. Safe to call more than once."""
+        if self._closed:
+            return True
+        self._closed = True
+        return self._audio._native.close_output_stream()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, traceback):
+        self.close()
 SpeakerRecognizer = tdl_audio.SpeakerRecognizer
 StreamingAsr = tdl_audio.StreamingAsr
 SpeechRecognizer = StreamingAsr

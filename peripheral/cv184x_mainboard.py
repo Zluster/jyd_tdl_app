@@ -1598,18 +1598,21 @@ BOARD_CONFIG = BoardConfig(
             ),
         },
         gpio={
+            # Physical Boot key.  It is a pull-up button on J14: pressing it
+            # drives PWR_GPIO_13 low.  It remains usable after boot as a
+            # normal GPIO input and is used by launcher as the app back key.
+            "BOOT": GPIOInfo(
+                pin="J14",
+                pin_func="PWR_GPIO_13",
+                chip=4,
+                num=13,
+            ),
             "LED": GPIOInfo(
                 pin="P3",
                 pin_func="XGPIOA_26",
                 chip=0,  # /dev/gpiochip0
                 num=26,
             ),
-            # "GPIOBTNBOOT": GPIOInfo(
-            #     pin="J14",
-            #     pin_func="PWR_GPIO_13",
-            #     chip=?,  # /dev/gpiochip?
-            #     num=?,
-            # ),
         },
         i2c={
             "I2C2": I2CInfo(
