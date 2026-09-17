@@ -115,12 +115,19 @@ class WavPlayer:
         player = audio.WavPlayer(volume=16)
         player.play("/root/jyd_data/music/song.wav")   # False + last_error on failure
         player.pause(); player.resume()
+        player.seek(90_000)    # jump to 1:30, keeps playing / stays paused
         st = player.status()   # state/path/elapsed_ms/total_ms/volume/error
         player.stop()          # also releases the AO channel
 
     ``state`` is one of ``idle`` (nothing loaded / stopped), ``playing``,
-    ``paused``, ``finished`` (track played to the end) or ``error``.  There is
-    no seek; the playlist logic (next track, repeat) belongs to the caller.
+    ``paused``, ``finished`` (track played to the end) or ``error``.  The
+    playlist logic (next track, repeat) belongs to the caller.
+
+    Seeking cannot reuse the open channel: the ~120 ms already queued would
+    play on and the driver's clear is off limits, so ``seek()`` halts the
+    stream (the queue drains in a few tens of ms) and opens a fresh channel
+    that continues from the target frame via ``wave.setpos``.  While paused
+    only the position moves and the channel is reopened by ``resume()``.
     """
 
     IDLE, PLAYING, PAUSED, FINISHED, ERROR = "idle", "playing", "paused", "finished", "error"
@@ -160,10 +167,12 @@ class WavPlayer:
         self._stop_requested = False
         self._paused = False
         self._rate = 0
+        self._format = None          # (rate, channels, sample_width) of the current track
+        self._nframes = 0            # sample frames in the current track
         self._total_ms = 0
         self._frame_samples = 0      # samples per channel in one driver block (current track)
         self._sample_bytes = 0       # bytes per sample frame (channels x sample width)
-        self._frames_written = 0     # sample frames (per channel) handed to the driver
+        self._frames_written = 0     # track position (sample frames) handed to the driver
 
     # ---- control ----
 
@@ -171,35 +180,34 @@ class WavPlayer:
         """Stop whatever is playing and start ``path`` from the beginning."""
         self.stop()
         try:
-            info = self._probe(path)
+            rate, channels, sample_width, nframes = self._probe(path)
         except (OSError, wave.Error, ValueError) as error:
             self._set_error("%s: %s" % (path, error))
             return False
-        rate, channels, sample_width, nframes = info
-        points = self._points or max(1, rate * self._BLOCK_MS // 1000)
-        stream = AudioOutputStream()
-        if not stream.open(rate, channels, sample_width * 8, self._volume,
-                           points, self._frame_count, self._timeout_ms,
-                           *self._ao):
-            self._set_error(stream.last_error)
-            return False
-        frame_samples = stream.frame_samples     # what the driver really accepts per write
         with self._cond:
-            self._stream = stream
             self._path = path
-            self._error = ""
+            self._format = (rate, channels, sample_width)
             self._rate = rate
-            self._total_ms = nframes * 1000 // rate if rate else 0
-            self._frame_samples = frame_samples
+            self._nframes = nframes
+            self._total_ms = nframes * 1000 // rate
             self._sample_bytes = channels * sample_width
-            self._frames_written = 0
-            self._stop_requested = False
-            self._paused = False
-            self._state = self.PLAYING
-            self._thread = threading.Thread(target=self._pump,
-                                            args=(path, stream, frame_samples),
-                                            name="dara-wav-player", daemon=True)
-            self._thread.start()
+        return self._start(path, 0)
+
+    def seek(self, elapsed_ms) -> bool:
+        """Jump to ``elapsed_ms`` (clamped to the track).  Playing: continues
+        from there on a fresh channel; paused: stays paused and resume() picks
+        up from there.  False when nothing is playing or paused."""
+        with self._cond:
+            state, path, rate, nframes = self._state, self._path, self._rate, self._nframes
+        if state not in (self.PLAYING, self.PAUSED) or path is None or not rate:
+            return False
+        frame = max(0, min(nframes, int(elapsed_ms) * rate // 1000))
+        self._halt_stream()
+        if state == self.PLAYING:
+            return self._start(path, frame)
+        with self._cond:
+            self._frames_written = frame     # what status() shows; resume() starts here
+            self._state = self.PAUSED
         return True
 
     def pause(self) -> bool:
@@ -215,7 +223,9 @@ class WavPlayer:
         with self._cond:
             if self._state != self.PAUSED:
                 return False
-            stream = self._stream
+            stream, path, frame = self._stream, self._path, self._frames_written
+        if stream is None:               # paused and then seeked: no channel open
+            return self._start(path, frame)
         ok = stream.resume()             # let the driver run again first...
         with self._cond:
             self._paused = False         # ...then wake the worker
@@ -226,6 +236,44 @@ class WavPlayer:
     def stop(self) -> bool:
         """Stop feeding, let the short queue drain and release the AO channel
         (safe to call anytime; returns within about a tenth of a second)."""
+        self._halt_stream()
+        with self._cond:
+            if self._state in (self.PLAYING, self.PAUSED):
+                self._state = self.IDLE
+        return True
+
+    close = stop
+
+    def _start(self, path, start_frame) -> bool:
+        """Open a channel for the probed track and feed it from ``start_frame``
+        (a previous stream, if any, has been halted).  Failure -> ERROR state."""
+        rate, channels, sample_width = self._format
+        points = self._points or max(1, rate * self._BLOCK_MS // 1000)
+        stream = AudioOutputStream()
+        if not stream.open(rate, channels, sample_width * 8, self._volume,
+                           points, self._frame_count, self._timeout_ms,
+                           *self._ao):
+            self._set_error(stream.last_error)
+            return False
+        frame_samples = stream.frame_samples     # what the driver really accepts per write
+        with self._cond:
+            self._stream = stream
+            self._error = ""
+            self._frame_samples = frame_samples
+            self._frames_written = start_frame
+            self._stop_requested = False
+            self._paused = False
+            self._state = self.PLAYING
+            self._thread = threading.Thread(target=self._pump,
+                                            args=(path, stream, frame_samples, start_frame),
+                                            name="dara-wav-player", daemon=True)
+            self._thread.start()
+        return True
+
+    def _halt_stream(self):
+        """Stop the worker and release the channel; the state field is left
+        to the caller.  close() lets the driver drain the short queue, so
+        this returns within about a tenth of a second."""
         with self._cond:
             self._stop_requested = True
             self._paused = False
@@ -233,21 +281,17 @@ class WavPlayer:
             thread, stream = self._thread, self._stream
             self._thread = None
             self._stream = None
-            if self._state in (self.PLAYING, self.PAUSED):
-                self._state = self.IDLE
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=2.0)
             if thread.is_alive():
                 print("dara.audio.WavPlayer: playback worker did not stop")
         if stream is not None:
-            # close() lets the driver drain what is queued (at most _QUEUE_PERIODS
-            # blocks); a paused channel would never drain, so resume it first
+            # a paused channel never drains, so it has to run again to close
+            # quickly; mute first so the ~120 ms still queued is not heard
             if stream.paused:
+                stream.set_volume(0)
                 stream.resume()
             stream.close()
-        return True
-
-    close = stop
 
     def set_volume(self, volume: int) -> bool:
         """Change the output volume; applies immediately if a track is open."""
@@ -316,18 +360,20 @@ class WavPlayer:
                 self._cond.wait()
             return not self._stop_requested
 
-    def _pump(self, path, stream, frame_samples):
+    def _pump(self, path, stream, frame_samples, start_frame):
         """Worker: feed blocks of exactly one driver period (frame_samples per
-        channel), never letting more than _QUEUE_PERIODS of them pile up in the
-        library, honouring pause/stop, then wait for the driver to play out the
-        tail before reporting finished.  On a stop request it returns at once
-        and leaves close to stop()."""
+        channel) from ``start_frame`` on, never letting more than
+        _QUEUE_PERIODS of them pile up in the library, honouring pause/stop,
+        then wait for the driver to play out the tail before reporting
+        finished.  On a stop request it returns at once and leaves close to
+        the caller of _halt_stream()."""
         try:
             with wave.open(path, "rb") as source:
                 rate = source.getframerate()
                 frame_bytes = frame_samples * source.getnchannels() * source.getsampwidth()
                 queue_bytes = self._QUEUE_PERIODS * frame_bytes
                 half_period_s = frame_samples / (2.0 * rate)
+                source.setpos(min(start_frame, source.getnframes()))
                 while self._keep_going():
                     data = source.readframes(frame_samples)
                     if not data:
