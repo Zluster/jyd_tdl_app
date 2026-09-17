@@ -1,5 +1,6 @@
-// Python audio bindings are intentionally separate from tdl_py_module.cpp.
-// They use only the project Audio API and direct CV184X BMRT algorithm cores.
+// Python media bindings kept outside the small module entry point.
+// Audio and local-video APIs share this translation unit, while vision stays
+// in tdl_py_module.cpp.
 
 #include <nanobind/nanobind.h>
 #include <nanobind/stl/string.h>
@@ -11,11 +12,13 @@
 #include <cstring>
 #include <memory>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 #include "tdl_app/audio.hpp"
 #include "tdl_app/audio_output.hpp"
+#include "tdl_app/video_player.hpp"
 
 #if defined(TDL_PY_WITH_NPU) && !defined(TDL_PY_AUDIO_BASE_ONLY)
 #include "tdl_app/direct_keyword_spotter.hpp"
@@ -111,6 +114,11 @@ class RealtimeMicrophone {
 #ifndef TDL_AUDIO_ONLY
 class PyAudio {
  public:
+  ~PyAudio() {
+    audio_.closeInputStream(nullptr);
+    audio_.closeOutputStream(nullptr);
+  }
+
   bool recordWav(const std::string &path, double seconds, int sample_rate,
                  int channels, int input_volume, int points_per_frame,
                  int frame_count, int frame_depth, int timeout_ms) {
@@ -177,6 +185,93 @@ class PyAudio {
       return nb::none();
     }
     return nb::bytes(reinterpret_cast<const char *>(pcm.data()), pcm.size());
+  }
+
+  bool openInputStream(int sample_rate, int channels, int input_volume,
+                       int points_per_frame, int frame_count, int frame_depth,
+                       int timeout_ms) {
+    tdl_app::AudioInputStreamConfig config;
+    config.io = makeConfig(sample_rate, channels, input_volume, 24,
+                           points_per_frame, frame_count, frame_depth,
+                           timeout_ms);
+    std::string error;
+    bool ok = false;
+    {
+      nb::gil_scoped_release guard;
+      ok = audio_.openInputStream(config, &error);
+    }
+    last_error_ = error;
+    return ok;
+  }
+
+  nb::object readInputChunk() {
+    tdl_app::AudioPcmChunk chunk;
+    std::string error;
+    bool ok = false;
+    {
+      nb::gil_scoped_release guard;
+      ok = audio_.readInputChunk(&chunk, &error);
+    }
+    last_error_ = error;
+    if (!ok || chunk.data.empty()) return nb::none();
+    return nb::bytes(reinterpret_cast<const char *>(chunk.data.data()),
+                     chunk.data.size());
+  }
+
+  bool closeInputStream() {
+    std::string error;
+    bool ok = false;
+    {
+      nb::gil_scoped_release guard;
+      ok = audio_.closeInputStream(&error);
+    }
+    last_error_ = error;
+    return ok;
+  }
+
+  bool openOutputStream(int sample_rate, int channels, int output_volume,
+                        int points_per_frame, int frame_count, int frame_depth,
+                        int timeout_ms) {
+    const tdl_app::AudioIoConfig config = makeConfig(
+        sample_rate, channels, 24, output_volume, points_per_frame,
+        frame_count, frame_depth, timeout_ms);
+    std::string error;
+    bool ok = false;
+    {
+      nb::gil_scoped_release guard;
+      ok = audio_.openOutputStream(config, &error);
+    }
+    last_error_ = error;
+    return ok;
+  }
+
+  bool writeOutputChunk(const nb::bytes &pcm) {
+    if (pcm.size() == 0 || pcm.size() % sizeof(std::int16_t) != 0) {
+      last_error_ = "PCM must be non-empty signed 16-bit mono bytes";
+      return false;
+    }
+    tdl_app::AudioPcmChunk chunk;
+    chunk.data.resize(pcm.size());
+    std::memcpy(chunk.data.data(), pcm.c_str(), pcm.size());
+    std::string error;
+    bool ok = false;
+    {
+      nb::gil_scoped_release guard;
+      ok = audio_.writeOutputChunk(chunk, &error);
+    }
+    last_error_ = error;
+    return ok;
+  }
+
+  bool closeOutputStream() {
+    std::string error;
+    bool ok = false;
+    {
+      nb::gil_scoped_release guard;
+      ok = audio_.closeOutputStream(&error);
+    }
+    last_error_ = error;
+    return ok;
   }
 
   bool playWav(const std::string &path, int output_volume, int timeout_ms) {
@@ -1091,6 +1186,28 @@ void registerAudioBindings(nb::module_ &m) {
            nb::arg("frame_count") = 8, nb::arg("frame_depth") = 8,
            nb::arg("timeout_ms") = 1000,
            "Capture signed interleaved PCM bytes for inference.")
+      .def("open_input_stream", &PyAudio::openInputStream,
+           nb::arg("sample_rate") = 16000, nb::arg("channels") = 1,
+           nb::arg("input_volume") = 24,
+           nb::arg("points_per_frame") = 160,
+           nb::arg("frame_count") = 8, nb::arg("frame_depth") = 8,
+           nb::arg("timeout_ms") = 1000,
+           "Open a continuous PCM microphone stream.")
+      .def("read_input_chunk", &PyAudio::readInputChunk,
+           "Read one PCM chunk from an open microphone stream.")
+      .def("close_input_stream", &PyAudio::closeInputStream,
+           "Close a continuous PCM microphone stream.")
+      .def("open_output_stream", &PyAudio::openOutputStream,
+           nb::arg("sample_rate") = 16000, nb::arg("channels") = 1,
+           nb::arg("output_volume") = 24,
+           nb::arg("points_per_frame") = 960,
+           nb::arg("frame_count") = 8, nb::arg("frame_depth") = 8,
+           nb::arg("timeout_ms") = 1000,
+           "Open a continuous PCM speaker stream.")
+      .def("write_output_chunk", &PyAudio::writeOutputChunk,
+           nb::arg("pcm"), "Write signed PCM16 bytes to an open speaker stream.")
+      .def("close_output_stream", &PyAudio::closeOutputStream,
+           "Close a continuous PCM speaker stream.")
       .def("play_wav", &PyAudio::playWav,
            nb::arg("path"), nb::arg("output_volume") = 24,
            nb::arg("timeout_ms") = 1000,
@@ -1249,5 +1366,36 @@ void registerAudioBindings(nb::module_ &m) {
       .def_prop_ro("last_error", &PyKeywordSpotter::lastError);
 #endif
 
+}
 
+void registerVideoBindings(nb::module_ &m) {
+  nb::class_<tdl_app::VideoPlayer>(m, "VideoPlayer",
+      "Local H.264 player using FFmpeg decode and hardware VPSS/VO display; "
+      "LVGL remains an overlay.")
+      .def(nb::init<>())
+      .def("play", [](tdl_app::VideoPlayer &self, const std::string &path,
+                      bool loop) {
+        std::string error;
+        bool ok = false;
+        {
+          nb::gil_scoped_release release;
+          ok = self.play(path, loop, &error);
+        }
+        if (!ok) throw std::runtime_error("video player start failed: " + error);
+      }, nb::arg("path"), nb::arg("loop") = false,
+      "Play a local H.264 MP4/H.264 file.")
+      .def("pause", &tdl_app::VideoPlayer::pause)
+      .def("resume", &tdl_app::VideoPlayer::resume)
+      .def("stop", &tdl_app::VideoPlayer::stop)
+      .def("close", &tdl_app::VideoPlayer::stop)
+      .def_prop_ro("state", &tdl_app::VideoPlayer::state)
+      .def_prop_ro("last_error", &tdl_app::VideoPlayer::lastError)
+      .def_prop_ro("playing", &tdl_app::VideoPlayer::isPlaying)
+      .def_prop_ro("width", &tdl_app::VideoPlayer::width)
+      .def_prop_ro("height", &tdl_app::VideoPlayer::height);
+}
+
+void registerMediaBindings(nb::module_ &m) {
+  registerAudioBindings(m);
+  registerVideoBindings(m);
 }

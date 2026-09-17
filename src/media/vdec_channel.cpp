@@ -1,5 +1,6 @@
 #include "tdl_app/vdec_channel.hpp"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 
@@ -70,7 +71,11 @@ std::uint32_t resolveStreamBufferSize(const VdecChannel::Config &config) {
   }
   const CVI_U32 default_size = ALIGN(
       static_cast<CVI_U32>(config.width * config.height), 0x4000);
-  return default_size > 0 ? default_size : kDefaultStreamBufferSize;
+  // The dual-OS VDEC transport copies one submitted packet to an ION buffer
+  // sized from u32StreamBufSize.  A small picture (for example 320x240) must
+  // not silently shrink that buffer below a complete IDR access unit.
+  return std::max(static_cast<CVI_U32>(kDefaultStreamBufferSize),
+                  default_size);
 }
 
 std::uint32_t resolveFrameBufferCount(const VdecChannel::Config &config) {
@@ -241,8 +246,8 @@ class VdecChannelImpl {
     if (!opened_ && !open(error)) {
       return false;
     }
-    if (!packet.data || packet.size == 0) {
-      setError(error, "vdec stream packet is empty");
+    if ((!packet.data || packet.size == 0) && !packet.end_of_stream) {
+      setError(error, "vdec stream packet is empty without EOS");
       return false;
     }
 

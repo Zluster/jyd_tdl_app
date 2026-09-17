@@ -88,6 +88,7 @@ set(TDL_APP_MEDIA_SOURCES
   src/media/sys_context.cpp
   src/media/touch_input.cpp
   src/media/video_buffer.cpp
+  src/media/video_player.cpp
   src/media/vdec_channel.cpp
   src/media/venc_channel.cpp
   src/media/vo_output.cpp
@@ -336,7 +337,7 @@ if(TDL_APP_BUILD_PYTHON)
   # follow the manual-build recipe documented in nb_combined.cpp.
   add_library(tdl_py MODULE
     python/tdl_py_module.cpp
-    python/tdl_py_audio_bindings.cpp
+    python/tdl_py_media_bindings.cpp
     third_party/nanobind/src/nb_combined.cpp
   )
   set_target_properties(tdl_py PROPERTIES

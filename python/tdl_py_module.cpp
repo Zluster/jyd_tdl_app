@@ -62,7 +62,7 @@
 
 namespace nb = nanobind;
 
-void registerAudioBindings(nb::module_ &m);
+void registerMediaBindings(nb::module_ &m);
 
 namespace {
 
@@ -1639,7 +1639,7 @@ NB_MODULE(tdl_py, m) {
         return self.clear(&error);
       });
 
-  registerAudioBindings(m);
+  registerMediaBindings(m);
 #ifdef TDL_PY_WITH_NPU
   registerAudioAlgorithmAliases(m);
 #endif
