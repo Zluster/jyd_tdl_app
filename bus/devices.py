@@ -168,6 +168,31 @@ class MFRC522Reader(SensorDevice):
             return None
         return bytes(value["uid"]), bytes(value["tag_type"])
 
+    def read_block(self, block: int) -> bytes:
+        """Read one 16-byte MIFARE Classic 1K block using default key A."""
+        return self.bus.uart.mfrc522_read_block(self.sensor_number, block)
+
+    def read_text_block(self, block: int, encoding: str = "utf-8") -> str:
+        """Read a null-padded text block and decode it."""
+        return self.read_block(block).rstrip(b"\x00").decode(encoding)
+
+    def write_block(self, block: int,
+                    data: str | bytes | bytearray) -> bytes:
+        """Write text or up to 16 bytes, padded with zeros, and verify it."""
+        if isinstance(data, str):
+            encoded = data.encode("utf-8")
+        elif isinstance(data, (bytes, bytearray)):
+            encoded = bytes(data)
+        else:
+            raise OSError(errno.EINVAL,
+                          "MFRC522 block data must be str, bytes, or bytearray")
+        if len(encoded) > 16:
+            raise OSError(errno.EINVAL,
+                          "MFRC522 block data exceeds 16 encoded bytes")
+        padded = encoded.ljust(16, b"\x00")
+        return self.bus.uart.mfrc522_write_block(self.sensor_number,
+                                                 block, padded)
+
 
 class WS2812BPanel(SensorDevice):
     SENSOR_TYPE = JYDBUS_TYPE_WS2812B
@@ -242,12 +267,14 @@ class WS2812BPanel(SensorDevice):
 
 
 class ZW101FingerprintSensor(SensorDevice):
+    """ZW111 hardware, retaining the original class name for compatibility."""
     SENSOR_TYPE = JYDBUS_TYPE_ZW101
 
     def __init__(self, bus: JydBus, sensor_number: int = 1) -> None:
         super().__init__(bus, sensor_number)
         self.timeout_ms = ZW101_CONTROL_DEFAULT_TIMEOUT_MS
         self._operation_lock = threading.Lock()
+        self.last_result: ZW101Result | None = None
 
     def set_operation_timeout(self, timeout_ms: int) -> None:
         if timeout_ms <= 0:
@@ -256,38 +283,36 @@ class ZW101FingerprintSensor(SensorDevice):
             self.timeout_ms = timeout_ms
 
     def _run_fingerprint_command(self, command: int,
-                                 fingerprint_id: int = 0) -> ZW101Result:
+                                 fingerprint_id: int | None = None,
+                                 timeout_ms: int | None = None) -> ZW101Result:
         with self._operation_lock:
+            self.last_result = None
             result = run_zw101_command(self.bus.uart, self.sensor_number,
                                        command, fingerprint_id,
-                                       self.timeout_ms)
-        if result.status:
-            status_errno = {1: errno.EBUSY, 2: errno.EINVAL,
-                            3: errno.ETIMEDOUT, 4: errno.EPROTO,
-                            5: errno.EOVERFLOW, 6: errno.EIO}
-            names = ("ok", "busy", "invalid-param", "timeout",
-                     "protocol-error", "uart-overflow", "module-error")
-            message = (names[result.status] if result.status < len(names)
-                       else "unknown")
-            error = OSError(status_errno.get(result.status, errno.EIO), message)
-            error.result = result  # type: ignore[attr-defined]
-            raise error
-        return result
+                                       self.timeout_ms if timeout_ms is None else timeout_ms)
+            self.last_result = result
+            return result
 
-    def enroll_fingerprint(self, fingerprint_id: int) -> ZW101Result:
-        return self._run_fingerprint_command(ZW101_CONTROL_ENROLL,
-                                             fingerprint_id)
+    def enroll_fingerprint(self, fingerprint_id: int | None = None) -> bool:
+        """Return whether enrollment succeeded; omit ID for auto allocation."""
+        result = self._run_fingerprint_command(ZW101_CONTROL_ENROLL,
+                                               fingerprint_id)
+        return result.status == 0 and result.module_status == 0
 
-    def match_fingerprint(self) -> ZW101Result:
-        return self._run_fingerprint_command(ZW101_CONTROL_MATCH)
+    def match_fingerprint(self) -> int | None:
+        """Return the matched fingerprint ID, or None when matching fails."""
+        result = self._run_fingerprint_command(ZW101_CONTROL_MATCH)
+        return result.fingerprint_id if result.status == 0 else None
 
-    def delete_fingerprint(self, fingerprint_id: int) -> ZW101Result:
-        return self._run_fingerprint_command(ZW101_CONTROL_DELETE,
-                                             fingerprint_id)
+    def delete_fingerprint(self, fingerprint_id: int) -> bool:
+        result = self._run_fingerprint_command(ZW101_CONTROL_DELETE,
+                                               fingerprint_id)
+        return result.status == 0
 
-    def clear_fingerprints(self) -> ZW101Result:
-        return self._run_fingerprint_command(ZW101_CONTROL_CLEAR_DATABASE)
-
+    def clear_fingerprints(self) -> bool:
+        result = self._run_fingerprint_command(
+            ZW101_CONTROL_CLEAR_DATABASE)
+        return result.status == 0
 
 class ButtonPB1Sensor(SensorDevice):
     SENSOR_TYPE = JYDBUS_TYPE_BUTTON_PB1

@@ -1,7 +1,7 @@
 # Linux UART Python 工具
 
 本目录提供 GD32 级联传感器通信、PA8 风扇控制、PAJ7620U2 手势识别、
-ZW101 指纹控制和 OTA 在线升级/恢复。仅依赖 Python 3.10+ 标准库。
+ZW111 指纹控制（兼容原 ZW101 接口名）和 OTA 在线升级/恢复。仅依赖 Python 3.10+ 标准库。
 
 ## 快速自检
 
@@ -114,6 +114,7 @@ python3 scan_hardware.py --device /dev/ttyS2 --baud 115200
 python3 examples/example_dual_uart.py --device /dev/ttyS2
 python3 examples/paj7620_example.py --device /dev/ttyS2 --number 1
 python3 zw101_cli.py /dev/ttyS2 match
+python3 zw101_cli.py /dev/ttyS2 enroll  # 自动选择最小空闲 ID
 python3 tests/mfrc522_debug.py --scan
 ```
 

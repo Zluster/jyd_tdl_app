@@ -30,14 +30,23 @@ def number(text: str) -> int:
     return value
 
 
+def enroll_id(text: str) -> int:
+    value = int(text, 0)
+    if not 0 <= value <= 49:
+        raise argparse.ArgumentTypeError("fingerprint ID must be 0..49")
+    return value
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser(description="Control a cascaded ZW101 node")
     root.add_argument("uart")
     sub = root.add_subparsers(dest="action", required=True)
-    for action in ("enroll", "delete"):
-        command = sub.add_parser(action)
-        command.add_argument("id", type=number)
-        command.add_argument("node", type=number, nargs="?", default=1)
+    enroll = sub.add_parser("enroll")
+    enroll.add_argument("id", type=enroll_id, nargs="?", default=None)
+    enroll.add_argument("node", type=number, nargs="?", default=1)
+    delete = sub.add_parser("delete")
+    delete.add_argument("id", type=enroll_id)
+    delete.add_argument("node", type=number, nargs="?", default=1)
     for action in ("match", "clear"):
         command = sub.add_parser(action)
         command.add_argument("node", type=number, nargs="?", default=1)
@@ -49,10 +58,11 @@ def main() -> int:
     operations = {"enroll": ZW101_CONTROL_ENROLL, "match": ZW101_CONTROL_MATCH,
                   "delete": ZW101_CONTROL_DELETE, "clear": ZW101_CONTROL_CLEAR_DATABASE}
     operation = operations[args.action]
-    fingerprint_id = getattr(args, "id", 0)
+    fingerprint_id = getattr(args, "id", None)
     try:
         with JydbusUart(args.uart, 115200) as uart:
-            print(f"ZW101 start: operation={operation} node={args.node} id={fingerprint_id}")
+            display_id = "auto" if fingerprint_id is None else fingerprint_id
+            print(f"ZW101 start: operation={operation} node={args.node} id={display_id}")
             if operation == ZW101_CONTROL_ENROLL:
                 print("Press and fully release the same finger three times.")
             elif operation == ZW101_CONTROL_MATCH:

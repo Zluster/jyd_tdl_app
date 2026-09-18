@@ -15,7 +15,10 @@ else:
 
 ZW101_CONTROL_DEFAULT_TIMEOUT_MS = 35000
 ZW101_CONTROL_MAX_TEMPLATE_ID = 49
+ZW101_CONTROL_AUTO_TEMPLATE_ID = 0xFF
 ZW101_CONTROL_RESULT_MARKER = 0xA5
+
+ZW101_CONTROL_STATUS_DATABASE_FULL = 7
 
 ZW101_CONTROL_ENROLL = 1
 ZW101_CONTROL_MATCH = 2
@@ -33,24 +36,38 @@ class ZW101Result:
     response_ms: int = 0
 
 
-def _validate(sensor_number: int, command: int, fingerprint_id: int) -> None:
-    if sensor_number == 0:
+def _validate(sensor_number: int, command: int,
+              fingerprint_id: int | None) -> int:
+    if (not isinstance(sensor_number, int) or isinstance(sensor_number, bool)
+            or not 1 <= sensor_number <= 255):
         raise OSError(errno.EINVAL, "node number must be nonzero")
     if command not in range(ZW101_CONTROL_ENROLL, ZW101_CONTROL_CLEAR_DATABASE + 1):
         raise OSError(errno.EINVAL, "invalid ZW101 command")
-    if command in (ZW101_CONTROL_ENROLL, ZW101_CONTROL_DELETE) and not 0 <= fingerprint_id <= 49:
+    if fingerprint_id is None:
+        if command == ZW101_CONTROL_ENROLL:
+            return ZW101_CONTROL_AUTO_TEMPLATE_ID
+        if command == ZW101_CONTROL_DELETE:
+            raise OSError(errno.EINVAL, "fingerprint ID is required for delete")
+        return 0
+    if (not isinstance(fingerprint_id, int) or isinstance(fingerprint_id, bool)):
+        raise OSError(errno.EINVAL, "fingerprint ID must be an integer")
+    if (command in (ZW101_CONTROL_ENROLL, ZW101_CONTROL_DELETE)
+            and not 0 <= fingerprint_id <= ZW101_CONTROL_MAX_TEMPLATE_ID):
         raise OSError(errno.ERANGE, "fingerprint ID must be 0..49")
+    if not 0 <= fingerprint_id <= 255:
+        raise OSError(errno.ERANGE, "fingerprint ID must fit in one byte")
+    return fingerprint_id
 
 
 def send_zw101_command(uart: JydbusUart, sensor_number: int,
-                       command: int, fingerprint_id: int = 0) -> int:
-    _validate(sensor_number, command, fingerprint_id)
+                       command: int, fingerprint_id: int | None = None) -> int:
+    wire_id = _validate(sensor_number, command, fingerprint_id)
     return uart.write(JYDBUS_FRAME_TYPE_QUERY, JYDBUS_TYPE_ZW101, sensor_number,
-                      bytes((command, fingerprint_id, 0, 0)))
+                      bytes((command, wire_id, 0, 0)))
 
 
 def run_zw101_command(uart: JydbusUart, sensor_number: int, command: int,
-                      fingerprint_id: int = 0,
+                      fingerprint_id: int | None = None,
                       timeout_ms: int = ZW101_CONTROL_DEFAULT_TIMEOUT_MS) -> ZW101Result:
     if timeout_ms <= 0:
         raise OSError(errno.EINVAL, "timeout must be positive")
@@ -60,15 +77,14 @@ def run_zw101_command(uart: JydbusUart, sensor_number: int, command: int,
                                              sensor_number).sequence
     except OSError:
         previous_sequence = 0
+    uart.check_receiver()
     send_zw101_command(uart, sensor_number, command, fingerprint_id)
     started = time.monotonic()
     deadline = started + timeout_ms / 1000.0
     while time.monotonic() < deadline:
-        try:
-            data = uart.read_cached(JYDBUS_TYPE_ZW101, sensor_number)
-        except OSError:
-            data = None
-        if data is not None and data.sequence != previous_sequence:
+        uart.check_receiver()
+        for data in uart.read_history(JYDBUS_TYPE_ZW101, sensor_number,
+                                      previous_sequence):
             previous_sequence = data.sequence
             value = data.value
             if (data.decoded_valid and value.get("result_marker") == ZW101_CONTROL_RESULT_MARKER
@@ -83,11 +99,11 @@ def run_zw101_command(uart: JydbusUart, sensor_number: int, command: int,
                 return ZW101Result(
                     operation=command, status=value["status"],
                     response_ms=int((time.monotonic() - started) * 1000))
-        time.sleep(0.010)
+        time.sleep(0.005)
     raise TimeoutError(errno.ETIMEDOUT, "ZW101 operation timed out")
 
 
 def zw101_status_name(status: int) -> str:
     names = ("ok", "busy", "invalid-param", "timeout", "protocol-error",
-             "uart-overflow", "module-error")
+             "uart-overflow", "module-error", "database-full")
     return names[status] if 0 <= status < len(names) else "unknown"

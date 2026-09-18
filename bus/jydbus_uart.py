@@ -9,6 +9,7 @@ import select
 import struct
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -17,12 +18,15 @@ if __package__:
 else:
     from serial_port import SerialPort
 
-JYDBUS_UART_MAX_PAYLOAD = 32
+# Match GD32's UART_RX_FRAME_MAX_PAYLOAD. Fingerprint parameter diagnostics
+# contain 16 metadata bytes + 17 response bytes (33 total), and up to 69 bytes.
+JYDBUS_UART_MAX_PAYLOAD = 255
 JYDBUS_UART_MAX_TX_PAYLOAD = 196
 JYDBUS_UART_JYDBUS_NUMBER_MIN = 1
 JYDBUS_UART_JYDBUS_NUMBER_MAX = 8
 JYDBUS_UART_SUPPORTED_TYPE_COUNT = 16
 JYDBUS_UART_CACHE_CAPACITY = JYDBUS_UART_SUPPORTED_TYPE_COUNT * JYDBUS_UART_JYDBUS_NUMBER_MAX
+JYDBUS_UART_HISTORY_CAPACITY = 32
 
 JYDBUS_FRAME_TYPE_QUERY = 0x01
 JYDBUS_FRAME_TYPE_DATA = 0x02
@@ -88,6 +92,13 @@ WS2812B_COMMAND_FRAME_CHUNK = 0x03
 WS2812B_COMMAND_FRAME_COMMIT = 0x04
 WS2812B_COMMAND_GET_STATUS = 0x05
 WS2812B_STATUS_OK = 0x00
+MFRC522_COMMAND_READ_BLOCK = 0x01
+MFRC522_COMMAND_WRITE_BLOCK = 0x02
+MFRC522_COMMAND_STATUS_OK = 0x00
+MFRC522_COMMAND_STATUS_NO_CARD = 0x01
+MFRC522_COMMAND_STATUS_ERROR = 0x02
+MFRC522_COMMAND_STATUS_INVALID = 0x03
+MFRC522_CLASSIC_1K_LAST_BLOCK = 63
 
 FRAME_HEADER = 0x55
 FRAME_TAIL = 0xAA
@@ -151,6 +162,8 @@ class JydbusUartStats:
     format_errors: int = 0
     query_echoes: int = 0
     legacy_tails: int = 0
+    rx_errors: int = 0
+    last_rx_error: str = ""
     last_format_reason: str = ""
     last_format_frame: bytes = b""
 
@@ -192,10 +205,16 @@ def _decode(sensor_type: int, data: bytes) -> tuple[bool, dict[str, Any]]:
                           "spo2_percent": struct.unpack_from("<H", data, 4)[0]}
         if sensor_type == JYDBUS_TYPE_VL53L0X and len(data) >= 4:
             return True, {"distance_mm": struct.unpack_from("<I", data)[0]}
-        if sensor_type == JYDBUS_TYPE_MFRC522 and len(data) >= 8:
-            return True, {"uid": data[:4], "tag_type": data[4:6],
-                          "present": data[6] in (1, 2),
-                          "status": data[6], "version": data[7]}
+        if sensor_type == JYDBUS_TYPE_MFRC522:
+            if (len(data) >= 20 and
+                    data[0] in (MFRC522_COMMAND_READ_BLOCK,
+                                MFRC522_COMMAND_WRITE_BLOCK)):
+                return True, {"operation": data[0], "status": data[1],
+                              "block": data[2], "block_data": data[4:20]}
+            if len(data) >= 8:
+                return True, {"uid": data[:4], "tag_type": data[4:6],
+                              "present": data[6] in (1, 2),
+                              "status": data[6], "version": data[7]}
         if sensor_type == JYDBUS_TYPE_WS2812B and len(data) >= 4:
             value = {"ws2812b_ack": struct.unpack_from("<I", data)[0]}
             if len(data) >= 8:
@@ -210,6 +229,14 @@ def _decode(sensor_type: int, data: bytes) -> tuple[bool, dict[str, Any]]:
                              fingerprint_id=struct.unpack_from("<H", data, 3)[0],
                              score=struct.unpack_from("<H", data, 5)[0],
                              result_marker=data[7])
+            if ((len(data) == 16 and data[8] == 1) or
+                    (len(data) >= 16 and data[0] == 5 and data[8] == 2 and
+                     data[11] <= 53 and len(data) == 16 + data[11])):
+                value.update(diagnostic_version=data[8], driver_phase=data[9],
+                             module_command=data[10], ack_length=data[11],
+                             ack=tuple(data[12:15]), enroll_progress=data[15])
+                if data[8] == 2:
+                    value["module_response"] = tuple(data[16:])
             return True, value
         if sensor_type == JYDBUS_TYPE_BUTTON_PB1 and len(data) >= 1:
             return True, {"button_level": 1 if data[0] else 0}
@@ -242,11 +269,14 @@ class JydbusUart:
     def __init__(self, device: str, baud_rate: int = 115200) -> None:
         self.port = SerialPort(device, baud_rate)
         self._tx_lock = threading.Lock()
+        self._mfrc522_lock = threading.Lock()
         self._ws2812b_lock = threading.Lock()
         self._cache_lock = threading.Lock()
         self._cache: dict[tuple[int, int], JydbusData] = {}
+        self._history: dict[tuple[int, int], deque[JydbusData]] = {}
         self._scan_cache: list[tuple[int, int]] = []
         self._stats = JydbusUartStats()
+        self._rx_error: OSError | ValueError | None = None
         self._frame = bytearray()
         self._expected = 0
         self._last_rx = 0.0
@@ -301,6 +331,71 @@ class JydbusUart:
             payload[3] = 0x72
         self.write(JYDBUS_FRAME_TYPE_QUERY, sensor_type, sensor_number, payload)
         return 0
+
+    def _mfrc522_block_command(self, sensor_number: int, command: int,
+                               block: int, block_data: bytes = b"") -> bytes:
+        self._validate_number(sensor_number)
+        if (not isinstance(block, int) or isinstance(block, bool) or
+                not 0 <= block <= MFRC522_CLASSIC_1K_LAST_BLOCK):
+            raise OSError(errno.EINVAL, "MFRC522 block must be 0..63")
+        if command == MFRC522_COMMAND_WRITE_BLOCK:
+            if block == 0 or (block + 1) % 4 == 0:
+                raise OSError(errno.EINVAL,
+                              "MFRC522 manufacturer and sector trailer blocks "
+                              "cannot be written")
+            if len(block_data) != 16:
+                raise OSError(errno.EINVAL,
+                              "MFRC522 block data must be exactly 16 bytes")
+        payload = bytes((command, block)) + block_data
+
+        with self._mfrc522_lock:
+            try:
+                previous = self.read_cached(JYDBUS_TYPE_MFRC522,
+                                            sensor_number).sequence
+            except OSError:
+                previous = 0
+            started = self._write_timed(JYDBUS_FRAME_TYPE_QUERY,
+                                        JYDBUS_TYPE_MFRC522,
+                                        sensor_number, payload, drain=True)
+            deadline = (started / 1_000_000 + QUERY_RESPONSE_TIMEOUT +
+                        sensor_number * QUERY_HOP_TIMEOUT)
+            while time.monotonic() < deadline:
+                try:
+                    response = self.read_cached(JYDBUS_TYPE_MFRC522,
+                                                sensor_number)
+                except OSError:
+                    pass
+                else:
+                    value = response.value
+                    if (response.sequence != previous and
+                            response.received_monotonic_us >= started and
+                            response.decoded_valid and
+                            value.get("operation") == command and
+                            value.get("block") == block):
+                        status = int(value["status"])
+                        if status == MFRC522_COMMAND_STATUS_OK:
+                            return bytes(value["block_data"])
+                        if status == MFRC522_COMMAND_STATUS_NO_CARD:
+                            raise OSError(errno.ENODEV,
+                                          "no compatible IC card present")
+                        if status == MFRC522_COMMAND_STATUS_INVALID:
+                            raise OSError(errno.EINVAL,
+                                          "invalid MFRC522 block command")
+                        raise OSError(errno.EIO,
+                                      "MFRC522 authentication or block I/O failed")
+                time.sleep(0.001)
+        raise TimeoutError(errno.ETIMEDOUT,
+                           f"MFRC522 node {sensor_number} timed out")
+
+    def mfrc522_read_block(self, sensor_number: int, block: int) -> bytes:
+        return self._mfrc522_block_command(
+            sensor_number, MFRC522_COMMAND_READ_BLOCK, block)
+
+    def mfrc522_write_block(self, sensor_number: int, block: int,
+                            block_data: bytes) -> bytes:
+        return self._mfrc522_block_command(
+            sensor_number, MFRC522_COMMAND_WRITE_BLOCK, block,
+            bytes(block_data))
 
     def scan(self) -> int:
         self.write(JYDBUS_FRAME_TYPE_SCAN, 0, 0, b"<<<<")
@@ -444,6 +539,25 @@ class JydbusUart:
         with self._cache_lock:
             return copy.deepcopy(list(self._cache.values()))
 
+    def read_history(self, sensor_type: int, sensor_number: int,
+                     after_sequence: int = 0) -> list[JydbusData]:
+        """Return retained frames newer than ``after_sequence`` in RX order."""
+        self._validate_number(sensor_number)
+        with self._cache_lock:
+            history = self._history.get((sensor_type, sensor_number), ())
+            return copy.deepcopy(
+                [data for data in history if data.sequence > after_sequence])
+
+    def check_receiver(self) -> None:
+        """Raise immediately when the background UART receiver has failed."""
+        with self._cache_lock:
+            error = self._rx_error
+        if error is not None:
+            code = getattr(error, "errno", None) or errno.EIO
+            raise OSError(code, f"UART receive thread stopped: {error}") from error
+        if self._running and not self._thread.is_alive():
+            raise OSError(errno.EIO, "UART receive thread stopped unexpectedly")
+
     def get_stats(self) -> JydbusUartStats:
         with self._cache_lock:
             return copy.copy(self._stats)
@@ -556,14 +670,27 @@ class JydbusUart:
             try:
                 readable, _, exceptional = select.select([self.port.fd], [], [self.port.fd], 0.020)
                 if exceptional:
-                    break
+                    raise OSError(errno.EIO, "UART reported an exceptional condition")
                 self._discard_stale_frame(time.monotonic())
                 if readable:
                     for value in self.port.read_available(256):
                         self._push_byte(value)
-            except (OSError, ValueError):
+            except OSError as exc:
+                if self._running and exc.errno in (errno.EINTR, errno.EAGAIN):
+                    continue
                 if self._running:
-                    break
+                    self._record_rx_error(exc)
+                break
+            except ValueError as exc:
+                if self._running:
+                    self._record_rx_error(exc)
+                break
+
+    def _record_rx_error(self, error: OSError | ValueError) -> None:
+        with self._cache_lock:
+            self._rx_error = error
+            self._stats.rx_errors += 1
+            self._stats.last_rx_error = str(error)
 
     def _discard_stale_frame(self, now: float) -> None:
         if self._frame and now - self._last_rx >= RX_FRAME_TIMEOUT:
@@ -677,9 +804,16 @@ class JydbusUart:
                 return
             valid, value = _decode(sensor_type, payload)
             self._sequence += 1
-            self._cache[(sensor_type, sensor_number)] = JydbusData(
+            target = (sensor_type, sensor_number)
+            data = JydbusData(
                 frame_type, sensor_type, sensor_number, tail, received_crc,
                 payload, valid, value, self._sequence, received_us // 1000, received_us)
+            self._cache[target] = data
+            history = self._history.get(target)
+            if history is None:
+                history = deque(maxlen=JYDBUS_UART_HISTORY_CAPACITY)
+                self._history[target] = history
+            history.append(data)
 
 
 def jydbus_name(sensor_type: int) -> str:
