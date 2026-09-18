@@ -29,6 +29,10 @@ class VideoPlayer:
     def stop(self):
         self._native.stop()
 
+    def set_volume(self, volume_level):
+        """Set CV184X speaker level, from 0 (mute) through 32 (maximum)."""
+        self._native.set_volume(int(volume_level))
+
     def close(self):
         self._native.close()
 
@@ -51,6 +55,26 @@ class VideoPlayer:
     @property
     def height(self):
         return self._native.height
+
+    @property
+    def duration_ms(self):
+        """Media duration in milliseconds, or 0 when the container omits it."""
+        return self._native.duration_ms
+
+    @property
+    def position_ms(self):
+        """Current playback position in milliseconds."""
+        return self._native.position_ms
+
+    @property
+    def has_audio(self):
+        """Whether the selected file has an audio stream."""
+        return self._native.has_audio
+
+    @property
+    def volume(self):
+        """Current CV184X speaker level, from 0 through 32."""
+        return self._native.volume
 
     def __enter__(self):
         return self
