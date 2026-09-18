@@ -1387,12 +1387,23 @@ void registerVideoBindings(nb::module_ &m) {
       .def("pause", &tdl_app::VideoPlayer::pause)
       .def("resume", &tdl_app::VideoPlayer::resume)
       .def("stop", &tdl_app::VideoPlayer::stop)
-      .def("close", &tdl_app::VideoPlayer::stop)
+      .def("close", &tdl_app::VideoPlayer::close)
+      .def("set_volume", [](tdl_app::VideoPlayer &self, int volume_level) {
+        std::string error;
+        if (!self.setVolume(volume_level, &error)) {
+          throw std::runtime_error("video player volume failed: " + error);
+        }
+      }, nb::arg("volume_level"),
+      "Set CV184X speaker level. Values are clamped to [0, 32].")
       .def_prop_ro("state", &tdl_app::VideoPlayer::state)
       .def_prop_ro("last_error", &tdl_app::VideoPlayer::lastError)
       .def_prop_ro("playing", &tdl_app::VideoPlayer::isPlaying)
       .def_prop_ro("width", &tdl_app::VideoPlayer::width)
-      .def_prop_ro("height", &tdl_app::VideoPlayer::height);
+      .def_prop_ro("height", &tdl_app::VideoPlayer::height)
+      .def_prop_ro("duration_ms", &tdl_app::VideoPlayer::durationMs)
+      .def_prop_ro("position_ms", &tdl_app::VideoPlayer::positionMs)
+      .def_prop_ro("has_audio", &tdl_app::VideoPlayer::hasAudio)
+      .def_prop_ro("volume", &tdl_app::VideoPlayer::volume);
 }
 
 void registerMediaBindings(nb::module_ &m) {
