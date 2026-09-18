@@ -1,6 +1,7 @@
 build
 dist
 dara.egg-info
+install/
 __pycache__
 *.py[cod]
 tests/reports/
