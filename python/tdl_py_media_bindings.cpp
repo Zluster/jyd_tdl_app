@@ -24,6 +24,7 @@
 #include "tdl_app/direct_keyword_spotter.hpp"
 #include "tdl_app/npu_asr_recognizer.hpp"
 #include "tdl_app/speaker_recognizer.hpp"
+#include "tdl_app/text_to_speech.hpp"
 #endif
 
 namespace nb = nanobind;
@@ -1155,6 +1156,97 @@ class PyKeywordSpotter {
   std::string last_error_;
 };
 
+// 中文文字转语音。文本前处理、音素切分、NPU 推理与重采样都在 C++ 内完成，
+// Python 侧只提交文本、取回 16 kHz 单声道 PCM，接口形状与 KWS/ASR 一致。
+class PyTextToSpeech {
+ public:
+  bool load(const std::string &model_spec) {
+    std::string error;
+    bool ok = false;
+    {
+      nb::gil_scoped_release guard;
+      ok = speech_.load(model_spec, defaultFirmwarePath(), &error);
+    }
+    last_error_ = error;
+    return ok;
+  }
+
+  // 返回 16 kHz 单声道有符号 16 位小端 PCM；失败返回 None 并写入 last_error。
+  nb::object run(const std::string &text) {
+    std::vector<std::int16_t> pcm;
+    std::string error;
+    bool ok = false;
+    {
+      nb::gil_scoped_release guard;
+      ok = speech_.run(text, &pcm, &error);
+    }
+    if (!ok) {
+      last_error_ = error;
+      return nb::none();
+    }
+    last_error_.clear();
+    return nb::bytes(reinterpret_cast<const char *>(pcm.data()),
+                     pcm.size() * sizeof(std::int16_t));
+  }
+
+  bool synthesize(const std::string &text, const std::string &wav_path) {
+    std::string error;
+    bool ok = false;
+    {
+      nb::gil_scoped_release guard;
+      ok = speech_.synthesize(text, wav_path, &error);
+    }
+    last_error_ = error;
+    return ok;
+  }
+
+  // 只做文本前处理，返回每段的 token 列表；失败返回 None。
+  nb::object tokens(const std::string &text) {
+    std::vector<std::vector<int>> chunks;
+    std::string error;
+    bool ok = false;
+    {
+      nb::gil_scoped_release guard;
+      ok = speech_.tokens(text, &chunks, &error);
+    }
+    if (!ok) {
+      last_error_ = error;
+      return nb::none();
+    }
+    last_error_.clear();
+    nb::list out;
+    for (const std::vector<int> &chunk : chunks) {
+      nb::list one;
+      for (int token : chunk) one.append(token);
+      out.append(one);
+    }
+    return out;
+  }
+
+  void reset() {
+    speech_.reset();
+    last_error_.clear();
+  }
+
+  bool initialized() const { return speech_.initialized(); }
+  const std::string &lastError() const { return last_error_; }
+
+  nb::dict stats() const {
+    const tdl_app::TtsSynthesisStats &s = speech_.lastStats();
+    nb::dict out;
+    out["chunks"] = s.chunks;
+    out["rendered"] = s.rendered;
+    out["frames"] = s.frames;
+    out["samples"] = s.samples;
+    out["duration"] = s.duration;
+    return out;
+  }
+
+ private:
+  tdl_app::TextToSpeech speech_;
+  std::string last_error_;
+};
+
 #endif
 
 
@@ -1364,6 +1456,27 @@ void registerAudioBindings(nb::module_ &m) {
       .def_prop_ro("initialized", &PyKeywordSpotter::initialized)
       .def_prop_ro("listening", &PyKeywordSpotter::listening)
       .def_prop_ro("last_error", &PyKeywordSpotter::lastError);
+
+  // --- 中文文字转语音 ------------------------------------------------------
+  nb::class_<PyTextToSpeech>(m, "TextToSpeech",
+      "CV184X 中文文字转语音（Piper 中文前端 + 解码器，BMRT NPU）。"
+      " 不使用 Sherpa 或 ONNX Runtime。")
+      .def(nb::init<>())
+      .def("load", &PyTextToSpeech::load, nb::arg("model_spec"),
+           "加载 .mud 描述的 TTS 前端与解码 bmodel。")
+      .def("run", &PyTextToSpeech::run, nb::arg("text"),
+           "合成整段文本，返回 16 kHz 单声道 PCM16 字节，失败返回 None。")
+      .def("synthesize", &PyTextToSpeech::synthesize,
+           nb::arg("text"), nb::arg("wav_path"),
+           "合成文本并写出标准 PCM WAV 文件。")
+      .def("tokens", &PyTextToSpeech::tokens, nb::arg("text"),
+           "只做文本前处理，返回每段 token 列表，失败返回 None。")
+      .def("reset", &PyTextToSpeech::reset,
+           "卸载 NPU 模型并释放设备（幂等）。")
+      .def_prop_ro("initialized", &PyTextToSpeech::initialized)
+      .def_prop_ro("stats", &PyTextToSpeech::stats,
+                   "上一次合成的统计信息：段数、帧数、采样点数与时长。")
+      .def_prop_ro("last_error", &PyTextToSpeech::lastError);
 #endif
 
 }
