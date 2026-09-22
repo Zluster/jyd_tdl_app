@@ -212,6 +212,22 @@ target_link_libraries(tdl_app_npu_direct_kws_core
   PUBLIC
     tdl_app_npu_asr_core
 )
+# 中文 TTS 直接复用 asr_core 的 bmrt 设备管理与 model_descriptor，因此只编译
+# 自己的算法源码，避免 model_descriptor.cpp 重复定义。
+add_library(tdl_app_npu_tts_core STATIC
+  src/algorithm/text_to_speech.cpp
+)
+target_include_directories(tdl_app_npu_tts_core
+  PUBLIC
+    "${CMAKE_CURRENT_LIST_DIR}/include"
+  PRIVATE
+    "${CMAKE_CURRENT_LIST_DIR}/src"
+    "${TDL_CV184X_INCLUDE_DIRS}"
+)
+target_link_libraries(tdl_app_npu_tts_core
+  PUBLIC
+    tdl_app_npu_asr_core
+)
 target_include_directories(tdl_app_npu_asr_core
   PUBLIC
     "${CMAKE_CURRENT_LIST_DIR}/include"
@@ -329,7 +345,8 @@ if(TDL_APP_BUILD_PYTHON)
   # tdl_app_sdk is linked into the shared python module, so it (and the ini
   # helper it drags in) must be compiled as position-independent code.
   set_target_properties(tdl_app_sdk tdl_app_ini_compat tdl_app_speaker_core
-                        tdl_app_npu_asr_core tdl_app_npu_direct_kws_core PROPERTIES
+                        tdl_app_npu_asr_core tdl_app_npu_direct_kws_core
+                        tdl_app_npu_tts_core PROPERTIES
     POSITION_INDEPENDENT_CODE ON)
 
   # nanobind is compiled statically into the module (nb_combined.cpp), which
@@ -401,7 +418,8 @@ if(TDL_APP_BUILD_PYTHON)
     tdl_app_sdk
     tdl_app_speaker_core
     tdl_app_npu_asr_core
-    tdl_app_npu_direct_kws_core)
+    tdl_app_npu_direct_kws_core
+    tdl_app_npu_tts_core)
   target_link_options(tdl_audio PRIVATE -Wl,--gc-sections -Wl,--as-needed)
 
   install(TARGETS tdl_py tdl_audio LIBRARY DESTINATION lib/python)
