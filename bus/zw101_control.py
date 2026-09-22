@@ -18,7 +18,10 @@ ZW101_CONTROL_MAX_TEMPLATE_ID = 49
 ZW101_CONTROL_AUTO_TEMPLATE_ID = 0xFF
 ZW101_CONTROL_RESULT_MARKER = 0xA5
 
+ZW101_CONTROL_STATUS_BUSY = 1
 ZW101_CONTROL_STATUS_DATABASE_FULL = 7
+
+ZW101_CONTROL_BUSY_RETRY_MS = 50
 
 ZW101_CONTROL_ENROLL = 1
 ZW101_CONTROL_MATCH = 2
@@ -96,6 +99,17 @@ def run_zw101_command(uart: JydbusUart, sensor_number: int, command: int,
                     response_ms=int((time.monotonic() - started) * 1000))
             if (data.decoded_valid and data.raw_length >= 2
                     and value.get("operation") == command and value.get("status") != 0):
+                if value["status"] == ZW101_CONTROL_STATUS_BUSY:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    time.sleep(min(ZW101_CONTROL_BUSY_RETRY_MS / 1000.0,
+                                   remaining))
+                    if time.monotonic() >= deadline:
+                        break
+                    send_zw101_command(uart, sensor_number, command,
+                                       fingerprint_id)
+                    break
                 return ZW101Result(
                     operation=command, status=value["status"],
                     response_ms=int((time.monotonic() - started) * 1000))
