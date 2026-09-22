@@ -9,6 +9,7 @@ from dara.peripheral.pinmap import (
     SoftKeyInfo,
     GPIOInfo,
     I2CInfo,
+    PWMInfo,
     UARTInfo,
     WDTInfo,
 )
@@ -1612,6 +1613,20 @@ BOARD_CONFIG = BoardConfig(
                 pin_func="XGPIOA_26",
                 chip=0,  # /dev/gpiochip0
                 num=26,
+            ),
+        },
+        pwm={
+            # M4 shares the UART0 RX pad.  PWM5 is PWM controller 0,
+            # channel 5; PWM.open() switches the pad to PWM_5 on demand.
+            # Keep it disabled until the application explicitly enables it.
+            "PWM5": PWMInfo(
+                pin="M4",
+                pin_func="PWM_5",
+                chip=0,
+                num=5,
+                freq=1000,
+                duty_cycle=0.5,
+                enable=False,
             ),
         },
         i2c={

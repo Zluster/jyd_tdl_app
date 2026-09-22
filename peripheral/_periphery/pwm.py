@@ -65,7 +65,11 @@ class PWM(object):
                 with open(os.path.join(chip_path, "export"), "w") as f_export:
                     f_export.write("{:d}\n".format(channel))
             except IOError as e:
-                raise PWMError(e.errno, "Exporting PWM channel: " + e.strerror)
+                # Another process can export the channel after the directory
+                # check above.  In that case the channel will appear during
+                # the normal wait loop below, so do not fail the open.
+                if e.errno != errno.EBUSY:
+                    raise PWMError(e.errno, "Exporting PWM channel: " + e.strerror)
 
             # Loop until PWM is exported
             exported = False

@@ -4,6 +4,10 @@
 internally uses tone-marked pinyin pieces, which are converted here before a
 keyword is registered with the native streaming recognizer.
 
+``TextToSpeech`` 用 NPU 做中文语音合成：文本前处理（数字、标点、多音字
+读音表）全部在 C++ 侧完成，``run`` 直接返回 16 kHz 单声道 PCM，
+``synthesize`` 落成 WAV 文件。
+
 ``AudioFilePlayer`` (alias ``WavPlayer``) plays one PCM WAV or MP3 file at a
 time with pause/resume/stop, seek and progress, on top of the low-level
 ``AudioOutputStream`` (one AO channel per object); MP3 is decoded by the
@@ -891,6 +895,109 @@ class KeywordSpotter:
         return True
 
 
+class TextToSpeech:
+    """NPU 中文语音合成（Piper 前端 + 解码器，两段模型都在 NPU 上跑）。
+
+    典型用法::
+
+        tts = audio.TextToSpeech()
+        tts.load("/root/models/piper_zh_tts.mud")
+        pcm = tts.run("今天天气真不错")          # 16 kHz 单声道 s16le
+        tts.synthesize("今天天气真不错", "/tmp/a.wav")
+
+    ``run`` 返回裸 PCM，可以直接喂给 ``WavPlayer`` 或 ``Audio`` 播放；
+    ``synthesize`` 直接写 WAV 文件。模型描述文件里已经指明前端与解码器
+    两个 bmodel，调用方只需要一个 ``.mud`` 路径。
+
+    文本前处理（阿拉伯数字转中文读法、标点、多音字）在 C++ 侧完成，
+    因此 ``run`` 接受日常中文文本，例如 ``"2026年9月20日"``、
+    ``"现在是9点25分。"``。
+    """
+
+    #: ``run`` 返回的 PCM 采样率，与 ``Audio`` 默认录音参数一致。
+    SAMPLE_RATE = 16000
+
+    def __init__(self) -> None:
+        self._native = tdl_audio.TextToSpeech()
+        self._wrapper_error = ""
+
+    def load(self, model_spec: str) -> bool:
+        """加载 ``.mud`` 模型描述，重复调用会替换已加载的模型。"""
+        if not isinstance(model_spec, str) or not model_spec.strip():
+            self._wrapper_error = "model_spec must be a non-empty path"
+            return False
+        ok = self._native.load(model_spec)
+        self._wrapper_error = "" if ok else self._native_error()
+        return ok
+
+    def run(self, text: str):
+        """合成 ``text``，返回 16 kHz 单声道有符号 16 位小端 PCM。
+
+        失败时返回 ``None``，原因见 :attr:`last_error`。
+        """
+        if not isinstance(text, str) or not text.strip():
+            self._wrapper_error = "text must be non-empty"
+            return None
+        pcm = self._native.run(text)
+        if pcm is None:
+            self._wrapper_error = self._native_error()
+            return None
+        self._wrapper_error = ""
+        return pcm
+
+    def synthesize(self, text: str, wav_path: str) -> bool:
+        """合成 ``text`` 并写成 16 kHz 单声道 16 位 WAV 文件。"""
+        if not isinstance(text, str) or not text.strip():
+            self._wrapper_error = "text must be non-empty"
+            return False
+        if not isinstance(wav_path, str) or not wav_path.strip():
+            self._wrapper_error = "wav_path must be a non-empty path"
+            return False
+        ok = self._native.synthesize(text, wav_path)
+        self._wrapper_error = "" if ok else self._native_error()
+        return ok
+
+    def tokens(self, text: str):
+        """只跑文本前处理，返回按 32 token 容量切分后的每段 token 列表。
+
+        用于调试读音与切分，不占用 NPU 推理。失败时返回 ``None``。
+        """
+        if not isinstance(text, str) or not text.strip():
+            self._wrapper_error = "text must be non-empty"
+            return None
+        chunks = self._native.tokens(text)
+        if chunks is None:
+            self._wrapper_error = self._native_error()
+            return None
+        self._wrapper_error = ""
+        return chunks
+
+    def reset(self) -> None:
+        """释放模型占用的 NPU 设备内存；之后需要重新 :meth:`load`。"""
+        self._native.reset()
+        self._wrapper_error = ""
+
+    @property
+    def initialized(self) -> bool:
+        return self._native.initialized
+
+    @property
+    def stats(self):
+        """最近一次合成的统计：段数、帧数、样本数、时长（秒）。"""
+        return self._native.stats
+
+    @property
+    def last_error(self) -> str:
+        return self._wrapper_error or self._native_error()
+
+    def _native_error(self) -> str:
+        """原生错误串可能带非法 UTF-8 字节，兜底成可读文本。"""
+        try:
+            return self._native.last_error
+        except UnicodeDecodeError:
+            return "native error message is not valid UTF-8"
+
+
 __all__ = [
     "Audio",
     "AudioOutputStream",
@@ -901,4 +1008,5 @@ __all__ = [
     "StreamingAsr",
     "SpeechRecognizer",
     "KeywordSpotter",
+    "TextToSpeech",
 ]
