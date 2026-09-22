@@ -28,6 +28,10 @@ VO 在首帧内容就绪后才 enable（避免上电垃圾帧，见 _ensure_vo�
 环境变量开关：
 
     JYD_RUN_SOURCE=web   叠加左上角退出按钮（点按干净退出进程）
+    JYD_LV_USE=0         屏幕终端：Python 的 stdout/stderr 镜像到屏幕正中的
+                         LVGL 面板（stdout 淡青 / stderr 红），原终端照常；
+                         由 __init__ 安装 _lv_console.Console，本模块只负责
+                         建面板（_setup_display）和每拍消化队列（_ui_main）
 
 与 launcher/ai_cycle 互斥：VO/OSD/相机通道是独占资源，跑 jyd 脚本前先停它们。
 """
@@ -134,6 +138,11 @@ class _Runtime:
         self._ui_thread = None
         self._ui_stop = threading.Event()
         self._ui_error = None         # UI 线程初始化失败的原因
+        self._console = None          # JYD_LV_USE=0 的屏幕终端（_lv_console.Console）
+
+    def enable_console(self, console):
+        """登记屏幕终端（须在显示通路建立前，即 import 阶段调用）。"""
+        self._console = console
 
     # ---- 退出清理 ----
 
@@ -152,6 +161,8 @@ class _Runtime:
 
         先屏蔽信号：清理中再来 Ctrl+C 会打断 OSD destroy，RGN handle
         泄漏后只能重启恢复（进程本来就在退出，屏蔽无副作用）。"""
+        if self._console is not None:
+            self._console.restore()   # 屏幕即将拆掉，清理期间的输出只走原终端
         self._ui_stop.set()
         for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
             try:
@@ -297,6 +308,8 @@ class _Runtime:
             last = now
             next_tick = now + period       # 不追帧：长阻塞后不补 tick
             try:
+                if self._console is not None:
+                    self._console.pump(self.m)   # 先上屏本拍的输出，再渲染
                 self.m.tick(ms)
             except Exception as e:
                 print("jyd: ui tick error: %s" % e)
@@ -369,6 +382,11 @@ class _Runtime:
         if os.environ.get("JYD_RUN_SOURCE") == "web":
             mpy.register(self._request_exit, name="_jyd_exit")
             self.m.exec(_EXIT_BTN_SRC, capture=False)
+
+        # JYD_LV_USE=0：屏幕终端面板（在退出按钮之后建，层叠在其上方但
+        # 尺寸刻意避开按钮区域）
+        if self._console is not None:
+            self._console.attach(self.m)
 
         # 建链前调过 camera.preview() 的话，此刻应用显示/遮挡状态
         self._apply_preview_visibility()

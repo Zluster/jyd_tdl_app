@@ -15,16 +15,24 @@
 timeout_ms 仅该通道首次创建生效。首次创建即 open（失败立刻暴露），进程退出自动 close。通道
 被其他进程占用（launcher/ai_cycle 在跑）时 open 会失败。
 
-取帧两种形态（模块级便捷函数走 ai / rgb 通道，rear=True 切后摄；
-其他通道用工厂实例的 cam.read() / cam.read_image()）：
+取帧只有一个入口 read()，返回的 Frame **既能喂 NPU，也能当 Image 用**
+（模块级 camera.read() 走 ai 通道，rear=True 切后摄；其他通道用工厂实例）：
 
-    with camera.read() as frame:     # ai 通道 zero-copy Frame（NN 推理输入），
-        result = model.run(frame)    # 出 with 块即失效，处理必须在块内完成
+    with camera.read() as frame:          # ai 通道 640x640，原生零拷贝帧
+        result = model.run(frame)         # NPU 直接吃原生帧，不做任何转换
+        codes = frame.find_qrcodes()      # 首次用到 Image 能力才转成紧凑图
+        lv.show(frame)                    # 显示同样直接接受
 
-    img = camera.read_image()        # rgb 通道 RGB Image（剥 stride 填充的
-    mks = img.find_qrcodes()         # 拷贝），到下一次 read_image()/read() 前有效
+    with camera.rgb().read() as frame:    # 720x480 通道：同一帧既推理又当图
+        boxes = model.run(frame).boxes
+        frame.draw_rectangle(...)         # 只改 Image 视图，NPU 看的仍是原帧
+        lv.show(frame)
 
-    img = live().read_image()        # NV12/NV21 通道出 Y 平面灰度 Image
+    img = camera.read_image()             # 兼容别名：直接拿 Image，帧立即归还
+    img = live().read_image()             # NV12/NV21 通道出 Y 平面灰度 Image
+
+Image 能力必须在帧有效期内**首次**触发（转换要读帧内存）；转换出的
+Image 是拷贝，到同相机下一次 read() 前有效。详见 Frame 的说明。
 
 屏幕底层预览用 preview() 控制，三态："front" 前摄 / "rear" 后摄 /
 "off" 遮挡（显示态自动把 screen/layer_bottom 背景透明，遮挡态置回
@@ -37,6 +45,79 @@ import tdl_py
 
 from . import _runtime
 
+#: 统一 Frame 上直通原生 tdl_py.Frame 的名字；其余名字落到 Image 视图
+_NATIVE_ATTRS = frozenset((
+    "width", "height", "format", "sequence", "timestamp_us", "phys_addr",
+    "plane_count", "valid", "addr", "size", "data", "strides",
+    "plane_sizes", "plane_offsets", "plane", "copy_to",
+))
+
+
+class Frame:
+    """camera.read() 的返回值：同一个对象既能喂 NPU，也能当 Image 用。
+
+    - .frame  原生 tdl_py.Frame（VPSS 帧的零拷贝映射）。nn 推理走它，
+              不做任何像素转换；width/height/format/strides/data/plane()
+              等原生属性直接透传（直接调 tdl_py 底层接口时传 .frame）
+    - .image  Image 视图：首次用到 find_*/draw_*/save/mode/to_addr 等
+              Image 能力时，才经 Frame.copy_to 转成紧凑图（RGB 通道约
+              1 MB，NV12 通道出灰度约 0.35 MB），之后缓存在本对象上；
+              直接写 frame.find_qrcodes() 即可，不必显式取 .image。
+              像素缓冲由 Camera 常驻复用、跨帧地址不变（lv.show 的控件
+              复用与 to_lv 的"同尺寸不换地址"都靠它）
+
+    生命周期与原生帧一致：出 with 块 / release() / 同相机下一次 read()
+    都使原生帧失效。Image 能力必须在帧有效期内**首次**触发（转换要读
+    帧内存），转换出的 Image 是拷贝、到同相机下一次 read() 前有效（之后
+    缓冲被新帧覆盖）。在帧上画框只改 Image 视图，NPU 看到的仍是原始帧。
+    """
+
+    def __init__(self, camera, raw):
+        self._camera = camera
+        self._raw = raw
+        self._image = None
+
+    @property
+    def frame(self):
+        """原生 tdl_py.Frame。"""
+        return self._raw
+
+    @property
+    def image(self):
+        """Image 视图（首次访问触发转换，要求帧仍有效）。"""
+        if self._image is None:
+            if not self._raw.valid:
+                raise RuntimeError(
+                    "帧已释放（出了 with 块 / 已 release / 相机已取下一帧），"
+                    "Image 能力必须在帧有效期内首次使用；要跨块使用，先在"
+                    "块内触碰一次 frame.image")
+            self._image = self._camera._to_image(self._raw)
+        return self._image
+
+    def release(self):
+        """归还 VPSS 帧（幂等）。已转换出的 Image 视图不受影响。"""
+        self._raw.release()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.release()
+        return False
+
+    def __getattr__(self, name):
+        if name in _NATIVE_ATTRS:
+            return getattr(self._raw, name)
+        if name.startswith("_"):
+            raise AttributeError(name)
+        return getattr(self.image, name)   # Image 能力：首次触发转换
+
+    def __repr__(self):
+        return "<jyd.camera.Frame grp%d/ch%d %dx%d fmt=%d %s>" % (
+            self._camera.group, self._camera.channel, self._raw.width,
+            self._raw.height, self._raw.format,
+            "image" if self._image is not None else "raw")
+
 
 class Camera:
     """一个 VPSS 通道。用 rgb()/ai()/live()/screen()/rear_*() 等工厂取实例。"""
@@ -45,7 +126,7 @@ class Camera:
         self._cam = raw
         self._key = key
         self._group, self._channel = key
-        self._held = None      # read_image 的像素缓冲（当前 Image 借用中，跨帧复用）
+        self._held = None      # Frame.image 的像素缓冲（跨帧复用，地址不变）
 
     @property
     def group(self):
@@ -56,16 +137,26 @@ class Camera:
         return self._channel
 
     def read(self):
-        """阻塞取一帧（最长 timeout_ms），返回 zero-copy Frame。
+        """阻塞取一帧（最长 timeout_ms），返回统一 Frame：喂 nn 推理零拷贝，
+        用到 Image 能力时才转成紧凑图（见 Frame）。
 
-        务必用 `with cam.read() as frame:` ——帧引用 VPSS 池内存，
-        出块自动归还；下一次 read 也会使上一帧失效。"""
-        self._drop_held()
-        return self._cam.read()
+        务必用 `with cam.read() as frame:`——原生帧引用 VPSS 池内存，
+        出块自动归还；同相机下一次 read 也会使上一帧失效。"""
+        return Frame(self, self._cam.read())
 
     def read_image(self):
-        """取一帧并转成紧凑 Image，到下一次同通道 read_image()/read()
-        前有效：
+        """兼容别名：取一帧并立即转成 Image，原生帧随即归还 VPSS。
+
+        等价于 `frame = cam.read(); img = frame.image; frame.release()`，
+        返回的 Image 到同相机下一次 read()/read_image() 前有效。"""
+        frame = self.read()
+        try:
+            return frame.image
+        finally:
+            frame.release()
+
+    def _to_image(self, raw):
+        """原生帧 -> 紧凑 Image（Frame.image 的转换实现）：
 
         - RGB888 / BGR888 / RGB888_PLANAR / BGR888_PLANAR：出 "RGB" 模式
           Image，内存按 _maix_image 约定排成 B,G,R 字节序（to_lv / save /
@@ -74,29 +165,28 @@ class Camera:
         - 其他格式抛 RuntimeError
 
         转换（剥 stride 填充、planar 交错、对调 R/B）由 tdl_py 的
-        Frame.copy_to 在**持 GIL 的单次原生调用**里完成，帧随即归还 VPSS。
-        像素缓冲由本对象常驻复用、跨帧地址不变，它很可能正是 LVGL 控件
-        的零拷贝像素源，而 jyd-ui 线程的渲染同样持 GIL——单次原生调用
-        才是与渲染互斥的依据，绝不能退回 Python 层原地多步改写（渲染
-        线程会看到只换了一个颜色分量的半成品，动起来就是彩色重影）。"""
+        Frame.copy_to 在**持 GIL 的单次原生调用**里完成。像素缓冲由本
+        对象常驻复用、跨帧地址不变，它很可能正是 LVGL 控件的零拷贝像素
+        源，而 jyd-ui 线程的渲染同样持 GIL——单次原生调用才是与渲染互斥
+        的依据，绝不能退回 Python 层原地多步改写（渲染线程会看到只换了
+        一个颜色分量的半成品，动起来就是彩色重影）。"""
         from . import image
-        with self._cam.read() as frame:        # 出块即归还 VPSS，不再持有帧
-            w, h, fmt = frame.width, frame.height, frame.format
-            if fmt in (tdl_py.FORMAT_NV12, tdl_py.FORMAT_NV21):
-                mode, layout, bpp = "L", "gray", 1
-            elif fmt in (tdl_py.FORMAT_RGB888, tdl_py.FORMAT_BGR888,
-                         tdl_py.FORMAT_RGB888_PLANAR,
-                         tdl_py.FORMAT_BGR888_PLANAR):
-                mode, layout, bpp = "RGB", "bgr", 3
-            else:
-                raise RuntimeError(
-                    "grp%d/ch%d 帧格式 %d 不支持 read_image（支持 RGB888/"
-                    "BGR888/RGB888_PLANAR/BGR888_PLANAR/NV12/NV21）"
-                    % (self._group, self._channel, fmt))
-            buf = self._held
-            if buf is None or len(buf) != w * h * bpp:
-                buf = bytearray(w * h * bpp)
-            frame.copy_to(buf, layout)
+        w, h, fmt = raw.width, raw.height, raw.format
+        if fmt in (tdl_py.FORMAT_NV12, tdl_py.FORMAT_NV21):
+            mode, layout, bpp = "L", "gray", 1
+        elif fmt in (tdl_py.FORMAT_RGB888, tdl_py.FORMAT_BGR888,
+                     tdl_py.FORMAT_RGB888_PLANAR,
+                     tdl_py.FORMAT_BGR888_PLANAR):
+            mode, layout, bpp = "RGB", "bgr", 3
+        else:
+            raise RuntimeError(
+                "grp%d/ch%d 帧格式 %d 不支持转成 Image（支持 RGB888/"
+                "BGR888/RGB888_PLANAR/BGR888_PLANAR/NV12/NV21）"
+                % (self._group, self._channel, fmt))
+        buf = self._held
+        if buf is None or len(buf) != w * h * bpp:
+            buf = bytearray(w * h * bpp)
+        raw.copy_to(buf, layout)
         addr = ctypes.addressof((ctypes.c_ubyte * len(buf)).from_buffer(buf))
         img = image.new(size=(w, h), mode=mode, addr=addr)
         self._held = buf
@@ -104,14 +194,11 @@ class Camera:
 
     def close(self):
         """释放通道（幂等）。一般不用手动调，进程退出自动清理。"""
-        self._drop_held()
+        self._held = None      # 像素缓冲交 GC（按约定此刻失效）
         if self._cam is not None:
             cam, self._cam = self._cam, None
             _instances.pop(self._key, None)
             cam.close()
-
-    def _drop_held(self):
-        self._held = None      # 旧 Image 的像素缓冲交 GC（按约定此刻失效）
 
     def __repr__(self):
         state = "closed" if self._cam is None else "open"
@@ -135,22 +222,24 @@ def _get(factory, timeout_ms):
 
 
 def read(rear=False, timeout_ms=1000):
-    """从 ai 通道取一帧，返回 zero-copy Frame（640x640 RGB888_PLANAR，
-    NN 推理输入）。rear=True 走后摄 grp3/ch1，否则前摄 grp0/ch1。
+    """从 ai 通道取一帧（640x640 RGB888_PLANAR，NN 推理输入），返回统一
+    Frame：model.run(frame) 零拷贝推理，frame.find_qrcodes() / lv.show(frame)
+    等 Image 能力按需转换。rear=True 走后摄 grp3/ch1，否则前摄 grp0/ch1。
 
     等价于 (rear_ai() if rear else ai()).read()：务必用
-    `with camera.read() as frame:` ——出块即失效，推理/处理必须在块内完成。"""
+    `with camera.read() as frame:`——出块即失效，推理/首次 Image 转换都
+    必须在块内完成。要 720x480 的帧同时推理和当图，用 camera.rgb().read()。"""
     cam = rear_ai(timeout_ms) if rear else ai(timeout_ms)
     return cam.read()
 
 
 def read_image(rear=False, timeout_ms=1000):
-    """从 rgb 通道取一帧，返回紧凑 interleaved RGB Image（720x480）。
-    rear=True 走后摄 grp3/ch0，否则前摄 grp0/ch0。
+    """兼容别名：从 rgb 通道取一帧并直接转成紧凑 RGB Image（720x480），
+    原生帧立即归还。rear=True 走后摄 grp3/ch0，否则前摄 grp0/ch0。
 
     等价于 (rear_rgb() if rear else rgb()).read_image()。其他通道用
-    工厂实例的 cam.read_image()（NV12/NV21 通道出 Y 平面灰度图），
-    转换规则与生命周期见 Camera.read_image。"""
+    工厂实例的 cam.read_image()（NV12/NV21 通道出 Y 平面灰度图）；
+    转换规则见 Camera._to_image，生命周期见 Frame。"""
     cam = rear_rgb(timeout_ms) if rear else rgb(timeout_ms)
     return cam.read_image()
 

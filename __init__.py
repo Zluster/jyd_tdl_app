@@ -18,6 +18,9 @@ drive 显示/触摸）
 import 即默认启动显示线程（jyd-ui：LVGL/OSD/相机预览链路；web 
 启动时左上角退出按钮立刻可见）。camera/nn/audio
 仍按需初始化（首次取相机时 open 通道），进程退出自动清理。
+环境变量 JYD_LV_USE=0 再叠加一个屏幕终端：Python 的 print / 异常回溯 /
+logging 同时显示在屏幕正中的面板里（stdout 淡青、stderr 红），原终端
+照常；原生库直接写 fd 1/2 的输出不在此列。
 
 与 launcher / ai_cycle 互斥运行（VO/OSD/相机通道独占），跑 jyd
 脚本前先停掉它们。
@@ -105,4 +108,19 @@ def __dir__():
 
 
 from . import _runtime
-_runtime.runtime().ensure_display()
+
+#: JYD_LV_USE=0：屏幕终端——Python 的 stdout/stderr 镜像到屏幕正中的 LVGL
+#: 面板（stdout 淡青 / stderr 红，原终端照常）。tee 必须在显示通路拉起之前
+#: 装好，初始化阶段的输出才不漏；初始化失败就立刻还原，别让后续报错走一
+#: 个永远没人消化的队列
+_console = None
+if os.environ.get("JYD_LV_USE") == "0":
+    from . import _lv_console
+    _console = _lv_console.Console.install()
+    _runtime.runtime().enable_console(_console)
+try:
+    _runtime.runtime().ensure_display()
+except BaseException:
+    if _console is not None:
+        _console.restore()
+    raise

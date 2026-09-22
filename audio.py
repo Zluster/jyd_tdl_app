@@ -4,9 +4,11 @@
 internally uses tone-marked pinyin pieces, which are converted here before a
 keyword is registered with the native streaming recognizer.
 
-``WavPlayer`` plays one PCM WAV file at a time with pause/resume/stop and
-progress, on top of the low-level ``AudioOutputStream`` (one AO channel per
-object).  ``Audio.play_wav`` remains the simple blocking one-shot playback.
+``AudioFilePlayer`` (alias ``WavPlayer``) plays one PCM WAV or MP3 file at a
+time with pause/resume/stop, seek and progress, on top of the low-level
+``AudioOutputStream`` (one AO channel per object); MP3 is decoded by the
+built-in ``Mp3Decoder`` (minimp3), no system codec needed.  ``Audio.play_wav``
+remains the simple blocking one-shot playback.
 """
 
 from __future__ import annotations
@@ -116,20 +118,110 @@ class Audio:
 
 
 #: Low-level AO output: one channel per object, interleaved PCM in, with
-#: pause/resume/buffer_state.  See WavPlayer for the file-level API.
+#: pause/resume/buffer_state.  See AudioFilePlayer for the file-level API.
 AudioOutputStream = tdl_py.AudioOutputStream
 
+#: Low-level MP3 decoding (minimp3 built into tdl_py): open(path), read(frames)
+#: -> S16LE bytes, seek(frame), sample_rate/channels/frames/duration_ms.
+Mp3Decoder = tdl_py.Mp3Decoder
 
-class WavPlayer:
-    """Play one uncompressed PCM WAV file with pause/resume/stop and progress.
 
-    The file is parsed with the standard ``wave`` module and streamed by a
-    background thread into an :class:`AudioOutputStream`; the AO channel is
-    opened per track with the file's own sample rate / channels / bit depth.
-    The driver only accepts blocks of exactly its period, and it rounds the
-    requested ``points_per_frame`` to whole milliseconds (320 samples are
-    20 ms at 16 kHz but 288 at 48 kHz), so by default the block is chosen as
-    20 ms of the track's own rate and the size the driver actually settled on
+class _WavSource:
+    """PCM source over the standard ``wave`` module (uncompressed WAV only).
+
+    Both sources expose the same small surface the player needs: ``rate``,
+    ``channels``, ``sample_width`` (bytes), ``frames`` (per-channel sample
+    frames), ``seek(frame)``, ``read(frames) -> bytes`` (b"" at the end) and
+    ``close()``.  Constructors raise ``ValueError``/``OSError`` on a file the
+    player cannot use."""
+
+    def __init__(self, path):
+        source = wave.open(path, "rb")
+        try:
+            if source.getcomptype() != "NONE":
+                raise ValueError("only uncompressed PCM WAV is supported")
+            rate, channels, width, nframes = (source.getframerate(), source.getnchannels(),
+                                              source.getsampwidth(), source.getnframes())
+            if channels not in (1, 2) or width not in (1, 2, 3, 4) or rate <= 0:
+                raise ValueError("unsupported WAV layout: %d Hz, %d ch, %d bytes/sample"
+                                 % (rate, channels, width))
+            if nframes <= 0:
+                raise ValueError("WAV has no audio data")
+        except BaseException:
+            source.close()
+            raise
+        self._source = source
+        self.rate, self.channels, self.sample_width, self.frames = rate, channels, width, nframes
+
+    def seek(self, frame):
+        self._source.setpos(max(0, min(int(frame), self.frames)))
+
+    def read(self, frames):
+        return self._source.readframes(frames)
+
+    def close(self):
+        self._source.close()
+
+
+class _Mp3Source:
+    """PCM source over :class:`Mp3Decoder`; always signed 16-bit."""
+
+    def __init__(self, path):
+        decoder = Mp3Decoder()
+        if not decoder.open(path):
+            raise ValueError(decoder.last_error or "cannot decode MP3")
+        self._decoder = decoder
+        self.rate, self.channels = decoder.sample_rate, decoder.channels
+        self.sample_width, self.frames = 2, decoder.frames
+
+    def seek(self, frame):
+        if not self._decoder.seek(int(frame)):
+            raise RuntimeError(self._decoder.last_error or "mp3 seek failed")
+
+    def read(self, frames):
+        data = self._decoder.read(frames)
+        if data is None:
+            raise RuntimeError(self._decoder.last_error or "mp3 decode failed")
+        return data
+
+    def close(self):
+        self._decoder.close()
+
+
+def _looks_like_mp3(path):
+    """File starts with an ID3v2 tag or an MPEG frame sync (misnamed files)."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(3)
+    except OSError:
+        return False
+    return head[:3] == b"ID3" or (len(head) >= 2 and head[0] == 0xFF and head[1] & 0xE0 == 0xE0)
+
+
+def _open_source(path):
+    """Pick the PCM source by extension; a non-WAV file with MP3 contents is
+    still played as MP3 so a misnamed file gets a useful result, not an error."""
+    if path.lower().endswith(".mp3"):
+        return _Mp3Source(path)
+    try:
+        return _WavSource(path)
+    except (wave.Error, EOFError):
+        if _looks_like_mp3(path):
+            return _Mp3Source(path)
+        raise ValueError("not a PCM WAV or MP3 file")
+
+
+class AudioFilePlayer:
+    """Play one PCM WAV or MP3 file with pause/resume/stop, seek and progress.
+
+    The file is read through a small PCM source (``wave`` for WAV, the
+    built-in :class:`Mp3Decoder` for MP3) and streamed by a background thread
+    into an :class:`AudioOutputStream`; the AO channel is opened per track
+    with the file's own sample rate / channels / bit depth.  The driver only
+    accepts blocks of exactly its period, and it rounds the requested
+    ``points_per_frame`` to whole milliseconds (320 samples are 20 ms at
+    16 kHz but 288 at 48 kHz), so by default the block is chosen as 20 ms of
+    the track's own rate and the size the driver actually settled on
     (``stream.frame_samples``) is what gets written.
 
     The library's own queue is 64 periods (about 1.3 s) deep and cannot be
@@ -139,12 +231,12 @@ class WavPlayer:
     lets the driver drain them: stopping or switching tracks -- including on
     application exit -- goes quiet within roughly a tenth of a second.
 
-        player = audio.WavPlayer(volume=16)
-        player.play("/root/jyd_data/music/song.wav")   # False + last_error on failure
+        player = audio.AudioFilePlayer(volume=16)
+        player.play("/root/jyd_data/music/song.mp3")   # False + last_error on failure
         player.pause(); player.resume()
         player.seek(90_000)    # jump to 1:30, keeps playing / stays paused
         st = player.status()   # state/path/elapsed_ms/total_ms/volume/error
-        player.stop()          # also releases the AO channel
+        player.stop()          # also releases the AO channel and the file
 
     ``state`` is one of ``idle`` (nothing loaded / stopped), ``playing``,
     ``paused``, ``finished`` (track played to the end) or ``error``.  The
@@ -152,9 +244,10 @@ class WavPlayer:
 
     Seeking cannot reuse the open channel: the ~120 ms already queued would
     play on and the driver's clear is off limits, so ``seek()`` halts the
-    stream (the queue drains in a few tens of ms) and opens a fresh channel
-    that continues from the target frame via ``wave.setpos``.  While paused
-    only the position moves and the channel is reopened by ``resume()``.
+    stream (the queue drains in a few tens of ms), repositions the source
+    (``wave.setpos`` / the MP3 sample index) and opens a fresh channel that
+    continues from there.  While paused only the position moves and the
+    channel is reopened by ``resume()``.
     """
 
     IDLE, PLAYING, PAUSED, FINISHED, ERROR = "idle", "playing", "paused", "finished", "error"
@@ -193,8 +286,8 @@ class WavPlayer:
         self._thread = None
         self._stop_requested = False
         self._paused = False
+        self._source = None          # open PCM source of the current track (_WavSource / _Mp3Source)
         self._rate = 0
-        self._format = None          # (rate, channels, sample_width) of the current track
         self._nframes = 0            # sample frames in the current track
         self._total_ms = 0
         self._frame_samples = 0      # samples per channel in one driver block (current track)
@@ -207,31 +300,31 @@ class WavPlayer:
         """Stop whatever is playing and start ``path`` from the beginning."""
         self.stop()
         try:
-            rate, channels, sample_width, nframes = self._probe(path)
-        except (OSError, wave.Error, ValueError) as error:
+            source = _open_source(path)
+        except (OSError, wave.Error, ValueError, RuntimeError) as error:
             self._set_error("%s: %s" % (path, error))
             return False
         with self._cond:
+            self._source = source
             self._path = path
-            self._format = (rate, channels, sample_width)
-            self._rate = rate
-            self._nframes = nframes
-            self._total_ms = nframes * 1000 // rate
-            self._sample_bytes = channels * sample_width
-        return self._start(path, 0)
+            self._rate = source.rate
+            self._nframes = source.frames
+            self._total_ms = source.frames * 1000 // source.rate
+            self._sample_bytes = source.channels * source.sample_width
+        return self._start(0)
 
     def seek(self, elapsed_ms) -> bool:
         """Jump to ``elapsed_ms`` (clamped to the track).  Playing: continues
         from there on a fresh channel; paused: stays paused and resume() picks
         up from there.  False when nothing is playing or paused."""
         with self._cond:
-            state, path, rate, nframes = self._state, self._path, self._rate, self._nframes
-        if state not in (self.PLAYING, self.PAUSED) or path is None or not rate:
+            state, source, rate, nframes = self._state, self._source, self._rate, self._nframes
+        if state not in (self.PLAYING, self.PAUSED) or source is None or not rate:
             return False
         frame = max(0, min(nframes, int(elapsed_ms) * rate // 1000))
         self._halt_stream()
         if state == self.PLAYING:
-            return self._start(path, frame)
+            return self._start(frame)
         with self._cond:
             self._frames_written = frame     # what status() shows; resume() starts here
             self._state = self.PAUSED
@@ -250,9 +343,9 @@ class WavPlayer:
         with self._cond:
             if self._state != self.PAUSED:
                 return False
-            stream, path, frame = self._stream, self._path, self._frames_written
+            stream, frame = self._stream, self._frames_written
         if stream is None:               # paused and then seeked: no channel open
-            return self._start(path, frame)
+            return self._start(frame)
         ok = stream.resume()             # let the driver run again first...
         with self._cond:
             self._paused = False         # ...then wake the worker
@@ -261,26 +354,39 @@ class WavPlayer:
         return self._report(stream, ok)
 
     def stop(self) -> bool:
-        """Stop feeding, let the short queue drain and release the AO channel
-        (safe to call anytime; returns within about a tenth of a second)."""
+        """Stop feeding, let the short queue drain, release the AO channel and
+        the file (safe to call anytime; returns within about a tenth of a second)."""
         self._halt_stream()
         with self._cond:
+            source, self._source = self._source, None
             if self._state in (self.PLAYING, self.PAUSED):
                 self._state = self.IDLE
+        if source is not None:
+            source.close()
         return True
 
     close = stop
 
-    def _start(self, path, start_frame) -> bool:
-        """Open a channel for the probed track and feed it from ``start_frame``
+    def _start(self, start_frame) -> bool:
+        """Open a channel for the current source and feed it from ``start_frame``
         (a previous stream, if any, has been halted).  Failure -> ERROR state."""
-        rate, channels, sample_width = self._format
-        points = self._points or max(1, rate * self._BLOCK_MS // 1000)
+        with self._cond:
+            source = self._source
+        if source is None:
+            self._set_error("no track loaded")
+            return False
+        points = self._points or max(1, source.rate * self._BLOCK_MS // 1000)
         stream = AudioOutputStream()
-        if not stream.open(rate, channels, sample_width * 8, self._volume,
-                           points, self._frame_count, self._timeout_ms,
+        if not stream.open(source.rate, source.channels, source.sample_width * 8,
+                           self._volume, points, self._frame_count, self._timeout_ms,
                            *self._ao):
             self._set_error(stream.last_error)
+            return False
+        try:
+            source.seek(start_frame)     # worker is stopped: the source is ours alone
+        except (OSError, wave.Error, RuntimeError) as error:
+            stream.close()
+            self._set_error("seek failed: %s" % error)
             return False
         frame_samples = stream.frame_samples     # what the driver really accepts per write
         with self._cond:
@@ -292,8 +398,8 @@ class WavPlayer:
             self._paused = False
             self._state = self.PLAYING
             self._thread = threading.Thread(target=self._pump,
-                                            args=(path, stream, frame_samples, start_frame),
-                                            name="dara-wav-player", daemon=True)
+                                            args=(source, stream, frame_samples),
+                                            name="dara-audio-player", daemon=True)
             self._thread.start()
         return True
 
@@ -311,7 +417,7 @@ class WavPlayer:
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout=2.0)
             if thread.is_alive():
-                print("dara.audio.WavPlayer: playback worker did not stop")
+                print("dara.audio.AudioFilePlayer: playback worker did not stop")
         if stream is not None:
             # a paused channel never drains, so it has to run again to close
             # quickly; mute first so the ~120 ms still queued is not heard
@@ -363,23 +469,6 @@ class WavPlayer:
 
     # ---- internals ----
 
-    @staticmethod
-    def _probe(path):
-        """Validate the file and return (rate, channels, sample_width, nframes)."""
-        with wave.open(path, "rb") as source:
-            if source.getcomptype() != "NONE":
-                raise ValueError("only uncompressed PCM WAV is supported")
-            rate = source.getframerate()
-            channels = source.getnchannels()
-            width = source.getsampwidth()
-            nframes = source.getnframes()
-        if channels not in (1, 2) or width not in (1, 2, 3, 4) or rate <= 0:
-            raise ValueError("unsupported WAV layout: %d Hz, %d ch, %d bytes/sample"
-                             % (rate, channels, width))
-        if nframes <= 0:
-            raise ValueError("WAV has no audio data")
-        return rate, channels, width, nframes
-
     def _keep_going(self):
         """Block while paused; False once stop() was requested."""
         with self._cond:
@@ -387,48 +476,46 @@ class WavPlayer:
                 self._cond.wait()
             return not self._stop_requested
 
-    def _pump(self, path, stream, frame_samples, start_frame):
+    def _pump(self, source, stream, frame_samples):
         """Worker: feed blocks of exactly one driver period (frame_samples per
-        channel) from ``start_frame`` on, never letting more than
-        _QUEUE_PERIODS of them pile up in the library, honouring pause/stop,
-        then wait for the driver to play out the tail before reporting
-        finished.  On a stop request it returns at once and leaves close to
-        the caller of _halt_stream()."""
+        channel) from the source's current position on, never letting more
+        than _QUEUE_PERIODS of them pile up in the library, honouring
+        pause/stop, then wait for the driver to play out the tail before
+        reporting finished.  On a stop request it returns at once and leaves
+        closing the channel to the caller of _halt_stream()."""
         try:
-            with wave.open(path, "rb") as source:
-                rate = source.getframerate()
-                frame_bytes = frame_samples * source.getnchannels() * source.getsampwidth()
-                queue_bytes = self._QUEUE_PERIODS * frame_bytes
-                half_period_s = frame_samples / (2.0 * rate)
-                source.setpos(min(start_frame, source.getnframes()))
-                while self._keep_going():
-                    data = source.readframes(frame_samples)
-                    if not data:
+            rate = source.rate
+            frame_bytes = frame_samples * source.channels * source.sample_width
+            queue_bytes = self._QUEUE_PERIODS * frame_bytes
+            half_period_s = frame_samples / (2.0 * rate)
+            while self._keep_going():
+                data = source.read(frame_samples)
+                if not data:
+                    break
+                if len(data) < frame_bytes:          # last block: zero-pad, as playWav does
+                    data += b"\0" * (frame_bytes - len(data))
+                # pace: wait until this block fits under _QUEUE_PERIODS queued
+                while True:
+                    buf = stream.buffer_state()
+                    if buf is None or buf["busy"] + frame_bytes <= queue_bytes:
                         break
-                    if len(data) < frame_bytes:          # last block: zero-pad, as playWav does
-                        data += b"\0" * (frame_bytes - len(data))
-                    # pace: wait until this block fits under _QUEUE_PERIODS queued
-                    while True:
-                        buf = stream.buffer_state()
-                        if buf is None or buf["busy"] + frame_bytes <= queue_bytes:
-                            break
-                        time.sleep(half_period_s)
-                        if not self._keep_going():
-                            return
-                    retries = 0
-                    while not stream.write(data):
-                        # a full driver queue frees a slot within one frame period;
-                        # anything longer than _MAX_WRITE_RETRIES writes is a fault
-                        retries += 1
-                        if retries > self._MAX_WRITE_RETRIES:
-                            raise RuntimeError(stream.last_error or "audio output write failed")
-                        time.sleep(0.02)
-                        if not self._keep_going():
-                            return
-                    with self._cond:
-                        self._frames_written += frame_samples
-                else:
-                    return                               # stopped while paused
+                    time.sleep(half_period_s)
+                    if not self._keep_going():
+                        return
+                retries = 0
+                while not stream.write(data):
+                    # a full driver queue frees a slot within one frame period;
+                    # anything longer than _MAX_WRITE_RETRIES writes is a fault
+                    retries += 1
+                    if retries > self._MAX_WRITE_RETRIES:
+                        raise RuntimeError(stream.last_error or "audio output write failed")
+                    time.sleep(0.02)
+                    if not self._keep_going():
+                        return
+                with self._cond:
+                    self._frames_written += frame_samples
+            else:
+                return                               # stopped while paused
             deadline = time.monotonic() + self._DRAIN_TIMEOUT_S
             while time.monotonic() < deadline:
                 if not self._keep_going():
@@ -447,7 +534,9 @@ class WavPlayer:
                     return
                 self._state = self.FINISHED
                 self._stream = None
-            stream.close()                # natural end: release the AO channel
+                self._source = None
+            stream.close()                # natural end: release the AO channel and the file
+            source.close()
         except Exception as error:        # file/driver fault: report, keep the object usable
             with self._cond:
                 if self._stop_requested:
@@ -455,7 +544,9 @@ class WavPlayer:
                 self._state = self.ERROR
                 self._error = str(error)
                 self._stream = None
+                self._source = None
             stream.close()
+            source.close()
 
     def _set_error(self, message):
         with self._cond:
@@ -464,12 +555,22 @@ class WavPlayer:
             self._path = None
             self._stream = None
             self._thread = None
+            source, self._source = self._source, None
+        if source is not None:
+            source.close()
 
     def _report(self, stream, ok):
         if not ok:
             with self._cond:
                 self._error = stream.last_error
         return ok
+
+
+#: Historical name; the player has handled MP3 as well as WAV since minimp3
+#: was built into tdl_py.
+WavPlayer = AudioFilePlayer
+
+
 class AudioInputStream:
     """Continuous signed-PCM microphone stream owned by one :class:`Audio`."""
 
@@ -793,6 +894,8 @@ class KeywordSpotter:
 __all__ = [
     "Audio",
     "AudioOutputStream",
+    "Mp3Decoder",
+    "AudioFilePlayer",
     "WavPlayer",
     "SpeakerRecognizer",
     "StreamingAsr",

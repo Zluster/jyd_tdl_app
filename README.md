@@ -12,7 +12,7 @@
 ```bash
 # 开发机：构建 wheel（在本目录执行，产物在 dist/）
 python3 -m pip install build
-python3 -m build --wheel
+python3 -m build --wheel --no-isolation
 
 # 板端：二选一
 pip install dara-0.1.0-py3-none-any.whl
@@ -36,20 +36,30 @@ while True:
 
 ## camera —— 取帧
 
-两个模块级函数覆盖常见场景，`rear=True` 切后摄：
+取帧只有一个入口 `read()`，返回的帧**既能喂 NPU，也能直接当 Image 用**；
+`rear=True` 切后摄：
 
 ### `camera.read(rear=False, timeout_ms=1000)`
 
-从 ai 通道（640×640，RGB888_PLANAR）取一帧 zero-copy `Frame`，**配合 nn 推理使用**：
+从 ai 通道（640×640，RGB888_PLANAR）取一帧。喂 `model.run()` 是零拷贝、不做任何
+转换；`find_*` / `draw_*` / `lv.show(frame)` 这些 Image 能力第一次用到时才转成
+紧凑图（之后缓存在这一帧上）：
 
 ```python
-with camera.read() as frame:     # 帧出 with 块即失效
-    r = model.run(frame)         # 推理必须在块内完成
+with camera.read() as frame:          # 帧出 with 块即失效
+    r = model.run(frame)              # NPU 直接吃原生帧
+    codes = frame.find_qrcodes()      # 需要时才转 Image，必须在块内首次触发
+    lv.show(frame)                    # 显示同样直接接受
 ```
+
+要 720×480 的帧同时推理和当图，用具体通道：`with camera.rgb().read() as frame:`。
+在帧上画框只改 Image 视图，NPU 看到的仍是原始帧；直接调 `tdl_py` 底层接口时传
+`frame.frame`。
 
 ### `camera.read_image(rear=False, timeout_ms=1000)`
 
-从 rgb 通道（720×480）取一帧并转成紧凑 RGB `Image`，**配合 image 模块传统视觉使用**：
+兼容别名：从 rgb 通道（720×480）取一帧并直接转成紧凑 RGB `Image`，原生帧立即
+归还，适合纯预览/纯视觉的循环：
 
 ```python
 img = camera.read_image()
@@ -112,6 +122,19 @@ dara 特有接口：
 - 控件 `set_src(Image)`：直接显示 image 模块的 Image（见上节）
 
 lv 可在任意线程调用（内部转交 UI 线程执行）。
+
+### 屏幕终端（`JYD_LV_USE=0`）
+
+没有终端可看的场景（web 启动、脱机跑脚本）设环境变量 `JYD_LV_USE=0`，
+Python 的 `print` / 异常回溯 / `logging` 会同时显示在屏幕正中的深色面板里：
+stdout 淡青色、stderr 红色，自动滚到最新一行，原终端或 web 日志照常记录。
+
+```bash
+JYD_LV_USE=0 python3 my_script.py
+```
+
+只镜像 Python 侧的 `sys.stdout` / `sys.stderr`；原生库直接打印到文件描述符的
+内容不会上屏。面板保留最近约 120 段输出，输出洪水时丢最旧并提示丢弃行数。
 
 ## nn —— NPU 推理
 

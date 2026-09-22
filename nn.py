@@ -24,12 +24,14 @@ x+40 / y-80 平移），可直接画 LVGL。转换产物是纯 Python 副本，
 族判定与 C++ detectFamily 一致（.mud [extra] 的 task 优先、model_type
 前缀兜底）；管线复制改造自 launcher/apps/ai/app.py（按约定不动老代码）。
 
-用法（frame 推荐来自 ai 通道，run 必须在 with 块内调用）：
+用法（frame 是 camera.read() 返回的统一帧，run 必须在 with 块内调用；
+推理直接吃底层原生帧、零拷贝，不会触发它的 Image 转换）：
 
     from jyd import camera, nn
     model = nn.load("yolov8n_det_coco80.mud")   # 短名解析到默认模型目录
-    with camera.read() as frame:                # ai 通道 zero-copy Frame
+    with camera.read() as frame:                # ai 通道
         r = model.run(frame)
+        frame.draw_rectangle(...)               # 同一帧也能当 Image 画框/显示
     for box in r.boxes:                         # 已是屏幕坐标
         print(box.x1, box.y1, r.label_of(box.class_id))
 """
@@ -45,6 +47,20 @@ DEFAULT_MODEL_DIR = "/root/models/"
 #: 坐标映射的源（sensor 原生）与目标（屏幕）尺寸，取双系统布局常量
 _SRC_W, _SRC_H = 1600, 1200            # 1600x1200
 _SCREEN_W, _SCREEN_H = tdl_py.SCREEN_WIDTH, tdl_py.SCREEN_HEIGHT  # 720x480
+
+
+def _native_frame(frame):
+    """camera.read() 的统一 Frame -> 底层 tdl_py.Frame（零拷贝，不触发
+    Image 转换）；已是原生帧则原样返回。所有喂 NPU 的公开入口都先过
+    这一层，管线内部只见原生帧。"""
+    if isinstance(frame, tdl_py.Frame):
+        return frame
+    raw = getattr(frame, "frame", None)
+    if isinstance(raw, tdl_py.Frame):
+        return raw
+    raise TypeError(
+        "需要 camera.read() 返回的帧（或底层 tdl_py.Frame），拿到: %r"
+        % (frame,))
 
 
 def _letterbox(frame_w, frame_h, src_w, src_h):
@@ -625,12 +641,14 @@ class Model:
         self._maps = {}   # (frame_w, frame_h) -> 坐标映射函数
 
     def run(self, frame):
-        """推理一帧。frame 是 zero-copy 引用，本调用必须在
+        """推理一帧。frame 是 camera.read() 返回的帧（底层原生帧零拷贝
+        直喂 NPU，不触发 Image 转换），本调用必须在
         `with cam.read() as frame:` 块内完成。
 
         默认返回屏幕坐标系（720x480）的纯 Python 副本，出 with 块后仍
         有效；load(..., to_screen=False) 时返回 tdl_py 原始结果（帧坐
         标系）。"""
+        frame = _native_frame(frame)
         raw = self._pipeline.run(frame)
         if not self._to_screen:
             return raw
@@ -650,7 +668,7 @@ class Model:
         """用屏幕坐标框选一个 FearTrack 目标；仅 feartrack.mud 可用。"""
         if self.family != "tracking":
             raise RuntimeError("initialize() 仅适用于 feartrack.mud")
-        self._pipeline.initialize(frame, x1, y1, x2, y2)
+        self._pipeline.initialize(_native_frame(frame), x1, y1, x2, y2)
 
     @property
     def ready(self):
@@ -665,7 +683,7 @@ class Model:
         """向人脸识别模型录入当前最大人脸。仅 face_recognition 可用。"""
         if self.family != "face_recognition":
             raise RuntimeError("enroll() 仅适用于 face_recognition.mud")
-        self._pipeline.enroll(frame, name)
+        self._pipeline.enroll(_native_frame(frame), name)
 
     def names(self):
         """返回已录入人脸名称。仅 face_recognition 可用。"""
@@ -696,7 +714,7 @@ class Model:
         """把当前完整相机帧加入自学习类别。仅 feature .mud 可用。"""
         if self.family != "self_learning":
             raise RuntimeError("add_frame() 仅适用于 feature .mud")
-        self._pipeline.add_frame(label, frame)
+        self._pipeline.add_frame(label, _native_frame(frame))
 
     def save_bank(self, path):
         if self.family != "self_learning":
@@ -812,6 +830,7 @@ class VisualObjectTracker:
 
     def initialize(self, frame, x1, y1, x2, y2):
         """用屏幕坐标 ROI 初始化模板；必须在 camera.read() 块内调用。"""
+        frame = _native_frame(frame)
         fx1, fy1 = _screen_to_frame(frame.width, frame.height, x1, y1)
         fx2, fy2 = _screen_to_frame(frame.width, frame.height, x2, y2)
         x1, x2 = sorted((fx1, fx2))
@@ -822,6 +841,7 @@ class VisualObjectTracker:
 
     def track(self, frame):
         """跟踪当前帧，返回 VisualTrackingResult；必须在 with 块内调用。"""
+        frame = _native_frame(frame)
         raw = self._tracker.track(frame)
         return VisualTrackingResult(raw, _make_map(frame.width, frame.height))
 

@@ -9,6 +9,10 @@ find_blobs/find_apriltags/...）与 _maix_image 完全一致，本模块只做�
                         也可方法式调用：img.to_lv(lv.screen_active())
     show(img)           Image 同步渲染上屏
 
+凡接受 Image 的入口（to_lv / show / 控件 set_src / lv.show）也直接接受
+camera.read() 返回的 Frame——自动取其 Image 视图（首次触发转换）。
+camera.read() 的 Frame 本身就能直接调 find_*/draw_* 等 Image 方法。
+
     from jyd import camera, image
     cam = camera.live()
     with cam.read() as frame:
@@ -62,8 +66,24 @@ def _jyd_img_create(parent, w, h, cf_name, addr, size):
 _to_lv_state = {"ready": False}
 
 
-def _lv_args(img):
-    """Image -> (w, h, cf 名, addr, size)，含 mode 校验。"""
+def _as_image(obj):
+    """Image 原样返回；camera.read() 的 Frame 取其 Image 视图（首次触发
+    转换）；其他类型返回 None，由调用方按自己的语境报错。"""
+    if isinstance(obj, _mi.Image):
+        return obj
+    from . import camera            # 惰性：camera 反向惰性引用本模块
+    if isinstance(obj, camera.Frame):
+        return obj.image
+    return None
+
+
+def _lv_args(obj):
+    """Image（或 camera.read() 的 Frame）-> (w, h, cf 名, addr, size)，
+    含 mode 校验。"""
+    img = _as_image(obj)
+    if img is None:
+        raise TypeError(
+            "需要 Image 或 camera.read() 返回的 Frame，拿到: %r" % (obj,))
     cf = _LV_CF.get(img.mode)
     if cf is None:
         raise ValueError("不支持的 Image.mode: %r（支持 %s）"
@@ -90,11 +110,12 @@ def to_lv(img, parent=None):
     - 返回 lv.image 控件代理，可继续 center()/set_pos()/delete() 等
     - mode 支持 L/RGB/RGBA/RGB16，对应 L8/RGB888/ARGB8888/RGB565
     - 等价写法：w = lv.image(parent); w.set_src(img)（见 jyd.lv）
-    - 像素内存归宿主侧所有，必须比控件活得久。camera.read_image() 的
-      缓冲由 Camera 常驻复用（同尺寸不换地址）：预览场景控件建一次即可。
+    - 也可直接传 camera.read() 的 Frame（取其 Image 视图）
+    - 像素内存归宿主侧所有，必须比控件活得久。相机帧的 Image 缓冲由
+      Camera 常驻复用（同尺寸不换地址）：预览场景控件建一次即可。
       但每帧刷新请用 lv.show(img)，不要只 widget.invalidate()：渲染在
-      jyd-ui 线程异步进行，只标脏的话下一次 read_image() 会先于重绘把
-      缓冲覆盖掉，画上去的内容根本来不及上屏；lv.show(img) 是同步交接，
+      jyd-ui 线程异步进行，只标脏的话下一次 read() 会先于重绘把缓冲
+      覆盖掉，画上去的内容根本来不及上屏；lv.show(img) 是同步交接，
       返回即已渲染。自己管控件的话在 invalidate() 之后调 lv.refr_now(None)。
     """
     args = _lv_args(img)
@@ -111,21 +132,24 @@ def _lv_set_src(widget, img):
 
 def show(img):
     """把 Image 同步渲染上屏，等价于 lv.show(img)（见 jyd.lv.show）。
+    也接受 camera.read() 的 Frame（取其 Image 视图）。
 
     lv 模块托管一个 lv.image 控件复用：零拷贝共享 img 的像素、标脏后
     当场渲染，返回时这一帧已经上屏，之后覆盖/重画 img 都安全。mode
     支持 L/RGB/RGBA/RGB16；显示画布是 B,G,R,A 字节序，要屏幕红色传
     color=(0, 0, 255, ...)。
 
-        img = camera.read_image()
-        img.draw_rectangle(100, 100, 300, 260, color=(0, 0, 255), thickness=3)
-        image.show(img)             # 或 img.show()
+        with camera.rgb().read() as frame:
+            frame.draw_rectangle(100, 100, 300, 260, color=(0, 0, 255), thickness=3)
+            image.show(frame)       # 或 frame.show()
     """
-    if not isinstance(img, _mi.Image):
+    image = _as_image(img)
+    if image is None:
         raise TypeError(
-            "image.show() 只接受 image 模块的 Image，拿到: %r" % (img,))
+            "image.show() 只接受 Image 或 camera.read() 返回的 Frame，"
+            "拿到: %r" % (img,))
     from . import lv as _lv       # 惰性导入：lv 模块反向惰性引用本模块
-    _lv.show(img)
+    _lv.show(image)
 
 
 # pybind 堆类型可挂方法：img.to_lv(parent) 与 to_lv(img, parent) 等价，

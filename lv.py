@@ -28,8 +28,9 @@ jyd-ui 线程执行并等结果（MicroPython 不可重入且绑定该线程）�
                           和点数组都建在 MicroPython 侧，CPython 每帧只传一根
                           bytes；控件随 parent 删除，池自动失效）
 
-另外代理对象的 set_src() 做了增强：可直接传 jyd.image 的 Image
-（零拷贝建 dsc；Image 像素内存必须比控件活得久），其余参数照旧转发。
+另外代理对象的 set_src() 做了增强：可直接传 jyd.image 的 Image 或
+camera.read() 的 Frame（零拷贝建 dsc；Image 像素内存必须比控件活得
+久），其余参数照旧转发。show(img) 同样两者都接受。
 
 用法：
 
@@ -165,27 +166,28 @@ def show(image=None, fps=None):
         lv.show(img, 30)         # 两者兼有
 
     UI 渲染由 jyd-ui 线程自转，show 不驱动心跳（不调它 UI 也在跑），
-    保留它是给循环控节奏。传 Image 时由本模块托管一个 lv.image
-    控件：零拷贝共享像素，每次调用标脏并**当场渲染上屏**（同步交接：
-    show 返回时这一帧已经翻到屏幕上，之后覆盖/重画 img 都安全——
-    camera.read_image() 复用同一块缓冲，画完框直接 show 再取下一帧就是
-    这个契约）；换了不同的像素缓冲（地址/尺寸/格式变化）自动重设控件
-    源，仍复用同一控件。控件挂在当前活动屏上：换屏了、或所在屏被删了
-    （appfw 退出应用会整屏删除），下一次 show 在新的活动屏上重建。
-    相机预览就是 `while True: lv.show(camera.read_image())`。
+    保留它是给循环控节奏。    传 Image（或 camera.read() 的 Frame，自动取其
+    Image 视图）时由本模块托管一个 lv.image 控件：零拷贝共享像素，每次
+    调用标脏并**当场渲染上屏**（同步交接：show 返回时这一帧已经翻到屏幕
+    上，之后覆盖/重画 img 都安全——相机帧的 Image 缓冲跨帧复用，画完框
+    直接 show 再取下一帧就是这个契约）；换了不同的像素缓冲（地址/尺寸/
+    格式变化）自动重设控件源，仍复用同一控件。控件挂在当前活动屏上：
+    换屏了、或所在屏被删了（appfw 退出应用会整屏删除），下一次 show 在
+    新的活动屏上重建。相机预览就是 `while True: lv.show(camera.read_image())`。
 
     别在 bind 回调里调 show(img)：回调本身在 LVGL 的事件栈里，再触发
     一次渲染属于嵌套刷新。"""
     if image is not None:
-        import _maix_image
-        if isinstance(image, _maix_image.Image):
-            _show_image(image)
+        from . import image as _image
+        img = _image._as_image(image)   # Image 或 camera.read() 的 Frame
+        if img is not None:
+            _show_image(img)
         elif fps is None:
             image, fps = None, image       # show(30) 兼容：首参是帧率
         else:
             raise TypeError(
-                "show() 第一个参数应为 Image 或 fps 数字，拿到: %r"
-                % (image,))
+                "show() 第一个参数应为 Image / camera.read() 的 Frame 或 "
+                "fps 数字，拿到: %r" % (image,))
     _runtime.runtime().show(fps)
 
 
@@ -422,12 +424,13 @@ class LabelPool:
 
 
 def _proxy_set_src(self, src):
-    """代理对象的 set_src 增强：直接传 _maix_image 的 Image 时走零拷贝
-    dsc 路径（见 jyd.image._lv_set_src），其余参数照旧跨桥转发。"""
-    import _maix_image
-    if isinstance(src, _maix_image.Image):
-        from . import image as _image
-        return _image._lv_set_src(self, src)
+    """代理对象的 set_src 增强：直接传 _maix_image 的 Image（或
+    camera.read() 的 Frame）时走零拷贝 dsc 路径（见 jyd.image._lv_set_src），
+    其余参数照旧跨桥转发。"""
+    from . import image as _image
+    img = _image._as_image(src)
+    if img is not None:
+        return _image._lv_set_src(self, img)
     client = object.__getattribute__(self, "_client")
     path = object.__getattribute__(self, "_path")
     return client.proxy_call(path + ".set_src", src)
