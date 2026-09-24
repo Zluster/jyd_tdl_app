@@ -44,6 +44,7 @@ import ctypes
 import tdl_py
 
 from . import _runtime
+from .core import device_config
 
 #: 统一 Frame 上直通原生 tdl_py.Frame 的名字；其余名字落到 Image 视图
 _NATIVE_ATTRS = frozenset((
@@ -207,6 +208,22 @@ class Camera:
 
 
 _instances = {}
+_DEFAULT_SOURCE = object()
+
+
+def default_source():
+    """返回设置页选定的默认相机来源（``front`` 或 ``rear``）。"""
+    return device_config.camera_source()
+
+
+def default_is_rear():
+    """默认来源是否为后摄，供需要保留手动切换的应用初始化状态使用。"""
+    return default_source() == "rear"
+
+
+def set_default_source(source):
+    """设置全局默认相机来源。通常由系统设置应用调用。"""
+    device_config.set_camera_source(source)
 
 
 def _get(factory, timeout_ms):
@@ -221,32 +238,39 @@ def _get(factory, timeout_ms):
     return cam
 
 
-def read(rear=False, timeout_ms=1000):
+def read(rear=None, timeout_ms=1000):
     """从 ai 通道取一帧（640x640 RGB888_PLANAR，NN 推理输入），返回统一
     Frame：model.run(frame) 零拷贝推理，frame.find_qrcodes() / lv.show(frame)
-    等 Image 能力按需转换。rear=True 走后摄 grp3/ch1，否则前摄 grp0/ch1。
+    等 Image 能力按需转换。不传 rear 时走系统设置的默认摄像头；rear=True
+    走后摄 grp3/ch1，rear=False 走前摄 grp0/ch1。
 
     等价于 (rear_ai() if rear else ai()).read()：务必用
     `with camera.read() as frame:`——出块即失效，推理/首次 Image 转换都
     必须在块内完成。要 720x480 的帧同时推理和当图，用 camera.rgb().read()。"""
+    if rear is None:
+        rear = default_is_rear()
     cam = rear_ai(timeout_ms) if rear else ai(timeout_ms)
     return cam.read()
 
 
-def read_image(rear=False, timeout_ms=1000):
+def read_image(rear=None, timeout_ms=1000):
     """兼容别名：从 rgb 通道取一帧并直接转成紧凑 RGB Image（720x480），
-    原生帧立即归还。rear=True 走后摄 grp3/ch0，否则前摄 grp0/ch0。
+    原生帧立即归还。不传 rear 时走系统设置的默认摄像头；rear=True 走后摄
+    grp3/ch0，rear=False 走前摄 grp0/ch0。
 
     等价于 (rear_rgb() if rear else rgb()).read_image()。其他通道用
     工厂实例的 cam.read_image()（NV12/NV21 通道出 Y 平面灰度图）；
     转换规则见 Camera._to_image，生命周期见 Frame。"""
+    if rear is None:
+        rear = default_is_rear()
     cam = rear_rgb(timeout_ms) if rear else rgb(timeout_ms)
     return cam.read_image()
 
 
-def preview(source="front"):
+def preview(source=_DEFAULT_SOURCE):
     """屏幕底层相机预览，三态开关：
 
+    - 不传参数：显示设置页选定的默认来源
     - "front"（或 False）：显示前摄 live（grp0/ch2 -> grp1 -> VO）
     - "rear" （或 True） ：显示后摄 live（grp3/ch2 -> grp1 -> VO）
     - "off"  （或 None） ：不显示（视频仍在底层流动以承载 UI 帧，
@@ -257,6 +281,8 @@ def preview(source="front"):
     对新 screen 需重调一次。显示通路未建立时只记录期望（建链时生
     效）；已建立时立即生效，OSD/UI 不受影响。后摄画面要求小核已在
     跑 grp3 采集。"""
+    if source is _DEFAULT_SOURCE:
+        source = default_source()
     _runtime.runtime().set_preview(source)
 
 
@@ -289,21 +315,36 @@ def to_screen(x, y, frame_width=640, frame_height=640):
 
 # ---- 前摄 grp0 / 显示 grp1 ----
 
-def rgb(timeout_ms=1000) -> Camera:
-    """grp0/ch0，720x480 BGR888_PLANAR。"""
-    return _get(tdl_py.VpssCamera.rgb, timeout_ms)
+def rgb(timeout_ms=1000, rear=None) -> Camera:
+    """默认来源的 ch0，720x480 BGR888_PLANAR。
 
-def ai(timeout_ms=1000) -> Camera:
-    """grp0/ch1，640x640 RGB888_PLANAR（NN 推理输入）。"""
-    return _get(tdl_py.VpssCamera.ai, timeout_ms)
+    rear 未传时使用系统设置；显式传 True/False 时固定使用后/前摄。
+    """
+    if rear is None:
+        rear = default_is_rear()
+    return _get(tdl_py.VpssCamera.rear_rgb if rear else tdl_py.VpssCamera.rgb,
+                timeout_ms)
 
-def live(timeout_ms=1000) -> Camera:
-    """grp0/ch2，720x480 NV12（预览同源）。"""
-    return _get(tdl_py.VpssCamera.live, timeout_ms)
+def ai(timeout_ms=1000, rear=None) -> Camera:
+    """默认来源的 ch1，640x640 RGB888_PLANAR（NN 推理输入）。"""
+    if rear is None:
+        rear = default_is_rear()
+    return _get(tdl_py.VpssCamera.rear_ai if rear else tdl_py.VpssCamera.ai,
+                timeout_ms)
 
-def sub_rgb(timeout_ms=1000) -> Camera:
-    """grp0/ch3，320x240 BGR888_PLANAR。"""
-    return _get(tdl_py.VpssCamera.sub_rgb, timeout_ms)
+def live(timeout_ms=1000, rear=None) -> Camera:
+    """默认来源的 ch2，720x480 NV12（预览同源）。"""
+    if rear is None:
+        rear = default_is_rear()
+    return _get(tdl_py.VpssCamera.rear_live if rear else tdl_py.VpssCamera.live,
+                timeout_ms)
+
+def sub_rgb(timeout_ms=1000, rear=None) -> Camera:
+    """默认来源的 ch3，320x240 BGR888_PLANAR。"""
+    if rear is None:
+        rear = default_is_rear()
+    return _get(tdl_py.VpssCamera.rear_sub_rgb if rear else tdl_py.VpssCamera.sub_rgb,
+                timeout_ms)
 
 def screen(timeout_ms=1000) -> Camera:
     """grp1/ch0，720x480 NV12（显示处理通道，读到的是送 VO 的画面）。"""
