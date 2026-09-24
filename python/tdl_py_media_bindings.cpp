@@ -20,6 +20,10 @@
 #include "tdl_app/audio_output.hpp"
 #include "tdl_app/video_player.hpp"
 
+// Declarations only; the implementation is compiled once in
+// third_party/vendor/minimp3/minimp3_impl.c.
+#include "minimp3_ex.h"
+
 #if defined(TDL_PY_WITH_NPU) && !defined(TDL_PY_AUDIO_BASE_ONLY)
 #include "tdl_app/direct_keyword_spotter.hpp"
 #include "tdl_app/npu_asr_recognizer.hpp"
@@ -648,6 +652,214 @@ class PyAudioOutputStream {
   std::uint32_t sequence_ = 0;
   bool paused_ = false;
   std::string last_error_;   // only touched with the GIL held
+};
+
+// Streaming MP3 decoder for Python: the PCM source half of a music player,
+// the AO half being AudioOutputStream.  minimp3_ex maps the file, scans the
+// frame headers once at open() (or trusts the Xing/VBR tag) to learn the
+// exact length and build a sample index, and then decodes on demand:
+//
+//     dec = tdl_py.Mp3Decoder()
+//     dec.open(path)                      # False + last_error on failure
+//     dec.sample_rate, dec.channels, dec.frames, dec.duration_ms
+//     pcm = dec.read(960)                 # up to 960 frames of interleaved S16LE;
+//                                         # b"" at the end, None on a decode error
+//     dec.seek(frame)                     # sample-accurate, any time
+//     dec.close()
+//
+// "frame" here always means one sample per channel (the WAV convention the
+// player already uses), never an MP3 packet.  Decoding releases the GIL; a
+// mutex serialises the methods so a controller thread can close() or seek()
+// while a worker is blocked in read() without corrupting the decoder.
+class PyMp3Decoder {
+ public:
+  PyMp3Decoder() = default;
+  ~PyMp3Decoder() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    closeLocked();
+  }
+
+  PyMp3Decoder(const PyMp3Decoder &) = delete;
+  PyMp3Decoder &operator=(const PyMp3Decoder &) = delete;
+
+  bool open(const std::string &path) {
+    std::string error;
+    bool ok = false;
+    {
+      nb::gil_scoped_release guard;
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (opened_) {
+        error = "mp3 decoder is already open";
+      } else {
+        ok = openLocked(path, &error);
+      }
+    }
+    last_error_ = ok ? std::string() : error;
+    return ok;
+  }
+
+  // Decode up to frame_count frames.  Returns b"" at the end of the track and
+  // None (with last_error set) on a decode error; a short block is normal
+  // near the end of the file.
+  nb::object read(int frame_count) {
+    if (frame_count <= 0) {
+      last_error_ = "frame_count must be > 0";
+      return nb::none();
+    }
+    std::vector<mp3d_sample_t> pcm;
+    std::string error;
+    std::size_t got = 0;
+    bool ok = false;
+    {
+      nb::gil_scoped_release guard;
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!opened_) {
+        error = "mp3 decoder is not open";
+      } else {
+        pcm.resize(static_cast<std::size_t>(frame_count) *
+                   static_cast<std::size_t>(channels_));
+        got = mp3dec_ex_read(&dec_, pcm.data(), pcm.size());
+        if (got == 0 && dec_.last_error != 0) {
+          error = describe("decode", dec_.last_error);
+        } else {
+          got -= got % static_cast<std::size_t>(channels_);   // whole frames only
+          ok = true;
+        }
+      }
+    }
+    if (!ok) {
+      last_error_ = error;
+      return nb::none();
+    }
+    last_error_.clear();
+    return nb::bytes(reinterpret_cast<const char *>(pcm.data()),
+                     got * sizeof(mp3d_sample_t));
+  }
+
+  // Sample-accurate seek to a frame index (clamped to the track).
+  bool seek(std::int64_t frame_index) {
+    std::string error;
+    bool ok = false;
+    {
+      nb::gil_scoped_release guard;
+      std::lock_guard<std::mutex> lock(mutex_);
+      if (!opened_) {
+        error = "mp3 decoder is not open";
+      } else {
+        const std::int64_t target =
+            std::max<std::int64_t>(0, std::min(frame_index, frames_));
+        const int ret = mp3dec_ex_seek(
+            &dec_, static_cast<std::uint64_t>(target) *
+                       static_cast<std::uint64_t>(channels_));
+        if (ret != 0) {
+          error = describe("seek", ret);
+        } else {
+          ok = true;
+        }
+      }
+    }
+    last_error_ = ok ? std::string() : error;
+    return ok;
+  }
+
+  void close() {
+    nb::gil_scoped_release guard;
+    std::lock_guard<std::mutex> lock(mutex_);
+    closeLocked();
+  }
+
+  bool opened() {
+    nb::gil_scoped_release guard;
+    std::lock_guard<std::mutex> lock(mutex_);
+    return opened_;
+  }
+
+  int sampleRate() { return locked(sample_rate_); }
+  int channels() { return locked(channels_); }
+  std::int64_t frames() { return locked(frames_); }
+
+  std::int64_t durationMs() {
+    nb::gil_scoped_release guard;
+    std::lock_guard<std::mutex> lock(mutex_);
+    return (opened_ && sample_rate_ > 0) ? frames_ * 1000 / sample_rate_ : 0;
+  }
+
+  // Next frame read() will return, i.e. frames decoded so far from the
+  // current seek position.
+  std::int64_t position() {
+    nb::gil_scoped_release guard;
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!opened_ || channels_ <= 0) return 0;
+    return static_cast<std::int64_t>(dec_.cur_sample /
+                                     static_cast<std::uint64_t>(channels_));
+  }
+
+  const std::string &lastError() const { return last_error_; }
+
+ private:
+  template <typename T>
+  T locked(const T &field) {
+    nb::gil_scoped_release guard;
+    std::lock_guard<std::mutex> lock(mutex_);
+    return opened_ ? field : T();
+  }
+
+  static std::string describe(const char *what, int code) {
+    const char *reason = "unknown error";
+    switch (code) {
+      case MP3D_E_PARAM: reason = "invalid parameter"; break;
+      case MP3D_E_MEMORY: reason = "out of memory"; break;
+      case MP3D_E_IOERROR: reason = "cannot read file"; break;
+      case MP3D_E_USER: reason = "not an MPEG audio file"; break;
+      case MP3D_E_DECODE: reason = "stream parameters changed mid-file"; break;
+      default: break;
+    }
+    return std::string("mp3 ") + what + " failed: " + reason;
+  }
+
+  bool openLocked(const std::string &path, std::string *error) {
+    // MP3D_SEEK_TO_SAMPLE: open() walks the frame headers (cheap, no decoding)
+    // so frames_ is exact and seek() lands on a sample, not a byte offset.
+    const int ret = mp3dec_ex_open(&dec_, path.c_str(), MP3D_SEEK_TO_SAMPLE);
+    if (ret != 0) {
+      *error = describe("open", ret);
+      return false;
+    }
+    if (dec_.samples == 0 || dec_.info.channels <= 0 || dec_.info.hz <= 0) {
+      mp3dec_ex_close(&dec_);
+      *error = "mp3 open failed: no MPEG audio frames found";
+      return false;
+    }
+    if (dec_.info.channels > 2) {
+      mp3dec_ex_close(&dec_);
+      *error = "mp3 open failed: only mono and stereo are supported";
+      return false;
+    }
+    sample_rate_ = dec_.info.hz;
+    channels_ = dec_.info.channels;
+    frames_ = static_cast<std::int64_t>(dec_.samples /
+                                        static_cast<std::uint64_t>(channels_));
+    opened_ = true;
+    return true;
+  }
+
+  void closeLocked() {
+    if (opened_) {
+      mp3dec_ex_close(&dec_);
+      opened_ = false;
+    }
+    sample_rate_ = 0;
+    channels_ = 0;
+    frames_ = 0;
+  }
+
+  std::mutex mutex_;
+  mp3dec_ex_t dec_{};
+  bool opened_ = false;
+  int sample_rate_ = 0;
+  int channels_ = 0;
+  std::int64_t frames_ = 0;   // per-channel sample frames in the track
+  std::string last_error_;    // only touched with the GIL held
 };
 #endif
 
@@ -1359,6 +1571,32 @@ void registerAudioBindings(nb::module_ &m) {
       .def_prop_ro("frame_bytes", &PyAudioOutputStream::frameBytes,
                    "Bytes per write(); 0 when closed.")
       .def_prop_ro("last_error", &PyAudioOutputStream::lastError);
+
+  // --- MP3 file decoding ---------------------------------------------------
+  nb::class_<PyMp3Decoder>(m, "Mp3Decoder",
+      "Streaming MP3 decoder (minimp3) with sample-accurate seek: the PCM "
+      "source for a music player, feeding AudioOutputStream. open(path), then "
+      "read(frame_count) returns interleaved signed 16-bit PCM bytes (b\"\" at "
+      "the end, None on a decode error); seek(frame) jumps to a per-channel "
+      "sample frame. Methods return False/None on failure; inspect last_error.")
+      .def(nb::init<>())
+      .def("open", &PyMp3Decoder::open, nb::arg("path"),
+           "Map the file, scan the frame headers for the exact length and "
+           "build the seek index.")
+      .def("read", &PyMp3Decoder::read, nb::arg("frame_count"),
+           "Decode up to frame_count frames (samples per channel) of S16LE PCM.")
+      .def("seek", &PyMp3Decoder::seek, nb::arg("frame_index"),
+           "Seek to a per-channel sample frame; clamped to the track.")
+      .def("close", &PyMp3Decoder::close, "Release the file (idempotent).")
+      .def_prop_ro("opened", &PyMp3Decoder::opened)
+      .def_prop_ro("sample_rate", &PyMp3Decoder::sampleRate)
+      .def_prop_ro("channels", &PyMp3Decoder::channels)
+      .def_prop_ro("frames", &PyMp3Decoder::frames,
+                   "Total per-channel sample frames in the track.")
+      .def_prop_ro("duration_ms", &PyMp3Decoder::durationMs)
+      .def_prop_ro("position", &PyMp3Decoder::position,
+                   "Frame index the next read() starts at.")
+      .def_prop_ro("last_error", &PyMp3Decoder::lastError);
 #endif
 
 #if defined(TDL_PY_WITH_NPU) && !defined(TDL_PY_AUDIO_BASE_ONLY)

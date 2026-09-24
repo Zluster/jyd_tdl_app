@@ -352,9 +352,13 @@ if(TDL_APP_BUILD_PYTHON)
   # nanobind is compiled statically into the module (nb_combined.cpp), which
   # avoids find_package(Python) and works with the cross toolchain. Flags
   # follow the manual-build recipe documented in nb_combined.cpp.
+  # minimp3 (CC0, third_party/vendor/minimp3) gives the music player MP3
+  # decoding with sample-accurate seek and no FFmpeg / rootfs dependency.  The
+  # implementation lives in one C file; the bindings only include the header.
   add_library(tdl_py MODULE
     python/tdl_py_module.cpp
     python/tdl_py_media_bindings.cpp
+    third_party/vendor/minimp3/minimp3_impl.c
     third_party/nanobind/src/nb_combined.cpp
   )
   set_target_properties(tdl_py PROPERTIES
@@ -364,6 +368,7 @@ if(TDL_APP_BUILD_PYTHON)
     CXX_STANDARD 17
     CXX_STANDARD_REQUIRED ON
     CXX_VISIBILITY_PRESET hidden
+    C_VISIBILITY_PRESET hidden
   )
   target_compile_definitions(tdl_py PRIVATE
     NB_COMPACT_ASSERTIONS
@@ -381,6 +386,7 @@ if(TDL_APP_BUILD_PYTHON)
     "${TDL_APP_PYTHON_INCLUDE_DIR}"
     "${CMAKE_CURRENT_LIST_DIR}/third_party/nanobind/include"
     "${CMAKE_CURRENT_LIST_DIR}/third_party/nanobind/ext/robin_map/include"
+    "${CMAKE_CURRENT_LIST_DIR}/third_party/vendor/minimp3"
     "${TDL_CV184X_INCLUDE_DIRS}"
   )
   target_link_libraries(tdl_py PRIVATE
