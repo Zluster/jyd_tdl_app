@@ -36,25 +36,33 @@ while True:
 
 ## camera —— 取帧
 
-取帧只有一个入口 `read()`，返回的帧**既能喂 NPU，也能直接当 Image 用**；
-`rear=True` 切后摄：
+模块级 `read()` 返回的帧同时装着同侧两个通道的数据：**NPU 用 AI 通道，
+Image 用 RGB 通道**；`rear=True` 切后摄：
 
 ### `camera.read(rear=False, timeout_ms=1000)`
 
-从 ai 通道（640×640，RGB888_PLANAR）取一帧。喂 `model.run()` 是零拷贝、不做任何
-转换；`find_*` / `draw_*` / `lv.show(frame)` 这些 Image 能力第一次用到时才转成
-紧凑图（之后缓存在这一帧上）：
+在一次调用里紧邻读取 ai 通道（640×640，RGB888_PLANAR）和 rgb 通道
+（720×480，BGR888_PLANAR）。喂 `model.run()` 使用 AI 原生帧，零拷贝、不做
+转换；`find_*` / `draw_*` / `lv.show(frame)` 使用已经准备好的 720×480 RGB
+Image：
 
 ```python
-with camera.read() as frame:          # 帧出 with 块即失效
-    r = model.run(frame)              # NPU 直接吃原生帧
-    codes = frame.find_qrcodes()      # 需要时才转 Image，必须在块内首次触发
-    lv.show(frame)                    # 显示同样直接接受
+with camera.read() as frame:
+    r = model.run(frame)              # AI 640×640 原生帧
+    codes = frame.find_qrcodes()      # RGB 720×480 Image
+    for box in r.boxes:               # 结果已映射到 720×480，可直接画
+        frame.draw_rectangle(box.x1, box.y1, box.x2, box.y2,
+                             color=(0, 0, 255), thickness=2)
+    lv.show(frame)                    # 显示 720×480 Image
 ```
 
-要 720×480 的帧同时推理和当图，用具体通道：`with camera.rgb().read() as frame:`。
-在帧上画框只改 Image 视图，NPU 看到的仍是原始帧；直接调 `tdl_py` 底层接口时传
-`frame.frame`。
+`frame.width/height` 属于原生 AI Frame，所以是 640×640；图像尺寸看
+`frame.image.width/height`，是 720×480。在帧上画框只改 RGB Image，NPU
+看到的仍是原始 AI 帧；直接调 `tdl_py` 底层接口时传 `frame.frame`。
+
+两路在 `camera.read()` 内连续取得，避免先推理几百毫秒、再读取 RGB 图导致移动
+物体的框与画面错位。具体通道工厂的 `camera.ai().read()` /
+`camera.rgb().read()` 仍只读自己的通道，Image 能力按需由该通道转换。
 
 ### `camera.read_image(rear=False, timeout_ms=1000)`
 

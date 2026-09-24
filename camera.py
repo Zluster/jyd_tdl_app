@@ -15,13 +15,15 @@
 timeout_ms 仅该通道首次创建生效。首次创建即 open（失败立刻暴露），进程退出自动 close。通道
 被其他进程占用（launcher/ai_cycle 在跑）时 open 会失败。
 
-取帧只有一个入口 read()，返回的 Frame **既能喂 NPU，也能当 Image 用**
-（模块级 camera.read() 走 ai 通道，rear=True 切后摄；其他通道用工厂实例）：
+取帧只有一个入口 read()，返回的 Frame **既能喂 NPU，也能当 Image 用**。
+模块级 camera.read() 会紧邻读取同侧的两个通道：NPU 能力用 ai 通道
+640x640 原生帧，Image 能力用 rgb 通道 720x480 紧凑图；rear=True 切后摄。
+具体通道工厂的 read() 仍只读取自身通道，Image 能力首次使用时按需转换：
 
-    with camera.read() as frame:          # ai 通道 640x640，原生零拷贝帧
-        result = model.run(frame)         # NPU 直接吃原生帧，不做任何转换
-        codes = frame.find_qrcodes()      # 首次用到 Image 能力才转成紧凑图
-        lv.show(frame)                    # 显示同样直接接受
+    with camera.read() as frame:
+        result = model.run(frame)         # ai 通道 640x640 原生帧，零拷贝
+        codes = frame.find_qrcodes()      # rgb 通道 720x480 Image
+        lv.show(frame)                    # 显示 720x480，不会出现 640 方图偏移
 
     with camera.rgb().read() as frame:    # 720x480 通道：同一帧既推理又当图
         boxes = model.run(frame).boxes
@@ -31,8 +33,8 @@ timeout_ms 仅该通道首次创建生效。首次创建即 open（失败立刻�
     img = camera.read_image()             # 兼容别名：直接拿 Image，帧立即归还
     img = live().read_image()             # NV12/NV21 通道出 Y 平面灰度 Image
 
-Image 能力必须在帧有效期内**首次**触发（转换要读帧内存）；转换出的
-Image 是拷贝，到同相机下一次 read() 前有效。详见 Frame 的说明。
+模块级 camera.read() 已经预装 RGB Image，不存在延迟转换；具体通道实例
+read() 的 Image 能力仍是懒转换，必须在帧有效期内首次触发。详见 Frame。
 
 屏幕底层预览用 preview() 控制，三态："front" 前摄 / "rear" 后摄 /
 "off" 遮挡（显示态自动把 screen/layer_bottom 背景透明，遮挡态置回
@@ -55,28 +57,31 @@ _NATIVE_ATTRS = frozenset((
 
 
 class Frame:
-    """camera.read() 的返回值：同一个对象既能喂 NPU，也能当 Image 用。
+    """read() 的返回值：同一个对象既能喂 NPU，也能当 Image 用。
 
     - .frame  原生 tdl_py.Frame（VPSS 帧的零拷贝映射）。nn 推理走它，
               不做任何像素转换；width/height/format/strides/data/plane()
               等原生属性直接透传（直接调 tdl_py 底层接口时传 .frame）
-    - .image  Image 视图：首次用到 find_*/draw_*/save/mode/to_addr 等
-              Image 能力时，才经 Frame.copy_to 转成紧凑图（RGB 通道约
-              1 MB，NV12 通道出灰度约 0.35 MB），之后缓存在本对象上；
-              直接写 frame.find_qrcodes() 即可，不必显式取 .image。
+    - .image  Image 视图。模块级 camera.read() 预装同侧 rgb 通道的
+              720x480 图；具体通道实例（camera.ai().read() 等）则在
+              首次用到 find_*/draw_*/save/mode/to_addr 时，才把本通道
+              Frame.copy_to 成紧凑图。直接写 frame.find_qrcodes() 即可，
+              不必显式取 .image。
               像素缓冲由 Camera 常驻复用、跨帧地址不变（lv.show 的控件
               复用与 to_lv 的"同尺寸不换地址"都靠它）
 
     生命周期与原生帧一致：出 with 块 / release() / 同相机下一次 read()
-    都使原生帧失效。Image 能力必须在帧有效期内**首次**触发（转换要读
-    帧内存），转换出的 Image 是拷贝、到同相机下一次 read() 前有效（之后
-    缓冲被新帧覆盖）。在帧上画框只改 Image 视图，NPU 看到的仍是原始帧。
+    都使原生帧失效。懒转换的 Image 必须在帧有效期内首次触发；模块级
+    camera.read() 的 RGB Image 已预装，无此限制。Image 是拷贝、到对应
+    rgb Camera 下一次 read() 前有效（之后缓冲被新帧覆盖）。在帧上画框
+    只改 Image 视图，NPU 看到的仍是原始 ai 帧。
     """
 
-    def __init__(self, camera, raw):
+    def __init__(self, camera, raw, image=None, image_camera=None):
         self._camera = camera
         self._raw = raw
-        self._image = None
+        self._image = image
+        self._image_camera = image_camera or camera
 
     @property
     def frame(self):
@@ -85,7 +90,8 @@ class Frame:
 
     @property
     def image(self):
-        """Image 视图（首次访问触发转换，要求帧仍有效）。"""
+        """Image 视图。模块级 camera.read() 已预装 720x480 RGB 图；
+        具体通道实例的 read() 首次访问才转换，且要求原生帧仍有效。"""
         if self._image is None:
             if not self._raw.valid:
                 raise RuntimeError(
@@ -114,10 +120,13 @@ class Frame:
         return getattr(self.image, name)   # Image 能力：首次触发转换
 
     def __repr__(self):
+        image_desc = ("image=grp%d/ch%d %dx%d" % (
+            self._image_camera.group, self._image_camera.channel,
+            self._image.width, self._image.height)
+            if self._image is not None else "image=lazy")
         return "<jyd.camera.Frame grp%d/ch%d %dx%d fmt=%d %s>" % (
             self._camera.group, self._camera.channel, self._raw.width,
-            self._raw.height, self._raw.format,
-            "image" if self._image is not None else "raw")
+            self._raw.height, self._raw.format, image_desc)
 
 
 class Camera:
@@ -239,18 +248,31 @@ def _get(factory, timeout_ms):
 
 
 def read(rear=None, timeout_ms=1000):
-    """从 ai 通道取一帧（640x640 RGB888_PLANAR，NN 推理输入），返回统一
-    Frame：model.run(frame) 零拷贝推理，frame.find_qrcodes() / lv.show(frame)
-    等 Image 能力按需转换。不传 rear 时走系统设置的默认摄像头；rear=True
-    走后摄 grp3/ch1，rear=False 走前摄 grp0/ch1。
+    """紧邻读取同侧 ai + rgb 两个通道，返回统一 Frame：
 
-    等价于 (rear_ai() if rear else ai()).read()：务必用
-    `with camera.read() as frame:`——出块即失效，推理/首次 Image 转换都
-    必须在块内完成。要 720x480 的帧同时推理和当图，用 camera.rgb().read()。"""
+    - model.run(frame) / frame.frame：ai 通道 640x640 原生帧，NPU 零拷贝
+    - frame.find_*/draw_*/show / frame.image：rgb 通道 720x480 紧凑 Image
+
+    两路在本函数内连续取得，避免先做几百毫秒推理、再取 RGB 图造成移动
+    目标的框与画面错位。不传 rear 时走系统设置的默认摄像头；rear=True
+    走后摄 grp3/ch1 + grp3/ch0，rear=False 走前摄 grp0/ch1 + grp0/ch0。
+
+    务必用 `with camera.read() as frame:`——出块会归还 ai 原生帧；
+    预装的 RGB Image 是拷贝，到下一次同侧 camera.read()/read_image()
+    覆盖 rgb 缓冲前有效。直接调用具体工厂的 Camera.read() 不配对其他
+    通道，仍按需把自身帧转成 Image。"""
     if rear is None:
         rear = default_is_rear()
-    cam = rear_ai(timeout_ms) if rear else ai(timeout_ms)
-    return cam.read()
+    frame_cam = rear_ai(timeout_ms) if rear else ai(timeout_ms)
+    image_cam = rear_rgb(timeout_ms) if rear else rgb(timeout_ms)
+    frame = frame_cam.read()
+    try:
+        frame._image = image_cam.read_image()
+        frame._image_camera = image_cam
+    except BaseException:
+        frame.release()       # RGB 取帧/转换失败，不能把已取的 ai 帧留在池里
+        raise
+    return frame
 
 
 def read_image(rear=None, timeout_ms=1000):
