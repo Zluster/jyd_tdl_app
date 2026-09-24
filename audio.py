@@ -125,9 +125,10 @@ class Audio:
 #: pause/resume/buffer_state.  See AudioFilePlayer for the file-level API.
 AudioOutputStream = tdl_py.AudioOutputStream
 
-#: Low-level MP3 decoding (minimp3 built into tdl_py): open(path), read(frames)
-#: -> S16LE bytes, seek(frame), sample_rate/channels/frames/duration_ms.
-Mp3Decoder = tdl_py.Mp3Decoder
+#: Optional low-level MP3 decoder.  Some CV184x ``tdl_py`` builds do not link
+#: minimp3; keep the rest of the audio API importable on those boards.
+Mp3Decoder = getattr(tdl_py, "Mp3Decoder", None)
+_MP3_UNAVAILABLE = "MP3 decoding is unavailable in this tdl_py build"
 
 
 class _WavSource:
@@ -171,6 +172,8 @@ class _Mp3Source:
     """PCM source over :class:`Mp3Decoder`; always signed 16-bit."""
 
     def __init__(self, path):
+        if Mp3Decoder is None:
+            raise ValueError(_MP3_UNAVAILABLE)
         decoder = Mp3Decoder()
         if not decoder.open(path):
             raise ValueError(decoder.last_error or "cannot decode MP3")
