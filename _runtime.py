@@ -37,8 +37,10 @@ VO 在首帧内容就绪后才 enable（避免上电垃圾帧，见 _ensure_vo�
 """
 
 import atexit
+import json
 import os
 import signal
+import socket
 import threading
 import _thread
 import time
@@ -132,6 +134,7 @@ class _Runtime:
         self._cleanup_registered = False
         self._exit_requested = False  # web 退出按钮置位，UI 循环检测
         self._flush_error = None      # _on_flush 内捕获的异常，UI 循环检测
+        self._stream_ready_notified = False
         self._mp_thread = None        # 初始化 MicroPython 的线程 id
         # 专职 UI 线程（jyd-ui）：显示初始化、tick 自转、转交队列消化
         # 都在该线程；用户线程的 lv 调用经 Mpyc 队列转交
@@ -343,6 +346,12 @@ class _Runtime:
             _thread.interrupt_main()       # 主线程收到 KeyboardInterrupt
 
     def _setup_display(self):
+        # 小核上电后可能遗留已使能的 VO。必须在把 live 相机绑定到 grp1
+        # 之前关闭它，否则首次启动时 LCD 会在 LVGL 首帧前短暂显示裸相机。
+        # _ensure_vo() 会在首个完整 UI flush 后按原有流程重新打开 VO。
+        if tdl_py.vo_is_enabled(0):
+            tdl_py.vo_force_disable(0, 0, 0)
+
         # 1) 媒体链路：live（前摄 grp0/ch2 或后摄 grp3/ch2）-> grp1 -> VO
         #    （幂等；预览段按 _preview_rear 对齐，可随时换源）
         self._apply_preview_source()
@@ -498,10 +507,35 @@ class _Runtime:
         # 循环在 tick 返回后检测并按致命错误处理（见 _ui_main）
         try:
             self._osd.update()
+            # 图传闸门只在 web 启动的 user app 中配置。OSD update 返回时，
+            # 当前 LVGL 帧已提交；此时放行 MJPEG 不会泄露 launcher 被停止后
+            # 的底层裸相机帧。通知失败绝不能影响显示回调。
+            self._notify_stream_ready()
             # 首帧渲染完成后才 enable VO，避免显示未初始化的画布
             self._ensure_vo()
         except BaseException as exc:
             self._flush_error = exc
+
+    def _notify_stream_ready(self):
+        """Best-effort, one-shot signal for the persistent MJPEG gate."""
+        if self._stream_ready_notified:
+            return
+        socket_path = os.environ.get("JYD_STREAM_GATE_SOCKET", "")
+        token = os.environ.get("JYD_STREAM_GATE_TOKEN", "")
+        if not socket_path or not token:
+            self._stream_ready_notified = True
+            return
+        try:
+            payload = json.dumps({"action": "ready", "token": token}).encode("utf-8")
+            with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as gate:
+                gate.setblocking(False)
+                gate.sendto(payload, socket_path)
+        except OSError as exc:
+            print("jyd: stream gate ready notification failed: %s" % exc)
+        finally:
+            # A missed notification is safer than repeatedly doing socket I/O
+            # in the high-frequency flush callback.
+            self._stream_ready_notified = True
 
     def show(self, fps=None):
         """兼容入口：确保显示通路就绪 + 可选帧率限速（sleep 补足）。
