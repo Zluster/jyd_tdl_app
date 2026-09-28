@@ -1,4 +1,7 @@
 #include <algorithm>
+#include <poll.h>
+#include <sys/stat.h>
+#include <sys/un.h>
 
 #include "mmf_cv184x_common.hpp"
 #include "mmf_cv184x_resources.hpp"
@@ -15,7 +18,13 @@ struct mmf_jpg_http_server {
   std::atomic<uint64_t> last_frame_sequence{0};
   std::thread worker;
   std::thread producer;
+  std::thread control;
   int listen_fd = -1;
+  std::atomic<int> control_fd{-1};
+  std::string control_socket_path;
+  std::mutex control_mutex;
+  std::string control_token;
+  bool frozen = false;
   std::mutex jpeg_mutex;
   std::condition_variable jpeg_cv;
   std::vector<std::uint8_t> last_jpeg;
@@ -457,6 +466,141 @@ static void close_fd(int* fd) {
   }
 }
 
+static std::string json_string_field(const char* message, const char* field) {
+  if (message == nullptr || field == nullptr) {
+    return std::string();
+  }
+  const std::string needle = std::string("\"") + field + "\"";
+  const char* begin = std::strstr(message, needle.c_str());
+  if (begin == nullptr) {
+    return std::string();
+  }
+  begin += needle.size();
+  while (*begin == ' ' || *begin == '\t' || *begin == '\r' || *begin == '\n') {
+    ++begin;
+  }
+  if (*begin != ':') {
+    return std::string();
+  }
+  ++begin;
+  while (*begin == ' ' || *begin == '\t' || *begin == '\r' || *begin == '\n') {
+    ++begin;
+  }
+  if (*begin != '\"') {
+    return std::string();
+  }
+  ++begin;
+  const char* end = std::strchr(begin, '\"');
+  return end == nullptr ? std::string() : std::string(begin, end);
+}
+
+static bool apply_http_control(mmf_jpg_http_server_t* server, const char* message) {
+  const std::string action = json_string_field(message, "action");
+  const std::string token = json_string_field(message, "token");
+  if (action.empty() || token.empty()) {
+    return false;
+  }
+
+  std::lock_guard<std::mutex> lock(server->control_mutex);
+  if (action == "freeze") {
+    server->control_token = token;
+    server->frozen = true;
+    std::fprintf(stderr, "jpg-http: frozen token=%s\n", token.c_str());
+    return true;
+  }
+  if ((action == "ready" || action == "cancel") && token == server->control_token) {
+    server->frozen = false;
+    server->control_token.clear();
+    std::fprintf(stderr, "jpg-http: %s token=%s\n", action.c_str(), token.c_str());
+    return true;
+  }
+  return false;
+}
+
+static void http_control_thread(mmf_jpg_http_server_t* server) {
+  while (!server->stop.load()) {
+    const int fd = server->control_fd.load();
+    if (fd < 0) {
+      break;
+    }
+    pollfd event;
+    std::memset(&event, 0, sizeof(event));
+    event.fd = fd;
+    event.events = POLLIN;
+    const int ready = ::poll(&event, 1, 250);
+    if (ready <= 0 || (event.revents & POLLIN) == 0) {
+      continue;
+    }
+    char message[512];
+    sockaddr_un peer;
+    std::memset(&peer, 0, sizeof(peer));
+    socklen_t peer_length = sizeof(peer);
+    const ssize_t bytes = ::recvfrom(fd, message, sizeof(message) - 1, 0,
+                                     reinterpret_cast<sockaddr*>(&peer), &peer_length);
+    if (bytes <= 0) {
+      continue;
+    }
+    message[bytes] = '\0';
+    const bool accepted = apply_http_control(server, message);
+    if (peer_length > 0) {
+      const char* reply = accepted ? "{\"ok\":true}" : "{\"ok\":false}";
+      (void)::sendto(fd, reply, std::strlen(reply), MSG_NOSIGNAL,
+                     reinterpret_cast<sockaddr*>(&peer), peer_length);
+    }
+  }
+}
+
+static bool start_http_control(mmf_jpg_http_server_t* server) {
+  if (server->control_socket_path.empty()) {
+    return true;
+  }
+  if (server->control_socket_path.size() >= sizeof(sockaddr_un::sun_path)) {
+    set_last_error("jpg-http control socket path is too long");
+    return false;
+  }
+  const int fd = ::socket(AF_UNIX, SOCK_DGRAM, 0);
+  if (fd < 0) {
+    set_last_error("jpg-http control socket failed");
+    return false;
+  }
+  sockaddr_un address;
+  std::memset(&address, 0, sizeof(address));
+  address.sun_family = AF_UNIX;
+  std::strncpy(address.sun_path, server->control_socket_path.c_str(),
+               sizeof(address.sun_path) - 1);
+  (void)::unlink(address.sun_path);
+  if (::bind(fd, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0) {
+    ::close(fd);
+    set_last_error("jpg-http control socket bind failed");
+    return false;
+  }
+  (void)::chmod(address.sun_path, 0666);
+  server->control_fd.store(fd);
+  try {
+    server->control = std::thread(http_control_thread, server);
+  } catch (...) {
+    server->control_fd.store(-1);
+    ::close(fd);
+    (void)::unlink(address.sun_path);
+    set_last_error("failed to create jpg http control thread");
+    return false;
+  }
+  return true;
+}
+
+static void stop_http_control(mmf_jpg_http_server_t* server) {
+  const int fd = server->control_fd.exchange(-1);
+  if (fd >= 0) {
+    ::close(fd);
+  }
+  if (server->control.joinable()) {
+    server->control.join();
+  }
+  if (!server->control_socket_path.empty()) {
+    (void)::unlink(server->control_socket_path.c_str());
+  }
+}
+
 static std::string http_path_from_request(const char* request) {
   if (request == nullptr) {
     return "/";
@@ -546,6 +690,10 @@ static bool wait_latest_http_jpeg(mmf_jpg_http_server_t* server, uint64_t last_s
 static void publish_http_jpeg_cache(mmf_jpg_http_server_t* server, const void* jpeg_data,
                                     size_t jpeg_bytes, uint64_t sequence, uint64_t timestamp_us) {
   if (server == nullptr || jpeg_data == nullptr || jpeg_bytes == 0) {
+    return;
+  }
+  std::lock_guard<std::mutex> control_lock(server->control_mutex);
+  if (server->frozen) {
     return;
   }
   const auto* data = static_cast<const uint8_t*>(jpeg_data);
@@ -839,6 +987,8 @@ void mmf_jpg_http_get_default_config(mmf_jpg_http_config_t* config) {
   config->jpeg_quality = 92;
   config->cache_max_frames = 2;
   config->venc_channel = kJpegHttpVencChannel;
+  config->control_socket_path = nullptr;
+  config->start_frozen_token = nullptr;
 }
 
 mmf_result_t mmf_jpg_http_open(const mmf_jpg_http_config_t* config,
@@ -847,6 +997,13 @@ mmf_result_t mmf_jpg_http_open(const mmf_jpg_http_config_t* config,
     return MMF_EINVAL;
   std::unique_ptr<mmf_jpg_http_server_t> ptr(new mmf_jpg_http_server_t);
   ptr->config = *config;
+  if (config->control_socket_path != nullptr) {
+    ptr->control_socket_path = config->control_socket_path;
+  }
+  if (config->start_frozen_token != nullptr && config->start_frozen_token[0] != '\0') {
+    ptr->control_token = config->start_frozen_token;
+    ptr->frozen = true;
+  }
   *server = ptr.release();
   return MMF_OK;
 }
@@ -865,6 +1022,11 @@ mmf_result_t mmf_jpg_http_start_stream(mmf_jpg_http_server_t* server) {
     return MMF_OK;
   server->stop.store(false);
   server->streaming.store(true);
+  if (!start_http_control(server)) {
+    server->streaming.store(false);
+    server->stop.store(true);
+    return MMF_EIO;
+  }
   try {
     server->worker = std::thread(http_server_thread, server);
     server->producer = std::thread(http_producer_thread, server);
@@ -874,6 +1036,7 @@ mmf_result_t mmf_jpg_http_start_stream(mmf_jpg_http_server_t* server) {
     if (server->worker.joinable()) {
       server->worker.join();
     }
+    stop_http_control(server);
     set_last_error("failed to create jpg http worker thread");
     return MMF_ENOMEM;
   }
@@ -888,6 +1051,7 @@ mmf_result_t mmf_jpg_http_stop_stream(mmf_jpg_http_server_t* server) {
   if (server->listen_fd >= 0) {
     ::shutdown(server->listen_fd, SHUT_RDWR);
   }
+  stop_http_control(server);
   server->jpeg_cv.notify_all();
   if (server->worker.joinable()) {
     server->worker.join();

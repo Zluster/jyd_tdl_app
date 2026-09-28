@@ -28,6 +28,10 @@ typedef struct {
   uint32_t jpeg_quality;
   uint32_t cache_max_frames;
   uint32_t venc_channel;
+  /* Optional Unix datagram socket used to freeze/resume cache publication. */
+  const char* control_socket_path;
+  /* Optional initial token. When set, output remains frozen until ready. */
+  const char* start_frozen_token;
 } mmf_jpg_http_config_t;
 
 typedef struct {

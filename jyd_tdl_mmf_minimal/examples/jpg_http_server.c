@@ -54,14 +54,28 @@ int main(int argc, char** argv) {
 
   mmf_system_init(&sys);
   mmf_jpg_http_get_default_config(&config);
-  config.camera_source = argc >= 3 ? parse_source(argv[2]) : MMF_CAMERA_SRC_LIVE;
+  const char* positional[6] = {0};
+  int positional_count = 0;
+  for (int index = 1; index < argc; ++index) {
+    if (strcmp(argv[index], "--control-socket") == 0 && index + 1 < argc) {
+      config.control_socket_path = argv[++index];
+    } else if (strcmp(argv[index], "--start-frozen-token") == 0 && index + 1 < argc) {
+      config.start_frozen_token = argv[++index];
+    } else if (positional_count < (int)(sizeof(positional) / sizeof(positional[0]))) {
+      positional[positional_count++] = argv[index];
+    } else {
+      fprintf(stderr, "unknown argument: %s\n", argv[index]);
+      return 2;
+    }
+  }
+  config.camera_source = positional_count >= 2 ? parse_source(positional[1]) : MMF_CAMERA_SRC_LIVE;
   config.mode = config.camera_source == MMF_CAMERA_SRC_SCREEN
                     ? MMF_JPG_HTTP_MODE_DISPLAY_PULL
                     : MMF_JPG_HTTP_MODE_CAMERA_PULL;
-  config.port = argc >= 2 ? (uint16_t)atoi(argv[1]) : 18090;
-  config.jpeg_quality = argc >= 4 ? (uint32_t)atoi(argv[3]) : 92;
-  config.fps = argc >= 5 ? (uint32_t)atoi(argv[4]) : 8;
-  config.venc_channel = argc >= 6 ? (uint32_t)atoi(argv[5]) : config.venc_channel;
+  config.port = positional_count >= 1 ? (uint16_t)atoi(positional[0]) : 18090;
+  config.jpeg_quality = positional_count >= 3 ? (uint32_t)atoi(positional[2]) : 92;
+  config.fps = positional_count >= 4 ? (uint32_t)atoi(positional[3]) : 8;
+  config.venc_channel = positional_count >= 5 ? (uint32_t)atoi(positional[4]) : config.venc_channel;
   if (config.port == 0)
     config.port = 18090;
   if (config.jpeg_quality < 1)
