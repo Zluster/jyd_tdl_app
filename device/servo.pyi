@@ -7,14 +7,14 @@ class ServoError(OSError):
 
 
 class Servo:
-    """A positional servo driven by 50 Hz PWM pulses."""
+    """A calibrated -45 through 225 degree positional servo."""
     _PERIOD_US = ...
-    def __init__(self, pwm_channel: int | str, min_us: int | float = ..., max_us: int | float = ..., angle_range: int | float = ..., *, auto_open: bool = ...) -> None:
+    def __init__(self, pwm_channel: int | str, min_us: int | float = ..., max_us: int | float = ..., min_angle: int | float = ..., max_angle: int | float = ..., *, auto_open: bool = ...) -> None:
         """Create a servo on a PWM identifier and optionally activate it."""
         ...
 
     def open(self) -> None:
-        """Open the PWM output and move the servo to zero degrees."""
+        """Open the PWM output at the calibrated -45 degree endpoint."""
         ...
 
     def close(self) -> None:
@@ -35,5 +35,5 @@ class Servo:
         ...
 
     def set_angle(self, angle: int | float) -> None:
-        """Set the servo angle from zero through the configured range."""
+        """Set the servo angle from -45 through 225 degrees by default."""
         ...

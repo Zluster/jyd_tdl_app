@@ -1614,18 +1614,66 @@ BOARD_CONFIG = BoardConfig(
                 chip=0,  # /dev/gpiochip0
                 num=26,
             ),
+            # Motor 1 direction: I2C1 SDA / D10 -> XGPIOB17.
+            "MOTOR1_DIR": GPIOInfo(
+                pin="D10",
+                pin_func="XGPIOB_17",
+                chip=1,  # /dev/gpiochip1 (XGPIOB)
+                num=17,
+            ),
+            # Motor 2 direction: I2C1 SCL / A10 -> XGPIOB18.
+            "MOTOR2_DIR": GPIOInfo(
+                pin="A10",
+                pin_func="XGPIOB_18",
+                chip=1,  # /dev/gpiochip1 (XGPIOB)
+                num=18,
+            ),
+            # Motor PWM pins used as GPIO outputs while stopped.  CV184x PWM
+            # disable does not guarantee a low level on the physical pin.
+            "MOTOR1_PWM_IDLE": GPIOInfo(
+                pin="M5",
+                pin_func="XGPIOA_16",
+                chip=0,  # /dev/gpiochip0 (XGPIOA)
+                num=16,
+            ),
+            "MOTOR2_PWM_IDLE": GPIOInfo(
+                pin="M4",
+                pin_func="XGPIOA_17",
+                chip=0,  # /dev/gpiochip0 (XGPIOA)
+                num=17,
+            ),
         },
         pwm={
-            # M4 shares the UART0 RX pad.  PWM5 is PWM controller 0,
-            # channel 5; PWM.open() switches the pad to PWM_5 on demand.
-            # Keep it disabled until the application explicitly enables it.
-            "PWM5": PWMInfo(
+            # Servo: UART2 TX / A12 -> PWM1.  Servo() applies its calibrated
+            # 50 Hz, 600 us .. 2400 us pulse range when it opens this output.
+            "SERVO": PWMInfo(
+                pin="A12",
+                pin_func="PWM_1",
+                chip=0,
+                num=1,
+                freq=50,
+                duty_cycle=0.03,
+                enable=False,
+            ),
+            # Motor 1 speed: UART0 TX / M5 -> PWM4.
+            "MOTOR1_PWM": PWMInfo(
+                pin="M5",
+                pin_func="PWM_4",
+                chip=0,
+                num=4,
+                freq=20_000,
+                duty_cycle=0.0,
+                enable=False,
+            ),
+            # Motor 2 speed: UART0 RX / M4 -> PWM5.  PWM2 remains reserved
+            # for the LCD backlight.
+            "MOTOR2_PWM": PWMInfo(
                 pin="M4",
                 pin_func="PWM_5",
                 chip=0,
                 num=5,
-                freq=1000,
-                duty_cycle=0.5,
+                freq=20_000,
+                duty_cycle=0.0,
                 enable=False,
             ),
         },

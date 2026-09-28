@@ -86,6 +86,11 @@ class PWM:
             PinMap.set_pin_function(self.info.pin, self.info.pin_func)
         self._periphery_instance = _PeripheryPWM(self.info.chip, self.info.num)
         try:
+            # A PWM channel can retain an enabled bootloader or previous-app
+            # configuration.  Disable it before shortening its period: the
+            # kernel rejects a new period smaller than the old duty cycle.
+            self.disable()
+            self.set_duty(0.0)
             self.set_freq(self._freq)
             self.set_duty(self._duty)
             if self._enable:
