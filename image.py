@@ -8,6 +8,8 @@ find_blobs/find_apriltags/...）与 _maix_image 完全一致，本模块只做�
     to_lv(img, parent)  Image -> 嵌入 LVGL 的 image 控件（零拷贝共享像素），
                         也可方法式调用：img.to_lv(lv.screen_active())
     show(img)           Image 同步渲染上屏
+    load_freetype()     加载 FreeType 矢量字体（缺省用包内捆绑的思源黑体，
+                        draw_string 即可渲染中文）；free_freetype() 释放
 
 凡接受 Image 的入口（to_lv / show / 控件 set_src / lv.show）也直接接受
 camera.read() 返回的 Frame——自动取其 Image 视图（首次触发转换）。
@@ -19,6 +21,8 @@ camera.read() 的 Frame 本身就能直接调 find_*/draw_* 等 Image 方法。
         img = image.from_frame(frame)   # 借帧内存，处理须在 with 块内完成
         codes = img.find_qrcodes()
 """
+
+import os
 
 import _maix_image as _mi
 
@@ -157,6 +161,29 @@ def show(img):
 # （class_<maix_image>(mo, "Image")，maix_image 是 C++ 类型名）
 _mi.Image.to_lv = to_lv
 _mi.Image.show = show
+
+
+#: 随包捆绑的默认矢量字体（思源黑体，含中文），load_freetype 的缺省路径
+_DEFAULT_FONT = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "_mp", "res", "font",
+    "SourceHanSansHWK-VF.ttf")
+
+
+def load_freetype(font_path=None, fontHeight=24):
+    """加载 FreeType 矢量字体，之后 draw_string 用它渲染文字（支持中文）。
+
+    显示通路建立时已用缺省参数自动加载，一般无需主动调用；要换字体或字号时再调，重复调用会替换已加载的
+    字体。font_path 缺省为包内捆绑的 SourceHanSansHWK-VF.ttf；
+    fontHeight 是渲染字号（像素高，必须大于 0）。释放用 free_freetype()。"""
+    path = font_path or _DEFAULT_FONT
+    if not os.path.exists(path):
+        raise FileNotFoundError("字体文件不存在: %s" % path)
+    return _mi.load_freetype(path, fontHeight)
+
+
+def free_freetype():
+    """释放 load_freetype 加载的字体。"""
+    return _mi.free_freetype()
 
 
 def from_frame(frame, mode="L"):

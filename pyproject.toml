@@ -45,6 +45,7 @@ dara = [
     "_mp/drive/*.py",
     "_mp/drive/*.png",
     "_mp/res/font/*.bin",
+    "_mp/res/font/*.ttf",
     "screen.pyi",
     "lv.pyi",
     "py.typed",

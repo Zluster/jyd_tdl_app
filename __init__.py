@@ -124,3 +124,9 @@ except BaseException:
     if _console is not None:
         _console.restore()
     raise
+
+try:
+    from . import image as _image
+    _image.load_freetype()
+except Exception as e:
+    print("jyd: 默认字体加载失败（draw_string 中文不可用）: %s" % e)

@@ -107,6 +107,9 @@ while True:
 
 - `img.to_lv(parent)` 把 Image 零拷贝显示为 LVGL 控件；等价写法
   `w = lv.image(scr); w.set_src(img)`。Image 像素被控件借用，需保活。
+- `img.draw_string(...)` 默认即可渲染中文：显示通路启动时已自动加载包内
+  捆绑的思源黑体（FreeType，字号 24）。要换字体或字号调
+  `image.load_freetype(path, fontHeight=...)`，释放用 `image.free_freetype()`。
 
 ## lv —— 嵌入 LVGL
 
